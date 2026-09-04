@@ -1,0 +1,15 @@
+{
+  "name": "slack-multica-relay",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "lint": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "@vercel/node": "^5.5.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.8"
+  }
+}
