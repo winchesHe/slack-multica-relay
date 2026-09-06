@@ -148,6 +148,7 @@ describe("durable admission", () => {
       messageKey: "T1:C1:100.000001",
       reason: "upstream_failed",
       errorType: "Error",
+      abortTimeoutSupported: true,
       durationMs: expect.any(Number),
     });
     expect(JSON.stringify(warning.mock.calls)).not.toContain("secret body");
@@ -164,10 +165,29 @@ describe("durable admission", () => {
       reason: "queue_publish_failed",
       errorType: "Error",
       queueStatus: 401,
+      abortTimeoutSupported: true,
       durationMs: expect.any(Number),
     });
     expect(JSON.stringify(warning.mock.calls)).not.toContain(
       "sensitive upstream body",
+    );
+  });
+  it("classifies request-construction errors without logging their message", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const f = vi
+      .fn<typeof fetch>()
+      .mockRejectedValue(new TypeError("invalid header contains a secret"));
+    await acceptSlack(request(event), env, f);
+    expect(warning).toHaveBeenCalledWith("relay_admission", {
+      messageKey: "T1:C1:100.000001",
+      reason: "upstream_failed",
+      errorType: "TypeError",
+      typeErrorCategory: "invalid_header",
+      abortTimeoutSupported: true,
+      durationMs: expect.any(Number),
+    });
+    expect(JSON.stringify(warning.mock.calls)).not.toContain(
+      "invalid header contains a secret",
     );
   });
   it("rejects invalid signature before network", async () => {

@@ -111,9 +111,22 @@ function queueFailureMetadata(error: unknown): Record<string, unknown> {
     error instanceof Error && record(error.cause) ? error.cause : undefined;
   return {
     errorType: error instanceof Error ? error.name : typeof error,
+    ...(error instanceof TypeError
+      ? { typeErrorCategory: typeErrorCategory(error) }
+      : {}),
     ...(error instanceof QueuePublishError ? { queueStatus: error.status } : {}),
     ...(typeof cause?.code === "string" ? { causeCode: cause.code } : {}),
+    abortTimeoutSupported: typeof AbortSignal.timeout === "function",
   };
+}
+function typeErrorCategory(error: TypeError): string {
+  const message = error.message.toLowerCase();
+  if (message.includes("header")) return "invalid_header";
+  if (message.includes("url")) return "invalid_url";
+  if (message.includes("signal") || message.includes("abort"))
+    return "invalid_abort_signal";
+  if (message.includes("fetch")) return "fetch_failed";
+  return "unclassified";
 }
 export async function acceptSlack(
   request: Request,
