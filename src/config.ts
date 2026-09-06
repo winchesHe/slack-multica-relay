@@ -1,65 +1,100 @@
 export interface RelayConfig {
   signingSecret: string;
-  multicaWebhookUrl: string;
-  multicaApiBaseUrl?: string;
-  multicaApiToken?: string;
-  multicaWorkspaceId?: string;
-  multicaAutopilotId?: string;
-  slackReactionToken: string;
-  slackReadToken: string;
-  slackReactionName: string;
+  teamId: string;
   targetUserIds: Set<string>;
   targetSubteamIds: Set<string>;
-  threadRoutingEnabled: boolean;
-  threadMappingTtlSeconds: number;
-  threadLockTtlSeconds: number;
-  kvRestApiUrl?: string;
-  kvRestApiToken?: string;
+  allowedChannelIds: Set<string>;
+  allowAllChannels: boolean;
+  blockedChannelIds: Set<string>;
+  allowedSenderIds: Set<string>;
+  allowAllSenders: boolean;
+  blockedSenderIds: Set<string>;
+  multicaApiBaseUrl: string;
+  multicaApiToken: string;
+  multicaWorkspaceId: string;
+  multicaProjectId: string;
+  multicaAgentId: string;
+  slackReactionToken: string;
+  slackReactionName: string;
+  kvRestApiUrl: string;
+  kvRestApiToken: string;
+  queueUrl: string;
+  queueToken: string;
+  queueCurrentSigningKey: string;
+  queueNextSigningKey: string;
+  consumerUrl: string;
 }
-
-export function loadRelayConfig(env: NodeJS.ProcessEnv = process.env): RelayConfig {
-  const threadRoutingEnabled = parseBoolean(env.SLACK_THREAD_ROUTING_ENABLED, false);
+export function loadRelayConfig(
+  env: NodeJS.ProcessEnv = process.env,
+): RelayConfig {
+  const allowedChannels = policyIds(env.SLACK_ALLOWED_CHANNEL_IDS || "all");
+  const blockedChannelIds = ids(env.SLACK_BLOCKED_CHANNEL_IDS);
+  const allowedSenders = policyIds(env.SLACK_ALLOWED_SENDER_IDS || "all");
+  const blockedSenderIds = ids(env.SLACK_BLOCKED_SENDER_IDS);
+  const targetUserIds = ids(env.SLACK_TARGET_USER_IDS);
+  const targetSubteamIds = ids(env.SLACK_TARGET_SUBTEAM_IDS);
+  if (!targetUserIds.size && !targetSubteamIds.size)
+    throw new Error("missing_mention_target");
   return {
-    signingSecret: required(env.SLACK_SIGNING_SECRET, 'SLACK_SIGNING_SECRET'),
-    multicaWebhookUrl: required(env.MULTICA_WEBHOOK_URL, 'MULTICA_WEBHOOK_URL'),
-    slackReactionToken: required(env.SLACK_REACTION_TOKEN, 'SLACK_REACTION_TOKEN'),
-    slackReadToken: required(env.SLACK_READ_TOKEN?.trim() || env.SLACK_REACTION_TOKEN, 'SLACK_READ_TOKEN'),
-    slackReactionName: normalizeReactionName(required(env.SLACK_REACTION_NAME, 'SLACK_REACTION_NAME')),
-    targetUserIds: csvSet(env.SLACK_TARGET_USER_IDS),
-    targetSubteamIds: csvSet(env.SLACK_TARGET_SUBTEAM_IDS),
-    threadRoutingEnabled,
-    ...(threadRoutingEnabled ? {
-      multicaApiBaseUrl: (env.MULTICA_API_BASE_URL ?? 'https://multica.devops.moego.dev').replace(/\/+$/u, ''),
-      multicaApiToken: required(env.MULTICA_API_TOKEN, 'MULTICA_API_TOKEN'),
-      multicaWorkspaceId: required(env.MULTICA_WORKSPACE_ID, 'MULTICA_WORKSPACE_ID'),
-      multicaAutopilotId: required(env.MULTICA_AUTOPILOT_ID, 'MULTICA_AUTOPILOT_ID'),
-      kvRestApiUrl: required(env.KV_REST_API_URL ?? env.UPSTASH_REDIS_REST_URL, 'KV_REST_API_URL').replace(/\/+$/u, ''),
-      kvRestApiToken: required(env.KV_REST_API_TOKEN ?? env.UPSTASH_REDIS_REST_TOKEN, 'KV_REST_API_TOKEN'),
-    } : {}),
-    threadMappingTtlSeconds: positiveInt(env.SLACK_THREAD_MAPPING_TTL_SECONDS, 90 * 24 * 60 * 60),
-    threadLockTtlSeconds: positiveInt(env.SLACK_THREAD_LOCK_TTL_SECONDS, 30),
+    signingSecret: required(env, "SLACK_SIGNING_SECRET"),
+    teamId: required(env, "SLACK_TEAM_ID"),
+    allowedChannelIds: allowedChannels.ids,
+    allowAllChannels: allowedChannels.all,
+    blockedChannelIds,
+    allowedSenderIds: allowedSenders.ids,
+    allowAllSenders: allowedSenders.all,
+    blockedSenderIds,
+    targetUserIds,
+    targetSubteamIds,
+    multicaApiBaseUrl: https(required(env, "MULTICA_API_BASE_URL")),
+    multicaApiToken: required(env, "MULTICA_API_TOKEN"),
+    multicaWorkspaceId: required(env, "MULTICA_WORKSPACE_ID"),
+    multicaProjectId: required(env, "MULTICA_PROJECT_ID"),
+    multicaAgentId: required(env, "MULTICA_AGENT_ID"),
+    slackReactionToken: required(env, "SLACK_REACTION_TOKEN"),
+    slackReactionName: required(env, "SLACK_REACTION_NAME").replace(
+      /^:+|:+$/gu,
+      "",
+    ),
+    kvRestApiUrl: https(required(env, "KV_REST_API_URL")),
+    kvRestApiToken: required(env, "KV_REST_API_TOKEN"),
+    queueUrl: https(env.QSTASH_URL?.trim() || "https://qstash.upstash.io"),
+    queueToken: required(env, "QSTASH_TOKEN"),
+    queueCurrentSigningKey: required(env, "QSTASH_CURRENT_SIGNING_KEY"),
+    queueNextSigningKey: required(env, "QSTASH_NEXT_SIGNING_KEY"),
+    consumerUrl: https(required(env, "RELAY_CONSUMER_URL")),
   };
 }
-
-function normalizeReactionName(value: string): string {
-  return value.replace(/^:+|:+$/gu, '');
+function required(env: NodeJS.ProcessEnv, key: string): string {
+  const value = env[key]?.trim();
+  if (!value) throw new Error("relay_not_configured");
+  return value;
 }
-
-function required(value: string | undefined, name: string): string {
-  if (!value?.trim()) throw new Error(`Missing ${name}`);
-  return value.trim();
+function ids(value: string | undefined): Set<string> {
+  const values = (value ?? "")
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
+  if (values.some((x) => !/^[A-Z][A-Z0-9]+$/u.test(x)))
+    throw new Error("invalid_identifier");
+  return new Set(values);
 }
-
-function csvSet(value: string | undefined): Set<string> {
-  return new Set((value ?? '').split(',').map((item) => item.trim()).filter(Boolean));
+function policyIds(value: string): { ids: Set<string>; all: boolean } {
+  const normalized = value.trim();
+  if (normalized.toLowerCase() === "all") return { ids: new Set(), all: true };
+  const parsed = ids(normalized);
+  if (!parsed.size) throw new Error("invalid_allowlist");
+  return { ids: parsed, all: false };
 }
-
-function parseBoolean(value: string | undefined, fallback: boolean): boolean {
-  if (value === undefined || value.trim() === '') return fallback;
-  return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase());
-}
-
-function positiveInt(value: string | undefined, fallback: number): number {
-  const parsed = Number.parseInt(value ?? '', 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+function https(value: string): string {
+  const url = new URL(value);
+  if (
+    url.protocol !== "https:" ||
+    url.username ||
+    url.password ||
+    url.hash ||
+    url.search
+  )
+    throw new Error("invalid_service_url");
+  return value.replace(/\/+$/u, "");
 }

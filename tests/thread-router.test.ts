@@ -1,113 +1,217 @@
-import { describe, expect, it } from 'vitest';
-import { routeSlackThreadEvent, type ThreadRouterConfig } from '../src/thread-router.js';
-import { MemoryThreadStore } from '../src/thread-store.js';
-
-function createConfig(fetchImpl: typeof fetch): ThreadRouterConfig {
-  return {
-    multicaWebhookUrl: 'https://multica.example/webhook',
-    multicaApiBaseUrl: 'https://multica.example',
-    multicaApiToken: 'mul_test',
-    multicaWorkspaceId: 'workspace-1',
-    multicaAutopilotId: 'ap-1',
-    slackReadToken: 'xoxp-test',
-    targetUserIds: new Set(['U123']),
-    targetSubteamIds: new Set(['S123']),
-    threadMappingTtlSeconds: 3600,
-    threadLockTtlSeconds: 30,
+import { describe, expect, it } from "vitest";
+import {
+  routeSlackThreadEvent,
+  type SlackThreadEvent,
+  type ThreadRouterConfig,
+} from "../src/thread-router.js";
+import { MemoryThreadStore } from "../src/thread-store.js";
+const root: SlackThreadEvent = {
+  teamId: "T1",
+  channelId: "C1",
+  messageTs: "100.000001",
+  threadTs: "100.000001",
+  senderUserId: "U2",
+  text: "<@U1> test",
+  mention: { type: "user", id: "U1" },
+};
+function fixture() {
+  const issues: {
+    id: string;
+    title: string;
+    description: string;
+    project_id: string;
+    assignee_type: string;
+    assignee_id: string;
+  }[] = [];
+  const comments: { id: string; content: string }[] = [];
+  let issuePosts = 0,
+    commentPosts = 0,
+    failIssue = false,
+    failComment = false;
+  const fetcher: typeof fetch = async (input, init) => {
+    const url = String(input);
+    if (url.includes("/api/issues?")) return Response.json({ issues });
+    if (url.endsWith("/api/issues")) {
+      issuePosts++;
+      const data = JSON.parse(String(init?.body));
+      const row = {
+        id: "issue-" + issuePosts,
+        title: data.title,
+        description: data.description,
+        project_id: "project",
+        assignee_type: "agent",
+        assignee_id: "agent",
+      };
+      issues.push(row);
+      if (failIssue) throw new DOMException("lost response", "TimeoutError");
+      return Response.json(row, { status: 201 });
+    }
+    if (url.includes("/comments")) {
+      if (init?.method === "POST") {
+        commentPosts++;
+        const row = {
+          id: "comment-" + commentPosts,
+          content: JSON.parse(String(init.body)).content,
+        };
+        comments.push(row);
+        if (failComment)
+          throw new DOMException("lost response", "TimeoutError");
+        return Response.json(row, { status: 201 });
+      }
+      return Response.json(comments);
+    }
+    throw new Error("unexpected endpoint");
+  };
+  const config: ThreadRouterConfig = {
+    multicaApiBaseUrl: "https://multica.test",
+    multicaApiToken: "test",
+    multicaWorkspaceId: "ws",
+    multicaProjectId: "project",
+    multicaAgentId: "agent",
     store: new MemoryThreadStore(),
   };
-}
-
-function fakeFetch() {
-  const comments: string[] = [];
-  let webhookCalls = 0;
-  const fetchImpl: typeof fetch = async (input, init) => {
-    const url = String(input);
-    if (url === 'https://multica.example/webhook') {
-      webhookCalls += 1;
-      return jsonResponse({ status: 'accepted', autopilot_id: 'ap-1', run_id: 'run-1' });
-    }
-    if (url.endsWith('/api/autopilots/ap-1/runs/run-1')) {
-      return jsonResponse({ id: 'run-1', autopilot_id: 'ap-1', issue_id: 'issue-1', status: 'queued' });
-    }
-    if (url.includes('/api/issues/issue-1/comments') && (init?.method ?? 'GET') === 'GET') {
-      return jsonResponse(comments.map((content, index) => ({ id: `comment-${index + 1}`, content })));
-    }
-    if (url.endsWith('/api/issues/issue-1/comments')) {
-      const body = JSON.parse(String(init?.body)) as { content: string };
-      comments.push(body.content);
-      return jsonResponse({ id: `comment-${comments.length}`, content: body.content }, 201);
-    }
-    throw new Error(`Unexpected URL ${url}`);
+  return {
+    config,
+    fetcher,
+    issues,
+    comments,
+    get issuePosts() {
+      return issuePosts;
+    },
+    get commentPosts() {
+      return commentPosts;
+    },
+    loseIssueResponse() {
+      failIssue = true;
+    },
+    loseCommentResponse() {
+      failComment = true;
+    },
   };
-  return { fetchImpl, comments, get webhookCalls() { return webhookCalls; } };
 }
-
-describe('routeSlackThreadEvent', () => {
-  it('creates one issue and only appends later messages that mention the target', async () => {
-    const fake = fakeFetch();
-    const config = createConfig(fake.fetchImpl);
-    const root = {
-      teamId: 'T1', channelId: 'C1', messageTs: '100.000001', threadTs: '100.000001',
-      senderUserId: 'U999', text: '<@U123> 请分析', mention: { type: 'user' as const, id: 'U123' },
-    };
-    const ordinaryFollowup = {
-      teamId: 'T1', channelId: 'C1', messageTs: '101.000001', threadTs: '100.000001',
-      senderUserId: 'U999', text: '补充一下复现步骤',
-    };
-    const mentionedFollowup = {
-      teamId: 'T1', channelId: 'C1', messageTs: '102.000001', threadTs: '100.000001',
-      senderUserId: 'U999', text: '<@U123> 请继续分析', mention: { type: 'user' as const, id: 'U123' },
-    };
-
-    await expect(routeSlackThreadEvent(root, config, fake.fetchImpl)).resolves.toMatchObject({ action: 'created', issueId: 'issue-1' });
-    await expect(routeSlackThreadEvent(ordinaryFollowup, config, fake.fetchImpl)).resolves.toMatchObject({ action: 'ignored' });
-    await expect(routeSlackThreadEvent(mentionedFollowup, config, fake.fetchImpl)).resolves.toMatchObject({ action: 'continued', issueId: 'issue-1' });
-
-    expect(fake.webhookCalls).toBe(1);
-    expect(fake.comments).toHaveLength(1);
-    expect(fake.comments[0]).toContain('请继续分析');
-    expect(fake.comments[0]).toContain('102.000001');
+describe("direct Issue routing", () => {
+  it("creates distinct issues for two simultaneous different Slack threads", async () => {
+    const f = fixture();
+    await Promise.all([
+      routeSlackThreadEvent(root, f.config, f.fetcher),
+      routeSlackThreadEvent(
+        { ...root, messageTs: "101.000001", threadTs: "101.000001" },
+        f.config,
+        f.fetcher,
+      ),
+    ]);
+    expect(f.issuePosts).toBe(2);
+    expect(f.issues[0]!.title).not.toBe(f.issues[1]!.title);
   });
-
-  it('keeps different root threads in different cards', async () => {
-    const fake = fakeFetch();
-    const config = createConfig(fake.fetchImpl);
-    const first = {
-      teamId: 'T1', channelId: 'C1', messageTs: '100.000001', threadTs: '100.000001',
-      text: '<@U123> one', mention: { type: 'user' as const, id: 'U123' },
-    };
-    const second = {
-      teamId: 'T1', channelId: 'C1', messageTs: '200.000001', threadTs: '200.000001',
-      text: '<!subteam^S123> two', mention: { type: 'subteam' as const, id: 'S123' },
-    };
-
-    await routeSlackThreadEvent(first, config, fake.fetchImpl);
-    await routeSlackThreadEvent(second, config, fake.fetchImpl);
-    expect(fake.webhookCalls).toBe(2);
+  it("one thread creates once and appends once per followup", async () => {
+    const f = fixture();
+    await routeSlackThreadEvent(root, f.config, f.fetcher);
+    expect(
+      (await routeSlackThreadEvent(root, f.config, f.fetcher)).action,
+    ).toBe("duplicate");
+    const next = { ...root, messageTs: "102.000001" };
+    await routeSlackThreadEvent(next, f.config, f.fetcher);
+    await routeSlackThreadEvent(next, f.config, f.fetcher);
+    expect(f.issuePosts).toBe(1);
+    expect(f.commentPosts).toBe(1);
   });
-
-  it('can recover the root mention when a reply arrives before the mapping', async () => {
-    const fake = fakeFetch();
-    const fetchImpl: typeof fetch = async (input, init) => {
-      const url = String(input);
-      if (url.startsWith('https://slack.com/api/conversations.replies')) {
-        return jsonResponse({ ok: true, messages: [{ ts: '300.000001', text: '<@U123> 根问题', user: 'U999' }] });
+  it("recovers a committed Issue after lost response without second POST", async () => {
+    const f = fixture();
+    f.loseIssueResponse();
+    await expect(
+      routeSlackThreadEvent(root, f.config, f.fetcher),
+    ).rejects.toThrow();
+    expect(
+      (await routeSlackThreadEvent(root, f.config, f.fetcher)).issueId,
+    ).toBe("issue-1");
+    expect(f.issuePosts).toBe(1);
+  });
+  it("does not blindly replay an ambiguous unconfirmed Issue POST", async () => {
+    const f = fixture();
+    f.loseIssueResponse();
+    await expect(
+      routeSlackThreadEvent(root, f.config, f.fetcher),
+    ).rejects.toThrow();
+    f.issues.splice(0);
+    await expect(
+      routeSlackThreadEvent(root, f.config, f.fetcher),
+    ).rejects.toThrow("ambiguous_issue_create");
+    expect(f.issuePosts).toBe(1);
+  });
+  it("recovers a committed comment after lost response without duplicate followup", async () => {
+    const f = fixture();
+    await routeSlackThreadEvent(root, f.config, f.fetcher);
+    f.loseCommentResponse();
+    const next = { ...root, messageTs: "102.000001" };
+    await expect(
+      routeSlackThreadEvent(next, f.config, f.fetcher),
+    ).rejects.toThrow();
+    await routeSlackThreadEvent(next, f.config, f.fetcher);
+    expect(f.commentPosts).toBe(1);
+  });
+  it("recovers original root identity after KV mapping expires", async () => {
+    const f = fixture();
+    await routeSlackThreadEvent(root, f.config, f.fetcher);
+    f.config.store = new MemoryThreadStore();
+    const result = await routeSlackThreadEvent(
+      { ...root, messageTs: "102.000001" },
+      f.config,
+      f.fetcher,
+    );
+    expect(result.action).toBe("comment_persisted");
+    expect(f.issuePosts).toBe(1);
+    expect(f.commentPosts).toBe(1);
+  });
+  it("does not POST while another worker owns the lock", async () => {
+    const f = fixture();
+    f.config.store.setIfAbsent = async () => false;
+    await expect(
+      routeSlackThreadEvent(root, f.config, f.fetcher),
+    ).rejects.toThrow("thread_lock_busy");
+    expect(f.issuePosts).toBe(0);
+  });
+  it("retains both requests when a rejected first create is overtaken by a followup", async () => {
+    const f = fixture();
+    let reject = true;
+    const fetcher: typeof fetch = async (input, init) => {
+      if (reject && String(input).endsWith("/api/issues")) {
+        reject = false;
+        return Response.json({ error: "rate_limited" }, { status: 429 });
       }
-      return fake.fetchImpl(input, init);
+      return f.fetcher(input, init);
     };
-    const config = createConfig(fetchImpl);
-    const reply = {
-      teamId: 'T1', channelId: 'C1', messageTs: '301.000001', threadTs: '300.000001',
-      senderUserId: 'U888', text: '<@U123> 我补充一个现象', mention: { type: 'user' as const, id: 'U123' },
-    };
-
-    await expect(routeSlackThreadEvent(reply, config, fetchImpl)).resolves.toMatchObject({ action: 'created', issueId: 'issue-1' });
-    expect(fake.webhookCalls).toBe(1);
-    expect(fake.comments[0]).toContain('我补充一个现象');
+    await expect(
+      routeSlackThreadEvent(root, f.config, fetcher),
+    ).rejects.toThrow();
+    await routeSlackThreadEvent(
+      { ...root, messageTs: "102.000001", text: "<@U1> B" },
+      f.config,
+      fetcher,
+    );
+    await routeSlackThreadEvent(root, f.config, fetcher);
+    expect(f.issuePosts).toBe(1);
+    expect(f.commentPosts).toBe(1);
+    expect(f.issues[0]!.description).toContain("<@U1> B");
+    expect(f.comments[0]!.content).toContain("<@U1> test");
+  });
+  it("does not adopt a different configured Agent scope", async () => {
+    const f = fixture();
+    await routeSlackThreadEvent(root, f.config, f.fetcher);
+    await routeSlackThreadEvent(
+      root,
+      { ...f.config, multicaAgentId: "another-agent" },
+      f.fetcher,
+    );
+    expect(f.issuePosts).toBe(2);
+  });
+  it("does not recover an Issue assigned to another Agent", async () => {
+    const f = fixture();
+    await routeSlackThreadEvent(root, f.config, f.fetcher);
+    f.issues[0]!.assignee_id = "another-agent";
+    f.config.store = new MemoryThreadStore();
+    await expect(
+      routeSlackThreadEvent(root, f.config, f.fetcher),
+    ).rejects.toThrow("invalid_issue_scope");
+    expect(f.issuePosts).toBe(1);
   });
 });
-
-function jsonResponse(value: unknown, status = 200): Response {
-  return new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } });
-}

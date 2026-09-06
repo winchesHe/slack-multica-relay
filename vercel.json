@@ -3,6 +3,9 @@
   "functions": {
     "api/slack/events.ts": {
       "maxDuration": 10
+    },
+    "api/queue/consume.ts": {
+      "maxDuration": 60
     }
   }
 }

@@ -1,53 +1,42 @@
 # Slack → Multica Relay
 
-这个项目是一个部署到 Vercel 的 Slack HTTP Events API 中转层。它负责接收 Slack 事件、识别 @真人 / @User Group、给命中的消息添加 reaction，并触发 Multica Autopilot；最终 thread 回复由 Multica Agent 的 Slack skill 完成。
+在获准频道中 @真人或 User Group，把请求交给 Multica 的专用 Agent，执行环境可以是本地 Codex。适配 Vercel Functions 与 EdgeOne Cloud Functions，共用同一套处理逻辑。
 
-启用 `SLACK_THREAD_ROUTING_ENABLED=true` 后，Vercel 会以 Slack 根 `thread_ts` 作为会话键：第一次 mention 创建 Multica issue，后续同一 thread 的消息写入该 issue 的评论，因此任务看板只保留一张卡片。线程映射、并发锁和消息幂等状态保存在 Upstash/Vercel KV 中。
+## 链路
 
-## 本地检查
+`Slack → 签名与准入校验 → QStash 持久化 → HTTP 200 → 消费函数 → Multica Issue → Agent/Runtime → Slack 回复`
 
-在本目录安装依赖后运行：
+- 只处理当前消息明确 mention 的事件。Team 必填；频道和发送者支持白名单（可设为 `all`）及黑名单，黑名单优先。Bot、编辑/删除、普通讨论不触发。
+- 入站只等待 QStash 接收；队列负责后台投递及3次重试，耗尽后在其失败队列查看/重放。
+- 每个 Slack thread 通过普通 Issue API 创建独立任务卡，不经过 Autopilot 同标题60秒去重。
+- thread scope 包含 Workspace、Project、Agent；不同 Agent 配置不采用彼此的映射。
+- 同 thread 后续消息追加评论。QStash 按 thread 限并发，Redis 锁与消息状态处理重投。
+- 写请求结果不明时先查回读；查不到则保留 ambiguous 错误，不盲目再次 POST。需要人工核对/重放，不承诺 exactly-once。
+- `comment_persisted` 只表示评论保存，实际执行和原 thread 回复要分别验收。
+- Prompt 真源为 [AGENT-PROMPT.md](AGENT-PROMPT.md)，需要明确同步到 Multica Agent instructions。Relay 不调用 Codex 或修改 Multica 源码。
+
+## 本地验证
 
 ```bash
+pnpm install --frozen-lockfile
 pnpm test
 pnpm lint
 ```
 
-## Vercel 部署
+配置与两平台部署见 [搭建手册](SETUP-GUIDE.zh-CN.md)，契约边界见 [审查记录](REVIEW.md)。
 
-1. 在 Vercel 创建一个新项目，Root Directory 选择本目录 `slack-multica-relay`。
-2. 按 `.env.example` 配置环境变量。
-3. 部署后，把以下地址填入 Slack App → Event Subscriptions → Request URL：
+## 状态与日志
 
-   ```text
-   https://<你的域名>/api/slack/events
-   ```
+日志记录关联标识、耗时和有限错误码。正文保存在队列和 Multica；Redis 保存线程/消息状态，不存 pending 正文。状态保留90天。内容级调试日志尚未启用，凭据不进入日志。
 
-4. Slack 完成 URL verification 后，在 **Subscribe to events on behalf of users** 下订阅 `message.channels`、`message.groups`、`message.im`、`message.mpim`，并确保授权用户拥有对应的消息读取权限。
-5. 在 Multica 创建 Autopilot Webhook，将完整 URL 配置到 `MULTICA_WEBHOOK_URL`。
+| 接口结果                | 含义                                                                   |
+| ----------------------- | ---------------------------------------------------------------------- |
+| 入站 accepted / HTTP200 | QStash 已接收，不代表 Agent 完成                                       |
+| 入站 ignored / HTTP200  | 不满足触发范围                                                         |
+| 入站503                 | 收件未确认，交给 Slack 重试                                            |
+| 消费 created            | Issue 已创建或从回读恢复                                               |
+| 消费 comment_persisted  | 后续评论已保存                                                         |
+| 消费 duplicate          | 已处理的消息                                                           |
+| 消费503                 | 保留队列重试/DLQ责任，原因包括 timeout、thread*lock_busy、ambiguous*\* |
 
-线程归并还需要配置 `MULTICA_API_TOKEN`、`MULTICA_WORKSPACE_ID`、`MULTICA_API_BASE_URL` 和 KV REST 凭证，并将 `SLACK_THREAD_ROUTING_ENABLED` 设为 `true`。`MULTICA_API_TOKEN` 是 Multica Personal Access Token，不是 Slack Token。
-
-## 事件处理约定
-
-- 真人 mention 使用 `<@U...>` 匹配。
-- User Group mention 使用 `<!subteam^S...>` 匹配。
-- 用户级事件只会覆盖授权用户本身有权限看到的会话；Bot 不需要加入这些频道。
-- 首条消息仍使用 `teamId:channelId:messageTs` 作为 Multica `Idempotency-Key`，保证 Slack 重试不会重复建卡；线程映射键使用 `teamId:channelId:threadTs`。
-- 同一根 thread 的后续消息追加到同一 Multica issue；Multica 会按 issue 的原生评论规则合并或排队 follow-up run。
-- Bot 消息、编辑/删除事件，以及不在已跟踪 thread 中且不命中目标 mention 的消息会被忽略。
-- 不要用 Agent 的 User ID 做全局忽略条件：当 Agent 和人工操作者使用同一个 User Token 时，会把人工 mention 一并误过滤。Relay 继续依靠 Slack 的 `bot_id` / 编辑删除 subtype 过滤；若将来 Agent 必须以 User 身份发消息，应通过 Slack message metadata 增加可识别标记。
-- payload 会把原始 `channelId`、`threadTs`、`messageTs`、发送者和文本交给 Multica Agent。
-- 命中消息的 reaction 由 Vercel 使用 `SLACK_REACTION_TOKEN` 调用 `reactions.add` 添加；`already_reacted` 会按成功处理。
-
-## 健康检查
-
-```text
-GET /api/health
-```
-
-预期返回：
-
-```json
-{"ok":true,"service":"slack-multica-relay"}
-```
+`GET /api/health` 仅证明函数可响应。消费有45秒整体预算，部署函数上限60秒；入站发布请求超时2秒。平台冷启动、网络延迟与配额仍须实测。
