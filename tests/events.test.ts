@@ -85,22 +85,41 @@ describe("durable admission", () => {
     await acceptSlack(request(event, "T2"), env, f);
     expect(f).not.toHaveBeenCalled();
   });
-  it.each(["", ", ,"])(
-    "fails closed for empty channel config %s",
-    async (value) => {
-      const f = vi.fn<typeof fetch>();
-      expect(
-        (
-          await acceptSlack(
-            request(event),
-            { ...env, SLACK_ALLOWED_CHANNEL_IDS: value },
-            f,
-          )
-        ).status,
-      ).toBe(500);
-      expect(f).not.toHaveBeenCalled();
-    },
-  );
+  it("accepts all as the channel allowlist", async () => {
+    const f = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(Response.json({ messageId: "msg" }));
+    const response = await acceptSlack(
+      request({ ...event, channel: "C2" }),
+      { ...env, SLACK_ALLOWED_CHANNEL_IDS: "all" },
+      f,
+    );
+    expect(response.status).toBe(200);
+    expect(f).toHaveBeenCalledTimes(1);
+  });
+  it("defaults the channel allowlist to all when omitted", async () => {
+    const f = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(Response.json({ messageId: "msg" }));
+    const { SLACK_ALLOWED_CHANNEL_IDS: _ignored, ...withoutChannelAllowlist } = env;
+    const response = await acceptSlack(
+      request({ ...event, channel: "C2" }),
+      withoutChannelAllowlist,
+      f,
+    );
+    expect(response.status).toBe(200);
+    expect(f).toHaveBeenCalledTimes(1);
+  });
+  it("blocks a channel even when the allowlist is all", async () => {
+    const f = vi.fn<typeof fetch>();
+    const response = await acceptSlack(
+      request({ ...event, channel: "C2" }),
+      { ...env, SLACK_ALLOWED_CHANNEL_IDS: "all", SLACK_BLOCKED_CHANNEL_IDS: "C2" },
+      f,
+    );
+    expect(await response.json()).toEqual({ action: "ignored", reason: "not_allowed" });
+    expect(f).not.toHaveBeenCalled();
+  });
   it("applies sender policy", async () => {
     const f = vi.fn<typeof fetch>();
     await acceptSlack(
@@ -108,6 +127,16 @@ describe("durable admission", () => {
       { ...env, SLACK_ALLOWED_SENDER_IDS: "U3" },
       f,
     );
+    expect(f).not.toHaveBeenCalled();
+  });
+  it("blocks a sender even when the sender allowlist is all", async () => {
+    const f = vi.fn<typeof fetch>();
+    const response = await acceptSlack(
+      request(event),
+      { ...env, SLACK_ALLOWED_SENDER_IDS: "all", SLACK_BLOCKED_SENDER_IDS: "U2" },
+      f,
+    );
+    expect(await response.json()).toEqual({ action: "ignored", reason: "not_allowed" });
     expect(f).not.toHaveBeenCalled();
   });
   it("keeps Slack retry ownership when queue publish fails", async () => {

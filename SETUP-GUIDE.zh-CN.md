@@ -12,7 +12,7 @@
 
 - 在目标 Workspace 创建专用 Project 和 Agent，绑定需要使用的 Runtime。
 - 将 [AGENT-PROMPT.md](AGENT-PROMPT.md) 同步为 Agent instructions。
-- 配置 Agent 的 RELAY_ALLOWED_CHANNEL_ID、RELAY_OWNER_SLACK_USER_ID、RELAY_SKILL_ROOT。
+- 配置 Agent 的 `RELAY_OWNER_SLACK_USER_ID`、`RELAY_SKILL_ROOT`。频道和发送者的白名单/黑名单由 Relay 统一校验，Agent 不再读取单频道 `RELAY_ALLOWED_CHANNEL_ID`。
 - Slack 操作使用被授权的 USER token；每次 CLI 调用显式覆盖 SLACK_BOT_TOKEN 与 SLACK_TOKEN，防止 shell/Skill 配置选到 Bot。
 - 回读 Agent 的 Runtime、权限和并发。初期并发2即可；Mac 休眠/断网会影响执行。
 - 读取本地 Skills 和 Workspace 指派 Skills 的实际加载结果。数据库 Skill 数量不能单独说明任务可用能力。
@@ -26,7 +26,7 @@ Agent instructions 写入任务工作目录 AGENTS.md。Multica daemon 为 Codex
 
 配置 Request URL 为 `https://<当前部署>/api/slack/events`，对应 Signing Secret 填入部署环境。新增 scopes 后重新安装。只修改已授权用于 Relay 的 App。
 
-SLACK_TEAM_ID、SLACK_TARGET_USER_IDS 和 SLACK_ALLOWED_CHANNEL_IDS 必填；试验可同时将 SLACK_ALLOWED_SENDER_IDS 限制为 owner。后续问答仍需再次 mention。
+`SLACK_TEAM_ID`、`SLACK_TARGET_USER_IDS` 和 `SLACK_TARGET_SUBTEAM_IDS` 至少一个必填；`SLACK_ALLOWED_CHANNEL_IDS` 保留为白名单配置，默认使用 `all`，也可填写逗号分隔的频道 ID。`SLACK_BLOCKED_CHANNEL_IDS`、`SLACK_ALLOWED_SENDER_IDS` 和 `SLACK_BLOCKED_SENDER_IDS` 可选，黑名单优先于白名单。后续问答仍需再次 mention。
 
 ## 4. Vercel
 

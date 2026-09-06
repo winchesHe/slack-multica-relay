@@ -75,7 +75,16 @@ export async function findIssue(
       x.description?.startsWith(marker + "\n"),
     );
     if (matches.length > 1) throw new Error("ambiguous_issue_mapping");
-    if (matches[0]) return matches[0];
+    if (matches[0]) {
+      const candidate = matches[0];
+      if (
+        candidate.project_id !== config.multicaProjectId ||
+        candidate.assignee_type !== "agent" ||
+        candidate.assignee_id !== config.multicaAgentId
+      )
+        throw new Error("invalid_issue_scope");
+      return candidate;
+    }
     if (rows.length < 100) return;
   }
   throw new Error("issue_lookup_limit");

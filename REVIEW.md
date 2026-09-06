@@ -18,6 +18,8 @@ Issue查询扫描专用Project，读取description marker；评论查询按服�
 
 QStash持久化接收后才能ACK Slack；后台消费失败由队列重试，耗尽可在DLQ检查和重放。QStash、Redis和托管函数是需要分别配置与验收的外部组件。
 
+Relay 的频道和发送者准入同时支持白名单与黑名单。白名单可使用 `all`，黑名单优先；入站和队列消费使用同一套策略。目标用户/User Group 配置仍用于判断是否触发任务。
+
 评论HTTP201表示已保存，可能不触发Agent。Relay返回comment_persisted，不能当作任务执行证明。最终结果以Multica任务和Slack原thread双重回读为准。
 
 ## 本地Codex

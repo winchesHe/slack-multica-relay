@@ -4,7 +4,11 @@ export interface RelayConfig {
   targetUserIds: Set<string>;
   targetSubteamIds: Set<string>;
   allowedChannelIds: Set<string>;
+  allowAllChannels: boolean;
+  blockedChannelIds: Set<string>;
   allowedSenderIds: Set<string>;
+  allowAllSenders: boolean;
+  blockedSenderIds: Set<string>;
   multicaApiBaseUrl: string;
   multicaApiToken: string;
   multicaWorkspaceId: string;
@@ -23,22 +27,23 @@ export interface RelayConfig {
 export function loadRelayConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): RelayConfig {
-  const allowedChannelIds = ids(required(env, "SLACK_ALLOWED_CHANNEL_IDS"));
-  const allowedSenderIds = ids(env.SLACK_ALLOWED_SENDER_IDS);
+  const allowedChannels = policyIds(env.SLACK_ALLOWED_CHANNEL_IDS || "all");
+  const blockedChannelIds = ids(env.SLACK_BLOCKED_CHANNEL_IDS);
+  const allowedSenders = policyIds(env.SLACK_ALLOWED_SENDER_IDS || "all");
+  const blockedSenderIds = ids(env.SLACK_BLOCKED_SENDER_IDS);
   const targetUserIds = ids(env.SLACK_TARGET_USER_IDS);
   const targetSubteamIds = ids(env.SLACK_TARGET_SUBTEAM_IDS);
-  if (
-    !allowedChannelIds.size ||
-    (env.SLACK_ALLOWED_SENDER_IDS?.trim() && !allowedSenderIds.size)
-  )
-    throw new Error("invalid_allowlist");
   if (!targetUserIds.size && !targetSubteamIds.size)
     throw new Error("missing_mention_target");
   return {
     signingSecret: required(env, "SLACK_SIGNING_SECRET"),
     teamId: required(env, "SLACK_TEAM_ID"),
-    allowedChannelIds,
-    allowedSenderIds,
+    allowedChannelIds: allowedChannels.ids,
+    allowAllChannels: allowedChannels.all,
+    blockedChannelIds,
+    allowedSenderIds: allowedSenders.ids,
+    allowAllSenders: allowedSenders.all,
+    blockedSenderIds,
     targetUserIds,
     targetSubteamIds,
     multicaApiBaseUrl: https(required(env, "MULTICA_API_BASE_URL")),
@@ -73,6 +78,13 @@ function ids(value: string | undefined): Set<string> {
   if (values.some((x) => !/^[A-Z][A-Z0-9]+$/u.test(x)))
     throw new Error("invalid_identifier");
   return new Set(values);
+}
+function policyIds(value: string): { ids: Set<string>; all: boolean } {
+  const normalized = value.trim();
+  if (normalized.toLowerCase() === "all") return { ids: new Set(), all: true };
+  const parsed = ids(normalized);
+  if (!parsed.size) throw new Error("invalid_allowlist");
+  return { ids: parsed, all: false };
 }
 function https(value: string): string {
   const url = new URL(value);

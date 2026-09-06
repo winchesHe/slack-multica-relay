@@ -15,7 +15,14 @@ const root: SlackThreadEvent = {
   mention: { type: "user", id: "U1" },
 };
 function fixture() {
-  const issues: { id: string; title: string; description: string }[] = [];
+  const issues: {
+    id: string;
+    title: string;
+    description: string;
+    project_id: string;
+    assignee_type: string;
+    assignee_id: string;
+  }[] = [];
   const comments: { id: string; content: string }[] = [];
   let issuePosts = 0,
     commentPosts = 0,
@@ -31,6 +38,9 @@ function fixture() {
         id: "issue-" + issuePosts,
         title: data.title,
         description: data.description,
+        project_id: "project",
+        assignee_type: "agent",
+        assignee_id: "agent",
       };
       issues.push(row);
       if (failIssue) throw new DOMException("lost response", "TimeoutError");
@@ -193,5 +203,15 @@ describe("direct Issue routing", () => {
       f.fetcher,
     );
     expect(f.issuePosts).toBe(2);
+  });
+  it("does not recover an Issue assigned to another Agent", async () => {
+    const f = fixture();
+    await routeSlackThreadEvent(root, f.config, f.fetcher);
+    f.issues[0]!.assignee_id = "another-agent";
+    f.config.store = new MemoryThreadStore();
+    await expect(
+      routeSlackThreadEvent(root, f.config, f.fetcher),
+    ).rejects.toThrow("invalid_issue_scope");
+    expect(f.issuePosts).toBe(1);
   });
 });

@@ -43,9 +43,10 @@ function record(value: unknown): value is Record<string, unknown> {
 function admitted(event: SlackThreadEvent, config: RelayConfig): boolean {
   return (
     event.teamId === config.teamId &&
-    config.allowedChannelIds.has(event.channelId) &&
-    (config.allowedSenderIds.size === 0 ||
-      config.allowedSenderIds.has(event.senderUserId)) &&
+    (config.allowAllChannels || config.allowedChannelIds.has(event.channelId)) &&
+    !config.blockedChannelIds.has(event.channelId) &&
+    (config.allowAllSenders || config.allowedSenderIds.has(event.senderUserId)) &&
+    !config.blockedSenderIds.has(event.senderUserId) &&
     !!findTargetMention(
       event.text,
       config.targetUserIds,
@@ -87,6 +88,7 @@ function reason(error: unknown): string {
     "ambiguous_comment_create",
     "invalid_thread_state",
     "ambiguous_issue_mapping",
+    "invalid_issue_scope",
     "issue_lookup_limit",
     "comment_lookup_limit",
     "multica_http_error",

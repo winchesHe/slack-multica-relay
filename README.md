@@ -6,7 +6,7 @@
 
 `Slack → 签名与准入校验 → QStash 持久化 → HTTP 200 → 消费函数 → Multica Issue → Agent/Runtime → Slack 回复`
 
-- 只处理当前消息明确 mention 的事件。Team、频道必填；发送者 allowlist 可选。Bot、编辑/删除、普通讨论不触发。
+- 只处理当前消息明确 mention 的事件。Team 必填；频道和发送者支持白名单（可设为 `all`）及黑名单，黑名单优先。Bot、编辑/删除、普通讨论不触发。
 - 入站只等待 QStash 接收；队列负责后台投递及3次重试，耗尽后在其失败队列查看/重放。
 - 每个 Slack thread 通过普通 Issue API 创建独立任务卡，不经过 Autopilot 同标题60秒去重。
 - thread scope 包含 Workspace、Project、Agent；不同 Agent 配置不采用彼此的映射。
