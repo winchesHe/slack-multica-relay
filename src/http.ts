@@ -94,10 +94,26 @@ function reason(error: unknown): string {
     "multica_http_error",
     "invalid_multica_response",
     "invalid_comment_cursor",
+    "queue_publish_failed",
+    "invalid_queue_response",
   ];
   return error instanceof Error && codes.includes(error.message)
     ? error.message
     : "upstream_failed";
+}
+class QueuePublishError extends Error {
+  constructor(readonly status: number) {
+    super("queue_publish_failed");
+  }
+}
+function queueFailureMetadata(error: unknown): Record<string, unknown> {
+  const cause =
+    error instanceof Error && record(error.cause) ? error.cause : undefined;
+  return {
+    errorType: error instanceof Error ? error.name : typeof error,
+    ...(error instanceof QueuePublishError ? { queueStatus: error.status } : {}),
+    ...(typeof cause?.code === "string" ? { causeCode: cause.code } : {}),
+  };
 }
 export async function acceptSlack(
   request: Request,
@@ -197,7 +213,7 @@ export async function acceptSlack(
         signal: AbortSignal.timeout(2000),
       },
     );
-    if (!response.ok) throw new Error("queue_publish_failed");
+    if (!response.ok) throw new QueuePublishError(response.status);
     const queued: unknown = await response.json();
     if (!record(queued) || typeof queued.messageId !== "string")
       throw new Error("invalid_queue_response");
@@ -211,6 +227,7 @@ export async function acceptSlack(
     console.warn("relay_admission", {
       messageKey: messageKey(payload),
       reason: reason(error),
+      ...queueFailureMetadata(error),
       durationMs: Date.now() - start,
     });
     return json({ error: "queue_unavailable", retryable: true }, 503);

@@ -140,12 +140,34 @@ describe("durable admission", () => {
     expect(f).not.toHaveBeenCalled();
   });
   it("keeps Slack retry ownership when queue publish fails", async () => {
-    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
     const f = vi.fn<typeof fetch>().mockRejectedValue(new Error("secret body"));
     const response = await acceptSlack(request(event), env, f);
     expect(response.status).toBe(503);
-    expect(JSON.stringify(vi.mocked(console.warn).mock.calls)).not.toContain(
-      "secret body",
+    expect(warning).toHaveBeenCalledWith("relay_admission", {
+      messageKey: "T1:C1:100.000001",
+      reason: "upstream_failed",
+      errorType: "Error",
+      durationMs: expect.any(Number),
+    });
+    expect(JSON.stringify(warning.mock.calls)).not.toContain("secret body");
+  });
+  it("logs the QStash status without logging its response body", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const f = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response("sensitive upstream body", { status: 401 }));
+    const response = await acceptSlack(request(event), env, f);
+    expect(response.status).toBe(503);
+    expect(warning).toHaveBeenCalledWith("relay_admission", {
+      messageKey: "T1:C1:100.000001",
+      reason: "queue_publish_failed",
+      errorType: "Error",
+      queueStatus: 401,
+      durationMs: expect.any(Number),
+    });
+    expect(JSON.stringify(warning.mock.calls)).not.toContain(
+      "sensitive upstream body",
     );
   });
   it("rejects invalid signature before network", async () => {
