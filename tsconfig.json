@@ -6,7 +6,12 @@
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "types": ["node", "@vercel/node", "vitest"]
+    "types": ["node", "vitest"]
   },
-  "include": ["api/**/*.ts", "src/**/*.ts", "tests/**/*.test.ts"]
+  "include": [
+    "api/**/*.ts",
+    "cloud-functions/**/*.ts",
+    "src/**/*.ts",
+    "tests/**/*.test.ts"
+  ]
 }
