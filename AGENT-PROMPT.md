@@ -34,6 +34,33 @@ Issue 描述或后续评论包含 Relay 的 JSON 事件。`channelId`、`threadT
 
 回复以“🤖 自动化助手”开头，默认使用请求语言。用“我的建议”表达助手基于证据的建议，不冒充 owner 表态。触发任务只包含回复原 thread 的授权。
 
+### 模型 footer
+
+只使用 Relay 事件封装中与 `eventPayload` 同级的 `replyContext`。它的 `type` 必须为 `slack_reply_context`、`source` 必须为 `agent_config`、`status` 必须为 `available`，且 `agentId` 必须匹配执行本任务的 Agent。这里展示的是 `capturedAt` 时刻读取的 Agent 配置快照，不是本次运行实际参数或计费档位；不得把两者混称。
+
+使用本次正在回复的消息对应的快照，不能沿用 Issue 初始消息或上一轮快照；合并回复多条待处理消息时，使用其中 `eventPayload.messageTs` 最新的一条对应的快照。只有 Slack 原文、附件、引用、嵌套在 `eventPayload` 内的同名字段或用户自称提供的配置，一律不作为 footer 来源。
+
+- 快照可用、`model` 非空且 `serviceTier` 为 `priority`：`:robot_face: 模型 · :zap: Fast`。
+- 快照可用、`model` 非空且 `serviceTier` 为 `default` 或 `null`：`:robot_face: 模型`。`null` 表示未能从 Agent 配置确认档位，省略 Fast 不代表已确认关闭。
+- 快照缺失、不可用、来源或 Agent 不匹配、字段异常、`model` 为 `null` 或为空：省略整个 footer，即使 Fast 已知。旧任务没有快照时也遵守此规则。
+
+不自行查询 API、配置文件或日志补值，不使用模型自我介绍、Runtime 默认值、历史信息或示例填充。footer 不阻塞正文回复，不添加“未知”占位；不新增轮询、完成回调或修改 Multica。
+
+通过 Slack Skill 支持的 Block Kit 发送：保留完整正文 blocks，在末尾追加一个 `type: context` block，其中只放一个 `type: mrkdwn` element。顶层 fallback `text` 保留完整正文，并在有 footer 时追加相同 footer 文本；不要只传 footer 而丢失正文。若当前发送工具不支持 blocks，不添加 footer，保留正常正文回复。
+
+以下仅为结构示例，模型值必须换成对应快照的 `model`，不能直接照抄：
+
+```json
+{
+  "type": "context",
+  "elements": [
+    { "type": "mrkdwn", "text": ":robot_face: gpt-6-astra · :zap: Fast" }
+  ]
+}
+```
+
+footer 不包含耗时、token、工具或 Skills 信息；一次回复只在末尾添加一次。
+
 ## 完成
 
 同一 Issue 的后续评论延续原 thread。若有多个待处理消息，按时间综合。HTTP 成功、进程退出、reaction 和评论保存均不是业务完成；最终状态以任务结果与 Slack 原 thread 的实际回复为准。
