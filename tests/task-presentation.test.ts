@@ -1,0 +1,116 @@
+import { describe, expect, it } from "vitest";
+import {
+  formatTaskTitle,
+  formatTaskDescription,
+  readTaskMessage,
+} from "../src/task-presentation.js";
+import type { SlackThreadEvent } from "../src/thread-router.js";
+
+const event: SlackThreadEvent = {
+  teamId: "T1",
+  channelId: "C1",
+  threadTs: "1788750611.844939",
+  messageTs: "1788750611.844939",
+  senderUserId: "U1",
+  text: "<https://github.com/example/app/pull/42|PR> <!subteam^S1> cc 改期 &amp; 取消",
+  mention: { type: "subteam", id: "S1" },
+};
+const marker = "<!-- relay-thread:scope:thread -->";
+
+describe("task presentation", () => {
+  it("uses a readable summary and stable scoped thread identity", () => {
+    const title = formatTaskTitle(event, "scope");
+    expect(title).toMatch(/^Slack mention · 改期 & 取消 · \[[a-f0-9]{16}\]$/);
+    expect(formatTaskTitle(event, "scope")).toBe(title);
+    expect(
+      formatTaskTitle({ ...event, threadTs: "1788750612.844939" }, "scope"),
+    ).not.toBe(title);
+    expect(formatTaskTitle(event, "other")).not.toBe(title);
+  });
+  it("falls back to the PR reference or a generic label and bounds long summaries", () => {
+    expect(
+      formatTaskTitle(
+        { ...event, text: "<https://github.com/example/app/pull/42|PR> <@U1>" },
+        "s",
+      ),
+    ).toContain("app #42");
+    expect(formatTaskTitle({ ...event, text: "<@U1>" }, "s")).toContain(
+      "自动任务",
+    );
+    expect(
+      formatTaskTitle({ ...event, text: "长".repeat(200) }, "s"),
+    ).toContain("长".repeat(80) + "...");
+  });
+  it("renders a source link, local time and compact attachments without changing message identity", () => {
+    const description = formatTaskDescription(
+      {
+        ...event,
+        files: [
+          {
+            id: "F1",
+            name: "image.png",
+            mimetype: "image/png",
+            size: 123,
+            url_private_download: "https://files.slack.com/example",
+            permalink: "https://example.slack.com/file/F1",
+            thumb_64: "unused",
+            thumb_tiny: "base64",
+            original_w: 100,
+          },
+        ],
+      },
+      marker,
+    );
+    expect(description.startsWith(marker + "\n")).toBe(true);
+    expect(description).toContain("## Slack 原始消息");
+    expect(description).toContain(
+      "https://slack.com/app_redirect?team=T1&channel=C1",
+    );
+    expect(description).toContain("2026-09-07 11:10:11");
+    expect(description).toContain("附件：1 个");
+    expect(description).toContain('"id": "F1"');
+    expect(description).not.toMatch(/thumb_64|thumb_tiny|original_w/);
+    expect(readTaskMessage(description)).toMatchObject({
+      teamId: event.teamId,
+      channelId: event.channelId,
+      threadTs: event.threadTs,
+      messageTs: event.messageTs,
+    });
+  });
+  it("keeps user Markdown and payload marker text out of the document structure", () => {
+    const text =
+      "\n## 假标题\n````\n<!-- /relay-payload -->\n[link](javascript:alert(1))";
+    const description = formatTaskDescription({ ...event, text }, marker, true);
+    expect(description).toContain("## Slack thread 后续消息");
+    expect(description).not.toContain("\n## 假标题");
+    expect(description).toContain("`````json\n");
+    expect(readTaskMessage(description)).toMatchObject({ text });
+  });
+  it("reads legacy payloads and rejects missing or corrupt identity", () => {
+    expect(
+      readTaskMessage(marker + "\n" + JSON.stringify({ eventPayload: event })),
+    ).toEqual(event);
+    for (const value of [
+      null,
+      {},
+      { ...event, teamId: "" },
+      { ...event, messageTs: 42 },
+    ]) {
+      expect(() =>
+        readTaskMessage(
+          marker + "\n" + JSON.stringify({ eventPayload: value }),
+        ),
+      ).toThrow("invalid_thread_state");
+    }
+  });
+  it("rejects incomplete, duplicated or malformed versioned blocks without legacy fallback", () => {
+    const description = formatTaskDescription(event, marker);
+    for (const corrupted of [
+      description.replace("<!-- /relay-payload -->", ""),
+      description + "\n<!-- relay-payload:v1 -->",
+      description.replace('"eventPayload": {', '"eventPayload": invalid'),
+      description.replace("```json", "```text"),
+    ])
+      expect(() => readTaskMessage(corrupted)).toThrow("invalid_thread_state");
+  });
+});
