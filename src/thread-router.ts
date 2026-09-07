@@ -9,6 +9,11 @@ import {
 } from "./multica-api.js";
 import type { MentionMatch } from "./mentions.js";
 import { type ThreadStore } from "./thread-store.js";
+import {
+  formatTaskTitle,
+  formatTaskDescription,
+  readTaskMessage,
+} from "./task-presentation.js";
 
 export interface SlackThreadEvent {
   teamId: string;
@@ -90,17 +95,13 @@ export async function routeSlackThreadEvent(
       if (existing) {
         state.issueId = existing.id;
         if (!raw) {
-          const original = JSON.parse(
-            existing.description!.slice(
-              existing.description!.indexOf("\n") + 1,
-            ),
-          ) as { eventPayload: SlackThreadEvent };
+          const original = readTaskMessage(existing.description!);
           if (
-            !original.eventPayload ||
-            threadKey(original.eventPayload) !== threadKey(event)
+            `${original.teamId}:${original.channelId}:${original.threadTs}` !==
+            threadKey(event)
           )
             throw new Error("invalid_thread_state");
-          state.rootMessageKey = messageKey(original.eventPayload);
+          state.rootMessageKey = `${original.teamId}:${original.channelId}:${original.messageTs}`;
         }
       } else {
         if (state.creating) throw new Error("ambiguous_issue_create");
@@ -110,8 +111,8 @@ export async function routeSlackThreadEvent(
         try {
           const created = await createIssue(
             config,
-            `Slack ${event.channelId} ${event.threadTs} [${scope.slice(0, 8)}]`,
-            marker + "\n" + JSON.stringify({ eventPayload: event }),
+            formatTaskTitle(event, scope),
+            formatTaskDescription(event, marker),
             fetchImpl,
           );
           state.issueId = created.id;
@@ -169,7 +170,7 @@ export async function routeSlackThreadEvent(
         await createComment(
           config,
           state.issueId,
-          messageMarker + "\n" + JSON.stringify({ eventPayload: event }),
+          formatTaskDescription(event, messageMarker, true),
           fetchImpl,
         );
       } catch (error) {

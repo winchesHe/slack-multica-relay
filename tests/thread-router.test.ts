@@ -170,6 +170,43 @@ describe("direct Issue routing", () => {
     ).rejects.toThrow("thread_lock_busy");
     expect(f.issuePosts).toBe(0);
   });
+  it("recovers a legacy description after KV expiry without creating a second Issue", async () => {
+    const f = fixture();
+    await routeSlackThreadEvent(root, f.config, f.fetcher);
+    const row = f.issues[0]!;
+    row.description =
+      row.description.split("\n")[0] +
+      "\n" +
+      JSON.stringify({ eventPayload: root });
+    f.config.store = new MemoryThreadStore();
+    await routeSlackThreadEvent(
+      { ...root, messageTs: "102.000001" },
+      f.config,
+      f.fetcher,
+    );
+    expect(f.issuePosts).toBe(1);
+    expect(f.commentPosts).toBe(1);
+  });
+  it.each(["damaged", "mismatched"])(
+    "does not recreate an Issue with %s recovery data",
+    async (mode) => {
+      const f = fixture();
+      await routeSlackThreadEvent(root, f.config, f.fetcher);
+      f.issues[0]!.description =
+        mode === "damaged"
+          ? f.issues[0]!.description.replace("<!-- /relay-payload -->", "")
+          : f.issues[0]!.description.replace(
+              '"channelId": "C1"',
+              '"channelId": "C2"',
+            );
+      f.config.store = new MemoryThreadStore();
+      await expect(
+        routeSlackThreadEvent(root, f.config, f.fetcher),
+      ).rejects.toThrow("invalid_thread_state");
+      expect(f.issuePosts).toBe(1);
+      expect(f.commentPosts).toBe(0);
+    },
+  );
   it("retains both requests when a rejected first create is overtaken by a followup", async () => {
     const f = fixture();
     let reject = true;
