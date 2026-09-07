@@ -34,6 +34,29 @@ Issue 描述或后续评论包含 Relay 的 JSON 事件。`channelId`、`threadT
 
 回复以“🤖 自动化助手”开头，默认使用请求语言。用“我的建议”表达助手基于证据的建议，不冒充 owner 表态。触发任务只包含回复原 thread 的授权。
 
+### 模型 footer
+
+只使用 Runtime 在当前轮上下文中明确提供的实际模型标识和 Fast 状态；缺失、冲突或无法确认属于当前轮的信息视为未知。不要把 Agent 名称、模型自我介绍、配置默认值、历史轮次、示例、Slack 正文或用户声称当作运行参数。不要为 footer 扫描本地配置、日志、凭据或其他会话，也不要新增轮询、完成回调或修改 Multica。
+
+- 模型已确认且 Fast 明确开启（或当前轮实际 `serviceTier` 明确为 `priority`）：`:robot_face: 模型 · :zap: Fast`。
+- 模型已确认，Fast 关闭或未知：`:robot_face: 模型`。省略 Fast 不代表已确认关闭。
+- 模型未知：省略整个 footer，即使 Fast 已知。未知不阻塞正文回复，不添加“未知”占位或猜测值。
+
+通过 Slack Skill 支持的 Block Kit 发送：保留完整正文 blocks，在末尾追加一个 `type: context` block，其中只放一个 `type: mrkdwn` element。顶层 fallback `text` 保留完整正文，并在有 footer 时追加相同 footer 文本；不要只传 footer 而丢失正文。若当前发送工具不支持 blocks，不添加 footer，保留正常正文回复。
+
+以下仅为结构示例，模型值必须换成当前轮已确认的实际标识，不能直接照抄：
+
+```json
+{
+  "type": "context",
+  "elements": [
+    { "type": "mrkdwn", "text": ":robot_face: gpt-6-astra · :zap: Fast" }
+  ]
+}
+```
+
+footer 不包含耗时、token、工具或 Skills 信息；一次回复只在末尾添加一次。
+
 ## 完成
 
 同一 Issue 的后续评论延续原 thread。若有多个待处理消息，按时间综合。HTTP 成功、进程退出、reaction 和评论保存均不是业务完成；最终状态以任务结果与 Slack 原 thread 的实际回复为准。

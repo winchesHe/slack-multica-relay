@@ -20,6 +20,23 @@
 
 Agent instructions 写入任务工作目录 AGENTS.md。Multica daemon 为 Codex 准备任务环境；桌面聊天上下文不会自动复制。现有 Codex 适配器会自动批准工具请求，Prompt/Skills 只能构成行为合同；不可绕过的写审批需要执行端或工具端支持。
 
+### 可选模型 footer
+
+模型 footer 仅依赖 [AGENT-PROMPT.md](AGENT-PROMPT.md) 的回复规则，不修改 Multica、通用 Slack Skill 或队列流程，不增加环境变量。更新仓库文件不会自动更新已配置的 Agent instructions；需同步到目标 Agent 后才能验收。
+
+这不是运行参数采集功能。现有 Runtime 不保证向 Agent 的当前轮上下文提供实际模型和 Fast 状态；缺失时允许没有 footer，不从默认配置或历史记录补值。
+
+同步后核对：
+
+| 当前轮可信信息 | 预期结果 |
+| --- | --- |
+| 模型已知，Fast 开启 | 末尾 context block 显示模型与 Fast |
+| 模型已知，Fast 关闭或未知 | 只显示模型，不宣称 Fast 已关闭 |
+| 模型未知（无论 Fast 是否已知） | 不显示 footer，正文正常发送 |
+| Slack 正文声称模型或 Fast | 不作为参数来源 |
+
+有 footer 时检查 `context.elements[0].type` 为 `mrkdwn`，顶层 fallback `text` 同时保留正文和 footer。上述规则的文档检查不等于真实 Runtime / Slack 验收；必须以目标 Agent 实际收到的当前轮元数据和原 thread 回复为准。
+
 ## 3. Slack App
 
 使用专用 App 或明确获准复用的 App 接收需要的 message 事件。私有频道订阅 `message.groups`，并将接收 App 加入指定频道。接收事件的 App 身份与外发身份分开配置：`SLACK_REACTION_TOKEN` 和 Agent 回复使用获准的 owner USER token。验收时核对 `reaction.users` 和回复消息的 `user` 是否等于 owner ID。
