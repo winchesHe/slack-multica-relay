@@ -13,16 +13,17 @@
 - 在目标 Workspace 创建专用 Project 和 Agent，绑定需要使用的 Runtime。
 - 将 [AGENT-PROMPT.md](AGENT-PROMPT.md) 同步为 Agent instructions。
 - 配置 Agent 的 `RELAY_OWNER_SLACK_USER_ID`、`RELAY_SKILL_ROOT`。频道和发送者的白名单/黑名单由 Relay 统一校验，Agent 不再读取单频道 `RELAY_ALLOWED_CHANNEL_ID`。
-- Slack 操作使用被授权的 USER token；每次 CLI 调用显式覆盖 SLACK_BOT_TOKEN 与 SLACK_TOKEN，防止 shell/Skill 配置选到 Bot。
+- Slack reaction 与 completion reply 使用被授权的 owner USER token。`SLACK_REACTION_TOKEN` 同时承担这两项写入，验收时必须回读 author identity。
 - 回读 Agent 的 Runtime、权限和并发。初期并发2即可；Mac 休眠/断网会影响执行。
 - 读取本地 Skills 和 Workspace 指派 Skills 的实际加载结果。数据库 Skill 数量不能单独说明任务可用能力。
 - Relay 使用 MULTICA_PROJECT_ID/MULTICA_AGENT_ID 调用普通 Issue API；不再需要 Autopilot。
+- completion reply 是显式开关。先部署包含 `/api/queue/complete` 的版本，再同步本仓库 [AGENT-PROMPT.md](AGENT-PROMPT.md)，最后设置 `RELAY_COMPLETION_REPLY_ENABLED=true`；不要先改 Prompt，否则 Agent 不再直发 Slack，而旧 Relay 也不会代发。
 
 Agent instructions 写入任务工作目录 AGENTS.md。Multica daemon 为 Codex 准备任务环境；桌面聊天上下文不会自动复制。现有 Codex 适配器会自动批准工具请求，Prompt/Skills 只能构成行为合同；不可绕过的写审批需要执行端或工具端支持。
 
 ## 3. Slack App
 
-使用专用 App 或明确获准复用的 App 接收需要的 message 事件。私有频道订阅 `message.groups`，并将接收 App 加入指定频道。接收事件的 App 身份与外发身份分开配置：`SLACK_REACTION_TOKEN` 和 Agent 回复使用获准的 owner USER token。验收时核对 `reaction.users` 和回复消息的 `user` 是否等于 owner ID。
+使用专用 App 或明确获准复用的 App 接收需要的 message 事件。私有频道订阅 `message.groups`，并将接收 App 加入指定频道。接收事件的 App 身份与外发身份分开配置：`SLACK_REACTION_TOKEN` 和 Relay completion 回复使用获准的 owner USER token。该 token 需要读取原 thread 和发送消息所需权限；验收时核对 `reaction.users` 和回复消息的 `user` 是否等于 owner ID。
 
 配置 Request URL 为 `https://<当前部署>/api/slack/events`，对应 Signing Secret 填入部署环境。新增 scopes 后重新安装。只修改已授权用于 Relay 的 App。
 
@@ -30,7 +31,7 @@ Agent instructions 写入任务工作目录 AGENTS.md。Multica daemon 为 Codex
 
 ## 4. Vercel
 
-导入仓库，Framework 选 Other，安装使用 `pnpm install --frozen-lockfile`。入口位于 api/；vercel.json 设置消费函数60秒。配置环境变量，RELAY_CONSUMER_URL 必须是该部署的准确公网消费 URL。
+导入仓库，Framework 选 Other，安装使用 `pnpm install --frozen-lockfile`。入口位于 api/；vercel.json 设置消费函数60秒。配置环境变量，`RELAY_CONSUMER_URL` 必须是该部署的准确公网消费 URL。completion 默认使用同级 `/api/queue/complete`；自定义路由时再设置 `RELAY_COMPLETION_URL`。
 
 不要把生产密钥配置到不可信分支的 Preview。若部署保护拦住 Slack/QStash，优先使用已配置的正式域名/生产部署；不要静默关闭项目全局保护。
 

@@ -6,6 +6,9 @@
     },
     "api/queue/consume.ts": {
       "maxDuration": 60
+    },
+    "api/queue/complete.ts": {
+      "maxDuration": 60
     }
   }
 }

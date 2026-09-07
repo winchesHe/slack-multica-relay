@@ -31,10 +31,12 @@ interface ThreadState {
 }
 interface MessageState {
   phase: "writing" | "done" | "rejected";
+  triggerCommentId?: string;
 }
 export interface ThreadRouteResult {
   action: "created" | "comment_persisted" | "duplicate";
   issueId: string;
+  triggerCommentId?: string;
 }
 export const STATE_TTL_SECONDS = 90 * 24 * 60 * 60;
 export function threadKey(event: SlackThreadEvent): string {
@@ -137,8 +139,30 @@ export async function routeSlackThreadEvent(
       await config.store.set(key, JSON.stringify(state), STATE_TTL_SECONDS);
     }
     const previous = await config.store.get(msgKey);
-    if (previous && (JSON.parse(previous) as MessageState).phase === "done")
-      return { action: "duplicate", issueId: state.issueId };
+    if (previous && (JSON.parse(previous) as MessageState).phase === "done") {
+      const previousState = JSON.parse(previous) as MessageState;
+      if (messageKey(event) === state.rootMessageKey)
+        return { action: "duplicate", issueId: state.issueId };
+      if (previousState.triggerCommentId)
+        return {
+          action: "duplicate",
+          issueId: state.issueId,
+          triggerCommentId: previousState.triggerCommentId,
+        };
+      const messageMarker = `<!-- relay-message:${digest(messageKey(event))} -->`;
+      const recovered = await findComment(
+        config,
+        state.issueId,
+        messageMarker,
+        fetchImpl,
+      );
+      if (!recovered) throw new Error("invalid_thread_state");
+      return {
+        action: "duplicate",
+        issueId: state.issueId,
+        triggerCommentId: recovered.id,
+      };
+    }
     if (messageKey(event) === state.rootMessageKey) {
       await config.store.set(
         msgKey,
@@ -148,13 +172,13 @@ export async function routeSlackThreadEvent(
       return { action: "created", issueId: state.issueId };
     }
     const messageMarker = `<!-- relay-message:${digest(messageKey(event))} -->`;
-    const existingComment = await findComment(
+    let persistedComment = await findComment(
       config,
       state.issueId,
       messageMarker,
       fetchImpl,
     );
-    if (!existingComment) {
+    if (!persistedComment) {
       if (
         previous &&
         (JSON.parse(previous) as MessageState).phase === "writing"
@@ -166,7 +190,7 @@ export async function routeSlackThreadEvent(
         STATE_TTL_SECONDS,
       );
       try {
-        await createComment(
+        persistedComment = await createComment(
           config,
           state.issueId,
           messageMarker + "\n" + JSON.stringify({ eventPayload: event }),
@@ -190,10 +214,17 @@ export async function routeSlackThreadEvent(
     }
     await config.store.set(
       msgKey,
-      JSON.stringify({ phase: "done" }),
+      JSON.stringify({
+        phase: "done",
+        triggerCommentId: persistedComment.id,
+      }),
       STATE_TTL_SECONDS,
     );
-    return { action: "comment_persisted", issueId: state.issueId };
+    return {
+      action: "comment_persisted",
+      issueId: state.issueId,
+      triggerCommentId: persistedComment.id,
+    };
   } finally {
     await config.store.releaseIfOwner(lockKey, owner);
   }

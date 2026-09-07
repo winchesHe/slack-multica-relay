@@ -110,10 +110,12 @@ describe("direct Issue routing", () => {
       (await routeSlackThreadEvent(root, f.config, f.fetcher)).action,
     ).toBe("duplicate");
     const next = { ...root, messageTs: "102.000001" };
-    await routeSlackThreadEvent(next, f.config, f.fetcher);
-    await routeSlackThreadEvent(next, f.config, f.fetcher);
+    const first = await routeSlackThreadEvent(next, f.config, f.fetcher);
+    const duplicate = await routeSlackThreadEvent(next, f.config, f.fetcher);
     expect(f.issuePosts).toBe(1);
     expect(f.commentPosts).toBe(1);
+    expect(first.triggerCommentId).toBe("comment-1");
+    expect(duplicate.triggerCommentId).toBe("comment-1");
   });
   it("recovers a committed Issue after lost response without second POST", async () => {
     const f = fixture();

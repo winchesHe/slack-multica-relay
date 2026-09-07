@@ -23,6 +23,8 @@ export interface RelayConfig {
   queueCurrentSigningKey: string;
   queueNextSigningKey: string;
   consumerUrl: string;
+  completionUrl: string;
+  completionReplyEnabled: boolean;
 }
 export function loadRelayConfig(
   env: NodeJS.ProcessEnv = process.env,
@@ -35,6 +37,7 @@ export function loadRelayConfig(
   const targetSubteamIds = ids(env.SLACK_TARGET_SUBTEAM_IDS);
   if (!targetUserIds.size && !targetSubteamIds.size)
     throw new Error("missing_mention_target");
+  const consumerUrl = https(required(env, "RELAY_CONSUMER_URL"));
   return {
     signingSecret: required(env, "SLACK_SIGNING_SECRET"),
     teamId: required(env, "SLACK_TEAM_ID"),
@@ -62,7 +65,15 @@ export function loadRelayConfig(
     queueToken: required(env, "QSTASH_TOKEN"),
     queueCurrentSigningKey: required(env, "QSTASH_CURRENT_SIGNING_KEY"),
     queueNextSigningKey: required(env, "QSTASH_NEXT_SIGNING_KEY"),
-    consumerUrl: https(required(env, "RELAY_CONSUMER_URL")),
+    consumerUrl,
+    completionUrl: https(
+      env.RELAY_COMPLETION_URL?.trim() ||
+        new URL("complete", consumerUrl).toString(),
+    ),
+    completionReplyEnabled: boolean(
+      env.RELAY_COMPLETION_REPLY_ENABLED,
+      false,
+    ),
   };
 }
 function required(env: NodeJS.ProcessEnv, key: string): string {
@@ -97,4 +108,12 @@ function https(value: string): string {
   )
     throw new Error("invalid_service_url");
   return value.replace(/\/+$/u, "");
+}
+
+function boolean(value: string | undefined, fallback: boolean): boolean {
+  if (value === undefined || value.trim() === "") return fallback;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "true") return true;
+  if (normalized === "false") return false;
+  throw new Error("invalid_boolean");
 }

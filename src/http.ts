@@ -8,6 +8,13 @@ import {
 } from "./mentions.js";
 import { addSlackReaction } from "./reaction.js";
 import {
+  COMPLETION_MAX_ATTEMPTS,
+  parseCompletionJob,
+  processCompletionCheck,
+  publishCompletionCheck,
+  type CompletionJob,
+} from "./completion.js";
+import {
   routeSlackThreadEvent,
   digest,
   threadKey,
@@ -94,6 +101,12 @@ function reason(error: unknown): string {
     "multica_http_error",
     "invalid_multica_response",
     "invalid_comment_cursor",
+    "invalid_completion_job",
+    "completion_schedule_failed",
+    "ambiguous_slack_reply",
+    "slack_reply_lookup_failed",
+    "slack_reply_lookup_limit",
+    "slack_reply_post_failed",
   ];
   return error instanceof Error && codes.includes(error.message)
     ? error.message
@@ -235,18 +248,7 @@ export async function consumeQueue(
   } catch {
     return json({ error: "body_too_large" }, 413);
   }
-  try {
-    const valid = await new Receiver({
-      currentSigningKey: config.queueCurrentSigningKey,
-      nextSigningKey: config.queueNextSigningKey,
-      devMode: false,
-    }).verify({
-      body: raw,
-      signature: request.headers.get("upstash-signature") ?? "",
-      url: config.consumerUrl,
-    });
-    if (!valid) return json({ error: "invalid_queue_signature" }, 401);
-  } catch {
+  if (!(await validQueueSignature(request, raw, config, config.consumerUrl))) {
     return json({ error: "invalid_queue_signature" }, 401);
   }
   let event: SlackThreadEvent;
@@ -277,6 +279,23 @@ export async function consumeQueue(
       },
       boundedFetch,
     );
+    let completionMessageId: string | undefined;
+    if (config.completionReplyEnabled) {
+      completionMessageId = await publishCompletionCheck(
+        config,
+        {
+          version: 1,
+          issueId: result.issueId,
+          ...(result.triggerCommentId
+            ? { triggerCommentId: result.triggerCommentId }
+            : {}),
+          event,
+          attempt: 0,
+        },
+        5,
+        boundedFetch,
+      );
+    }
     try {
       await addSlackReaction(
         config.slackReactionToken,
@@ -293,10 +312,14 @@ export async function consumeQueue(
     }
     console.info("relay_dispatch", {
       ...result,
+      ...(completionMessageId ? { completionMessageId } : {}),
       messageKey: messageKey(event),
       durationMs: Date.now() - start,
     });
-    return json(result);
+    return json({
+      ...result,
+      ...(completionMessageId ? { completionMessageId } : {}),
+    });
   } catch (error) {
     const code = reason(error);
     console.warn("relay_dispatch", {
@@ -308,4 +331,140 @@ export async function consumeQueue(
     // ambiguous writes remain visible for reconciliation, never acknowledged away.
     return json({ error: code, retryable: true }, 503);
   }
+}
+
+export async function completeQueue(
+  request: Request,
+  env: NodeJS.ProcessEnv = process.env,
+  fetchImpl: typeof fetch = fetch,
+): Promise<Response> {
+  if (request.method !== "POST")
+    return json({ error: "method_not_allowed" }, 405);
+  let config: RelayConfig;
+  try {
+    config = loadRelayConfig(env);
+  } catch {
+    return json({ error: "relay_not_configured" }, 500);
+  }
+  if (!config.completionReplyEnabled)
+    return json({ action: "ignored", reason: "completion_reply_disabled" });
+
+  let raw: string;
+  try {
+    raw = await readBody(request);
+  } catch {
+    return json({ error: "body_too_large" }, 413);
+  }
+  if (!(await validQueueSignature(request, raw, config, config.completionUrl)))
+    return json({ error: "invalid_queue_signature" }, 401);
+
+  let job: CompletionJob;
+  try {
+    const parsed = parseCompletionJob(JSON.parse(raw));
+    job = { ...parsed, event: parsedEvent(parsed.event) };
+  } catch {
+    return json({ error: "invalid_completion_job" }, 400);
+  }
+  if (!admitted(job.event, config))
+    return json({ action: "ignored", reason: "policy_changed" });
+
+  const start = Date.now();
+  const deadline = AbortSignal.timeout(45_000);
+  const boundedFetch: typeof fetch = (input, init = {}) =>
+    fetchImpl(input, {
+      ...init,
+      signal: init.signal ? AbortSignal.any([init.signal, deadline]) : deadline,
+    });
+  try {
+    const store = new UpstashThreadStore(
+      config.kvRestApiUrl,
+      config.kvRestApiToken,
+      boundedFetch,
+    );
+    const result = await processCompletionCheck(
+      job,
+      config,
+      store,
+      boundedFetch,
+    );
+    if (result.action === "waiting") {
+      if (job.attempt >= COMPLETION_MAX_ATTEMPTS) {
+        console.warn("relay_completion", {
+          action: "completion_timeout",
+          issueId: job.issueId,
+          messageKey: messageKey(job.event),
+          attempt: job.attempt,
+          reason: result.reason,
+          durationMs: Date.now() - start,
+        });
+        return json({
+          action: "completion_timeout",
+          issueId: job.issueId,
+          reason: result.reason,
+        });
+      }
+      const nextJob = { ...job, attempt: job.attempt + 1 };
+      const completionMessageId = await publishCompletionCheck(
+        config,
+        nextJob,
+        completionDelaySeconds(nextJob.attempt),
+        boundedFetch,
+      );
+      console.info("relay_completion", {
+        ...result,
+        issueId: job.issueId,
+        messageKey: messageKey(job.event),
+        attempt: nextJob.attempt,
+        durationMs: Date.now() - start,
+      });
+      return json({
+        ...result,
+        attempt: nextJob.attempt,
+        completionMessageId,
+      });
+    }
+    console.info("relay_completion", {
+      ...result,
+      issueId: job.issueId,
+      messageKey: messageKey(job.event),
+      durationMs: Date.now() - start,
+    });
+    return json(result);
+  } catch (error) {
+    const code = reason(error);
+    console.warn("relay_completion", {
+      issueId: job.issueId,
+      messageKey: messageKey(job.event),
+      reason: code,
+      durationMs: Date.now() - start,
+    });
+    return json({ error: code, retryable: true }, 503);
+  }
+}
+
+async function validQueueSignature(
+  request: Request,
+  body: string,
+  config: RelayConfig,
+  url: string,
+): Promise<boolean> {
+  try {
+    return await new Receiver({
+      currentSigningKey: config.queueCurrentSigningKey,
+      nextSigningKey: config.queueNextSigningKey,
+      devMode: false,
+    }).verify({
+      body,
+      signature: request.headers.get("upstash-signature") ?? "",
+      url,
+    });
+  } catch {
+    return false;
+  }
+}
+
+function completionDelaySeconds(attempt: number): number {
+  if (attempt <= 6) return 5;
+  if (attempt <= 24) return 15;
+  return 30;
 }

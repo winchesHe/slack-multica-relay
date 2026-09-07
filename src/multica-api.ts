@@ -11,6 +11,31 @@ export interface MulticaComment {
   content: string;
   trigger_outcomes?: unknown;
 }
+export interface MulticaTaskUsage {
+  provider?: string;
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+}
+export interface MulticaTaskRun {
+  id: string;
+  issue_id: string;
+  status: string;
+  started_at: string | null;
+  completed_at: string | null;
+  created_at: string;
+  result: unknown;
+  trigger_comment_id?: string;
+  coalesced_comment_ids?: string[];
+  delivered_comment_ids?: string[];
+  usage?: MulticaTaskUsage[];
+}
+export interface MulticaTaskMessage {
+  type: string;
+  tool?: string;
+}
 export interface ApiConfig {
   multicaApiBaseUrl: string;
   multicaApiToken: string;
@@ -34,6 +59,61 @@ function issue(value: unknown): MulticaIssue {
   )
     throw new Error("invalid_multica_response");
   return value as unknown as MulticaIssue;
+}
+function taskUsage(value: unknown): MulticaTaskUsage {
+  const tokenKeys = [
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+  ];
+  if (
+    !object(value) ||
+    typeof value.model !== "string" ||
+    tokenKeys.some(
+      (key) =>
+        typeof value[key] !== "number" ||
+        !Number.isFinite(value[key]) ||
+        (value[key] as number) < 0,
+    )
+  )
+    throw new Error("invalid_multica_response");
+  return value as unknown as MulticaTaskUsage;
+}
+
+function optionalStringArray(value: unknown): boolean {
+  return (
+    value === undefined ||
+    (Array.isArray(value) && value.every((entry) => typeof entry === "string"))
+  );
+}
+
+function taskRun(value: unknown): MulticaTaskRun {
+  if (
+    !object(value) ||
+    typeof value.id !== "string" ||
+    typeof value.issue_id !== "string" ||
+    typeof value.status !== "string" ||
+    typeof value.created_at !== "string" ||
+    !(
+      value.started_at === null || typeof value.started_at === "string"
+    ) ||
+    !(
+      value.completed_at === null || typeof value.completed_at === "string"
+    ) ||
+    (value.trigger_comment_id !== undefined &&
+      typeof value.trigger_comment_id !== "string") ||
+    !optionalStringArray(value.coalesced_comment_ids) ||
+    !optionalStringArray(value.delivered_comment_ids) ||
+    (value.usage !== undefined && !Array.isArray(value.usage))
+  )
+    throw new Error("invalid_multica_response");
+  return {
+    ...(value as unknown as MulticaTaskRun),
+    ...(Array.isArray(value.usage)
+      ? { usage: value.usage.map(taskUsage) }
+      : {}),
+  };
 }
 async function api(
   config: ApiConfig,
@@ -200,4 +280,42 @@ export async function createComment(
   )
     throw new Error("invalid_multica_response");
   return body as unknown as MulticaComment;
+}
+
+export async function listTaskRuns(
+  config: ApiConfig,
+  issueId: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<MulticaTaskRun[]> {
+  const response = await api(
+    config,
+    `/api/issues/${encodeURIComponent(issueId)}/task-runs`,
+    {},
+    fetchImpl,
+  );
+  if (!response.ok) throw new ApiError(response.status);
+  const body: unknown = await response.json();
+  if (!Array.isArray(body)) throw new Error("invalid_multica_response");
+  return body.map(taskRun);
+}
+
+export async function listTaskMessages(
+  config: ApiConfig,
+  taskId: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<MulticaTaskMessage[]> {
+  const response = await api(
+    config,
+    `/api/tasks/${encodeURIComponent(taskId)}/messages`,
+    {},
+    fetchImpl,
+  );
+  if (!response.ok) throw new ApiError(response.status);
+  const body: unknown = await response.json();
+  if (
+    !Array.isArray(body) ||
+    body.some((entry) => !object(entry) || typeof entry.type !== "string")
+  )
+    throw new Error("invalid_multica_response");
+  return body as MulticaTaskMessage[];
 }
