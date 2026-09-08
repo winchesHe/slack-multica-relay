@@ -1,0 +1,25 @@
+{
+  "manifest_version": 1,
+  "key": "dev.winches.slack-run-footer",
+  "name": "Slack 运行统计",
+  "description": "通知 Relay 为已登记的 Slack 最终回复补全运行统计。",
+  "version": "0.1.0",
+  "author": { "name": "Winches" },
+  "scopes": ["tasks:read", "net:relay.example.com"],
+  "contributes": {
+    "hooks": [
+      {
+        "key": "slack-run-footer",
+        "name": "完成后补全统计",
+        "description": "接收本次运行完成通知，由 Relay 查询运行数据并更新已登记的原 Slack 回复。",
+        "triggers": ["event"],
+        "events": ["task.completed"],
+        "transport": {
+          "type": "http",
+          "url": "https://relay.example.com/api/multica/events"
+        },
+        "timeout_ms": 8000
+      }
+    ]
+  }
+}

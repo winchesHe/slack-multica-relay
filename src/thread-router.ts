@@ -28,6 +28,7 @@ export interface SlackThreadEvent {
 }
 export interface ThreadRouterConfig extends ApiConfig {
   store: ThreadStore;
+  footerEnabled?: boolean;
 }
 interface ThreadState {
   version: 2;
@@ -106,7 +107,9 @@ export async function routeSlackThreadEvent(
         }
       } else {
         if (state.creating) throw new Error("ambiguous_issue_create");
-        const replyContext = await getSlackReplyContext(config, fetchImpl);
+        const replyContext = config.footerEnabled
+          ? undefined
+          : await getSlackReplyContext(config, fetchImpl);
         state.rootMessageKey = messageKey(event);
         state.creating = true;
         await config.store.set(key, JSON.stringify(state), STATE_TTL_SECONDS);
@@ -163,7 +166,9 @@ export async function routeSlackThreadEvent(
         (JSON.parse(previous) as MessageState).phase === "writing"
       )
         throw new Error("ambiguous_comment_create");
-      const replyContext = await getSlackReplyContext(config, fetchImpl);
+      const replyContext = config.footerEnabled
+        ? undefined
+        : await getSlackReplyContext(config, fetchImpl);
       await config.store.set(
         msgKey,
         JSON.stringify({ phase: "writing" }),

@@ -2,6 +2,7 @@
 .env.*
 !.env.example
 node_modules/
+__pycache__/
 .vercel/
 .vercel
 .env*

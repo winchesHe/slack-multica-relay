@@ -1,4 +1,5 @@
 export interface RelayConfig {
+  footerEnabled: boolean;
   signingSecret: string;
   teamId: string;
   targetUserIds: Set<string>;
@@ -36,6 +37,7 @@ export function loadRelayConfig(
   if (!targetUserIds.size && !targetSubteamIds.size)
     throw new Error("missing_mention_target");
   return {
+    footerEnabled: env.RELAY_FOOTER_ENABLED === "true",
     signingSecret: required(env, "SLACK_SIGNING_SECRET"),
     teamId: required(env, "SLACK_TEAM_ID"),
     allowedChannelIds: allowedChannels.ids,

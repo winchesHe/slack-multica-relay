@@ -6,6 +6,15 @@
     },
     "api/queue/consume.ts": {
       "maxDuration": 60
+    },
+    "api/multica/events.ts": {
+      "maxDuration": 10
+    },
+    "api/slack/replies.ts": {
+      "maxDuration": 60
+    },
+    "api/queue/footer.ts": {
+      "maxDuration": 60
     }
   }
 }

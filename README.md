@@ -42,3 +42,9 @@ pnpm lint
 | 消费503                 | 保留队列重试/DLQ责任，原因包括 timeout、thread*lock_busy、ambiguous*\* |
 
 `GET /api/health` 仅证明函数可响应。消费有45秒整体预算，部署函数上限60秒；入站发布请求超时2秒。平台冷启动、网络延迟与配额仍须实测。
+
+## 完成后补 Footer
+
+第一阶段代码与本地验证已提供，默认 `RELAY_FOOTER_ENABLED=false`。开启后，由统一发送脚本登记实际回复，Multica Hook 经 QStash 唤醒 Vercel 函数，在同一条消息后追加耗时。开启时不再查询或传递旧 Agent 模型快照。当前线上发送身份为 User，更新必须使用同一作者。
+
+计划、最终展示格式、当前支持范围和未完成的线上验收见 [Footer 实施计划](FOOTER-PLAN.zh-CN.md)。新增接口为 `/api/multica/events`、`/api/slack/replies`、`/api/queue/footer`，本阶段仅提供 Vercel 入口。模型、Tokens、Tools、Skills 与低频补偿在后续阶段完成。

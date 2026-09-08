@@ -109,6 +109,16 @@ describe("direct Issue routing", () => {
     return JSON.parse(description.match(/```json\n([\s\S]*?)\n```/)![1]!);
   }
 
+  it("启用完成 footer 后，新建和续问都不再查询或传递 Agent 模型快照", async () => {
+    const f = fixture();
+    f.config.footerEnabled = true;
+    await routeSlackThreadEvent(root, f.config, f.fetcher);
+    await routeSlackThreadEvent({ ...root, messageTs: "102.000001" }, f.config, f.fetcher);
+    expect(f.agentGets).toBe(0);
+    expect(payload(f.issues[0]!.description)).not.toHaveProperty("replyContext");
+    expect(payload(f.comments[0]!.content)).not.toHaveProperty("replyContext");
+  });
+
   it("attaches a fresh configuration snapshot to each new message, not each duplicate", async () => {
     const f = fixture();
     await routeSlackThreadEvent(root, f.config, f.fetcher);
