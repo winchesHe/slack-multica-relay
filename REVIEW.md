@@ -36,10 +36,10 @@ daemon将Agent instructions写入工作目录AGENTS.md。Skills由本地配置�
 
 官方平台合同：[Vercel Functions](https://vercel.com/docs/functions)、[EdgeOne Node Functions](https://pages.edgeone.ai/document/node-functions)、[QStash](https://upstash.com/docs/qstash/overall/getstarted)。
 
-## Footer 第一阶段新增边界
+## Footer 新增边界
 
 完成 Hook 必须校验安装、工作区、Agent、原始请求 HMAC 和时间窗口；登记接口使用独立凭据。登记与消费都查真实 issue/run，核对 Relay 来源 marker、目标 thread 和 Slack 原作者。队列只传 issue/run ID，禁止保存临时 callback_token。Redis 保存正文摘要而非正文；正文变化后不覆盖。
 
 一条 run 绑定一条最终回复，不复用 issue 最新 run。重复更新先回读 footer block，保留原正文和附件；发送未知结果由 Runtime 回执阻断盲目重发。没有映射的完成通知不会发新消息，后续登记负责补触发。该本地链路不等于公网验收；缺少插件 CLI 安装入口、生产配置与受控 Slack 测试时，不宣布上线。
 
-模型快照查询在开关开启时跳过，旧兼容代码尚保留以便第一阶段回退；最终清理和其余统计在第二阶段处理。定时补偿、耗尽后自动恢复、长回复拆分和跨系统 exactly-once 均不是第一阶段保证。
+模型快照查询和旧兼容代码已删除。消费端只读当前 task 的完整消息数组，校验连续 seq 和 issue/task 范围；缺口、空日志、协议异常、超过 4 MiB 或 10000 条时隐藏日志统计。Skills 只支持已验证的简单 cat 读取与唯一相邻结果，无法配对或无法解析的读取隐藏 Skills。最终 footer 保存 90 天供更新重试复用，原始日志不落盘。定时补偿、迟到 usage/日志的有限补查、耗尽后自动恢复、长回复拆分和跨系统 exactly-once 均留待第三阶段。

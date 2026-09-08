@@ -1,5 +1,5 @@
 import type { FooterConfig } from "./footer-config.js";
-import { isRecord, type FooterRun, type ReplyRef } from "./footer-data.js";
+import { isRecord, type ReplyRef } from "./footer-data.js";
 import { digest } from "./thread-router.js";
 
 interface SlackMessage {
@@ -152,14 +152,6 @@ function canonical(value: unknown): unknown {
   return value;
 }
 
-export function buildDurationFooter(run: FooterRun): string | undefined {
-  if (!run.started_at || !run.completed_at) return;
-  const ms = Date.parse(run.completed_at) - Date.parse(run.started_at);
-  if (!Number.isFinite(ms) || ms < 0) return;
-  const seconds = Math.round(ms / 1000);
-  return `:agent_time: ${seconds >= 60 ? `${Math.floor(seconds / 60)}m ` : ""}${seconds % 60}s`;
-}
-
 export async function updateReplyFooter(
   config: FooterConfig,
   ref: ReplyRef,
@@ -177,7 +169,7 @@ export async function updateReplyFooter(
   )
     return "duplicate";
   const original = originalBody(message, ref.taskId);
-  // 不为了附加统计截断正文，也不重编译现有富文本。第一阶段仅支持已有 blocks 的回复。
+  // 不为了附加统计截断正文，也不重编译现有富文本。仅支持已有 blocks 的回复。
   if (
     !original.blocks.length ||
     original.blocks.length >= 50 ||

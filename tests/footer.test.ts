@@ -5,7 +5,7 @@ import {
   consumeFooter,
   registerSlackReply,
 } from "../src/footer.js";
-import { buildDurationFooter } from "../src/footer-slack.js";
+import { buildDurationFooter } from "../src/footer-stats.js";
 import { digest } from "../src/thread-router.js";
 import { formatTaskDescription } from "../src/task-presentation.js";
 
@@ -144,8 +144,10 @@ function fixture() {
     status: "completed",
     started_at: "2026-09-08T10:15:02Z",
     completed_at: "2026-09-08T10:21:32Z",
+    usage: undefined as unknown,
   };
   const runs = [run];
+  const logMessages: Record<string, unknown>[] = [];
   const message: Record<string, any> = {
     ts: ref.messageTs,
     thread_ts: ref.threadTs,
@@ -203,6 +205,7 @@ function fixture() {
       return Response.json(issue);
     if (url === `${env.MULTICA_API_BASE_URL}/api/issues/${issueId}/task-runs`)
       return Response.json(runs);
+    if (url.includes("/messages")) return Response.json(logMessages);
     if (url.endsWith("/auth.test"))
       return Response.json({ ok: true, team_id: "T1", user_id: "U1" });
     if (url.endsWith("/conversations.replies")) {
@@ -232,6 +235,7 @@ function fixture() {
     issue,
     run,
     runs,
+    logMessages,
     message,
     messages,
     writes,
@@ -272,11 +276,53 @@ describe("完成通知到原消息的集成链路", () => {
     expect(f.writes[0]!.attachments).toEqual(f.message.attachments);
     expect(f.writes[0]!.ts).toBe(ref.messageTs);
     expect([...f.kv.values()].join(" ")).not.toContain("DO-NOT-PERSIST");
-    expect(
-      f.urls.some(
-        (url) => url.includes("/api/agents/") || url.includes("/messages"),
-      ),
-    ).toBe(false);
+    expect(f.urls.some((url) => url.includes("/api/agents/"))).toBe(false);
+  });
+  it("完整统计更新原消息，重复消费和响应丢失均复用统计快照", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const f = fixture();
+    f.run.usage = [
+      {
+        model: "gpt-6-astra",
+        provider: "codex",
+        input_tokens: 132436,
+        output_tokens: 9555,
+        cache_read_tokens: 3114496,
+        cache_write_tokens: 0,
+      },
+    ];
+    f.logMessages.push(
+      {
+        seq: 1,
+        task_id: taskId,
+        issue_id: issueId,
+        type: "tool_use",
+        tool: "exec_command",
+        input: { command: "cat /skills/slack/SKILL.md" },
+      },
+      {
+        seq: 2,
+        task_id: taskId,
+        issue_id: issueId,
+        type: "tool_result",
+        tool: "exec_command",
+        output: "---\nname: slack\n---\nprivate skill body",
+      },
+    );
+    await registerSlackReply(registration(), env, f.fetcher);
+    expect(f.urls.filter((url) => url.includes("/messages"))).toHaveLength(0);
+    f.loseUpdate();
+    expect((await consumeFooter(queued(), env, f.fetcher)).status).toBe(503);
+    f.run.usage = [];
+    f.logMessages.splice(0);
+    expect((await consumeFooter(queued(), env, f.fetcher)).status).toBe(200);
+    expect((await consumeFooter(queued(), env, f.fetcher)).status).toBe(200);
+    expect(f.writes).toHaveLength(1);
+    expect(f.writes[0]!.text).toBe(
+      "正文 **必须保留**\n\n:agent_time: 6m 30s · :agent_mdi_robot_outline: gpt-6-astra: 3256.5k tokens (96% cached) · :agent_tool: 1 tools · :agent_skill: 1 skills",
+    );
+    expect(f.urls.filter((url) => url.includes("/messages"))).toHaveLength(1);
+    expect([...f.kv.values()].join(" ")).not.toContain("private skill body");
   });
   it("完成通知先到且已消费，之后登记仍能补上 footer", async () => {
     const f = fixture();
@@ -482,7 +528,7 @@ describe("身份、签名与正文边界", () => {
     f.run.completed_at = "";
     expect(
       await (await consumeFooter(queued(), env, f.fetcher)).json(),
-    ).toEqual({ action: "skipped", reason: "missing_duration" });
+    ).toEqual({ action: "skipped", reason: "missing_stats" });
     expect(f.writes).toHaveLength(0);
   });
   it("已有 50 个 blocks 时不截断正文", async () => {

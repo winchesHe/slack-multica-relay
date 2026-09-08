@@ -20,9 +20,9 @@
 
 Agent instructions 写入任务工作目录 AGENTS.md。Multica daemon 为 Codex 准备任务环境；桌面聊天上下文不会自动复制。现有 Codex 适配器会自动批准工具请求，Prompt/Skills 只能构成行为合同；不可绕过的写审批需要执行端或工具端支持。
 
-### 完成 Hook 与 Footer（第一阶段）
+### 完成 Hook 与 Footer
 
-完整范围、统计口径和阶段状态见 [Footer 计划](FOOTER-PLAN.zh-CN.md)。本阶段只实现原消息追加耗时，尚未开启线上链路。Vercel 与 Runtime 的 `RELAY_FOOTER_ENABLED` 必须一致；默认关闭。开启时 Relay 停止查询 Agent 模型配置，不再发送 replyContext；关闭时暂保留旧模型快照兼容路径。完整统计与旧代码删除在第二阶段交付。
+完整范围、统计口径和阶段状态见 [Footer 计划](FOOTER-PLAN.zh-CN.md)。现已实现原消息追加完整统计，尚未开启线上链路。Vercel 与 Runtime 的 `RELAY_FOOTER_ENABLED` 必须一致；默认关闭。Relay 已删除 Agent 模型配置查询和 replyContext，不受开关状态影响；关闭开关时 Agent 仍回复完整正文，不展示 footer。
 
 Vercel 在现有 Redis、QStash 和 Multica 配置之外，还需要：
 
@@ -48,13 +48,13 @@ rtk proxy python3 "$RELAY_REPLY_SCRIPT" \
 
 可加 `--dry-run` 只预览。正式调用先复用 Slack Skill 的预览与身份校验，再发送并登记返回的真实 message ts。一个 run 只发一条最终回复；进度消息不经此入口。不要在包装脚本失败后另跑 Slack send：登记失败可用相同参数补登记；sending 状态表示结果不明，需要核对 Slack 与回执，不清空回执后重发。通用 Slack Skill 不需要修改。
 
-插件 manifest 模板在 [multica.plugin.example.json](multica.plugin.example.json)。安装前把 net scope 和 transport URL 中的域名替换为实际 Vercel 域名；第一阶段仅订阅 task.completed，按 Multica 契约授予 tasks:read 和实际回调域名的 net scope，不需要 Action API 写 scope。Hook 使用服务端配置的 Multica 查询凭据；临时 callback_token 在 HTTP 返回后撤销，不能入队。安装所得 ID、签名密钥必须与 Vercel 配置匹配。
+插件 manifest 模板在 [multica.plugin.example.json](multica.plugin.example.json)。安装前把 net scope 和 transport URL 中的域名替换为实际 Vercel 域名；当前仅订阅 task.completed，按 Multica 契约授予 tasks:read 和实际回调域名的 net scope，不需要 Action API 写 scope。Hook 使用服务端配置的 Multica 查询凭据；临时 callback_token 在 HTTP 返回后撤销，不能入队。安装所得 ID、签名密钥必须与 Vercel 配置匹配。
 
 按 AGENTS.md 使用 Multica CLI 管理安装与 Agent 配置。当前 CLI 未提供 plugin 子命令，尚不能通过规定入口创建插件安装；不得猜接口或切换浏览器绕过。本次只准备代码、模板和本地 Prompt 候选。CLI 能力补齐后再安装、按同一 ID 回读，核对线上契约，再完成受控验证。
 
-上线次序：准备安装与配置 → 部署新函数（保持开关关闭）→ 部署 Runtime 脚本并核对路径和 User 身份 → 对照最新线上 instructions 同步本地 Prompt 候选 → 协调开启两端开关 → 以明确获准的测试 thread 验收。第一阶段不要把未知 Token 配到不可信 Preview，也不要为联调关闭全局部署保护。
+上线次序：准备安装与配置 → 部署新函数（保持开关关闭）→ 部署 Runtime 脚本并核对路径和 User 身份 → 对照最新线上 instructions 同步本地 Prompt 候选 → 协调开启两端开关 → 以明确获准的测试 thread 验收。不要把未知 Token 配到不可信 Preview，也不要为联调关闭全局部署保护。
 
-验收至少覆盖：耗时 footer 更新同一条消息、正文和附件保留、重复完成通知、先完成后登记、登记失败只补登记、更新响应丢失后的回读、无最终回复保持静默。缺少 blocks、已有 50 个 blocks 或消息超限时省略 footer，不能截断正文。确认 `:agent_time:` 在工作区存在。
+验收至少覆盖：完整统计 footer 更新同一条消息、正文和附件保留、重复完成通知、先完成后登记、登记失败只补登记、更新响应丢失后的回读、无最终回复保持静默。缺少 blocks、已有 50 个 blocks 或消息超限时省略 footer，不能截断正文。确认 `:agent_time:`、`:agent_mdi_robot_outline:`、`:agent_tool:`、`:agent_skill:` 在工作区存在。统计口径、日志容量与缺失处理见 Footer 计划。
 
 
 ## 3. Slack App

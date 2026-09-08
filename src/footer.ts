@@ -1,5 +1,6 @@
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { Receiver } from "@upstash/qstash";
+import { buildRunFooter, readRunLogStats } from "./footer-stats.js";
 import { loadFooterConfig, type FooterConfig } from "./footer-config.js";
 import {
   footerKey,
@@ -11,7 +12,6 @@ import {
   type ReplyRef,
 } from "./footer-data.js";
 import {
-  buildDurationFooter,
   readOwnReply,
   replyBodyDigest,
   updateReplyFooter,
@@ -276,8 +276,15 @@ export async function processFooter(
     )
       throw new Error("footer_scope_mismatch");
     if (run.status !== "completed") throw new Error("footer_run_not_completed");
-    const footer = buildDurationFooter(run);
-    if (!footer) return { action: "skipped", reason: "missing_duration" };
+    // 保存最终展示快照，Slack 写响应丢失后的重试无需重新拉取日志，也不会改变统计。
+    let footer = await store.get(key + ":stats");
+    if (!footer) {
+      footer =
+        buildRunFooter(run, await readRunLogStats(config, ref, fetchImpl)) ??
+        null;
+      if (!footer) return { action: "skipped", reason: "missing_stats" };
+      await store.set(key + ":stats", footer, STATE_TTL_SECONDS);
+    }
     const message = await readOwnReply(config, binding, fetchImpl);
     if (replyBodyDigest(message, ref.taskId) !== binding.bodyDigest)
       throw new Error("footer_body_changed");

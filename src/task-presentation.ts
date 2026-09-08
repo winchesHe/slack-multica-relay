@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import type { SlackThreadEvent } from "./thread-router.js";
-import type { SlackReplyContext } from "./multica-api.js";
 
 const PAYLOAD_START = "<!-- relay-payload:v1 -->";
 const PAYLOAD_END = "<!-- /relay-payload -->";
@@ -98,7 +97,6 @@ export function formatTaskDescription(
   event: SlackThreadEvent,
   marker: string,
   followup = false,
-  replyContext?: SlackReplyContext,
 ): string {
   const payload = compactEvent(event);
   const timestamp = Number(event.messageTs) * 1000;
@@ -121,11 +119,7 @@ export function formatTaskDescription(
       team: event.teamId,
       channel: event.channelId,
     });
-  const json = JSON.stringify(
-    { eventPayload: payload, ...(replyContext ? { replyContext } : {}) },
-    null,
-    2,
-  );
+  const json = JSON.stringify({ eventPayload: payload }, null, 2);
   const fence = "`".repeat(
     (json.match(/`+/g) ?? []).reduce(
       (length, run) => Math.max(length, run.length + 1),

@@ -27,6 +27,7 @@ export interface FooterRun {
   status: string;
   started_at?: string | null;
   completed_at?: string | null;
+  usage?: unknown;
 }
 
 export function parseRunRef(value: unknown): RunRef {

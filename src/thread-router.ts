@@ -5,7 +5,6 @@ import {
   findIssue,
   createComment,
   findComment,
-  getSlackReplyContext,
   type ApiConfig,
 } from "./multica-api.js";
 import type { MentionMatch } from "./mentions.js";
@@ -28,7 +27,6 @@ export interface SlackThreadEvent {
 }
 export interface ThreadRouterConfig extends ApiConfig {
   store: ThreadStore;
-  footerEnabled?: boolean;
 }
 interface ThreadState {
   version: 2;
@@ -107,9 +105,6 @@ export async function routeSlackThreadEvent(
         }
       } else {
         if (state.creating) throw new Error("ambiguous_issue_create");
-        const replyContext = config.footerEnabled
-          ? undefined
-          : await getSlackReplyContext(config, fetchImpl);
         state.rootMessageKey = messageKey(event);
         state.creating = true;
         await config.store.set(key, JSON.stringify(state), STATE_TTL_SECONDS);
@@ -117,7 +112,7 @@ export async function routeSlackThreadEvent(
           const created = await createIssue(
             config,
             formatTaskTitle(event, scope),
-            formatTaskDescription(event, marker, false, replyContext),
+            formatTaskDescription(event, marker, false),
             fetchImpl,
           );
           state.issueId = created.id;
@@ -166,9 +161,6 @@ export async function routeSlackThreadEvent(
         (JSON.parse(previous) as MessageState).phase === "writing"
       )
         throw new Error("ambiguous_comment_create");
-      const replyContext = config.footerEnabled
-        ? undefined
-        : await getSlackReplyContext(config, fetchImpl);
       await config.store.set(
         msgKey,
         JSON.stringify({ phase: "writing" }),
@@ -178,7 +170,7 @@ export async function routeSlackThreadEvent(
         await createComment(
           config,
           state.issueId,
-          formatTaskDescription(event, messageMarker, true, replyContext),
+          formatTaskDescription(event, messageMarker, true),
           fetchImpl,
         );
       } catch (error) {
