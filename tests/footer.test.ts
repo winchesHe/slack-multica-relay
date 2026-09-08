@@ -4,6 +4,8 @@ import {
   acceptMulticaHook,
   consumeFooter,
   registerSlackReply,
+  recoverFooters,
+  manageFooterRecovery,
 } from "../src/footer.js";
 import { buildDurationFooter } from "../src/footer-stats.js";
 import { digest } from "../src/thread-router.js";
@@ -32,6 +34,7 @@ const env = {
   QSTASH_NEXT_SIGNING_KEY: "next-signing-key",
   RELAY_CONSUMER_URL: "https://relay.test/api/queue/consume",
   RELAY_FOOTER_ENABLED: "true",
+  CRON_SECRET: "c".repeat(32),
   MULTICA_PLUGIN_INSTALLATION_ID: "66666666-6666-6666-6666-666666666666",
   MULTICA_PLUGIN_SIGNING_SECRET: "whsec_" + "ab".repeat(32),
   RELAY_REPLY_TOKEN: "r".repeat(32),
@@ -115,6 +118,7 @@ function queued(
 
 function fixture() {
   const kv = new Map<string, string>();
+  const pending = new Map<string, number>();
   const scope = digest(`${workspace}:${project}:${agent}`);
   const event = {
     teamId: "T1",
@@ -144,10 +148,28 @@ function fixture() {
     status: "completed",
     started_at: "2026-09-08T10:15:02Z",
     completed_at: "2026-09-08T10:21:32Z",
-    usage: undefined as unknown,
+    usage: [
+      {
+        model: "gpt-6-astra",
+        provider: "codex",
+        input_tokens: 1000,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+      },
+    ] as unknown,
   };
   const runs = [run];
-  const logMessages: Record<string, unknown>[] = [];
+  const logMessages: Record<string, unknown>[] = [
+    {
+      task_id: taskId,
+      issue_id: issueId,
+      seq: 1,
+      type: "text",
+      content: "done",
+    },
+  ];
+  const runLogs = new Map([[taskId, logMessages]]);
   const message: Record<string, any> = {
     ts: ref.messageTs,
     thread_ts: ref.threadTs,
@@ -172,6 +194,7 @@ function fixture() {
   ]);
   const writes: Record<string, any>[] = [],
     published: unknown[] = [],
+    publishHeaders: Record<string, string>[] = [],
     urls: string[] = [];
   let queueFails = false,
     loseUpdate = false,
@@ -189,6 +212,32 @@ function fixture() {
         kv.set(command[1], command[2]);
         return Response.json({ result: "OK" });
       }
+      if (command[0] === "ZREM") {
+        return Response.json({ result: pending.delete(command[2]) ? 1 : 0 });
+      }
+      if (command[0] === "EVAL" && command[1].includes("footer_track")) {
+        if (kv.has(command[5]) || kv.has(command[6]))
+          return Response.json({ result: 0 });
+        if (!kv.has(command[4])) kv.set(command[4], command[8]);
+        if (!pending.has(command[7]))
+          pending.set(command[7], Number(command[9]));
+        return Response.json({ result: 1 });
+      }
+      if (command[0] === "EVAL" && command[1].includes("footer_schedule")) {
+        if (kv.has(command[4]) || kv.has(command[5]))
+          return Response.json({ result: 0 });
+        pending.set(command[6], Number(command[7]));
+        return Response.json({ result: 1 });
+      }
+      if (command[0] === "EVAL" && command[1].includes("footer_claim")) {
+        const rows = [...pending.entries()]
+          .filter(([, due]) => due <= Number(command[4]))
+          .sort((a, b) => a[1] - b[1])
+          .slice(0, Number(command[5]))
+          .map(([member]) => member);
+        rows.forEach((member) => pending.set(member, Number(command[6])));
+        return Response.json({ result: rows });
+      }
       if (command[0] === "EVAL") {
         if (kv.get(command[3]) === command[4]) kv.delete(command[3]);
         return Response.json({ result: 1 });
@@ -199,13 +248,17 @@ function fixture() {
       if (queueFails)
         return Response.json({ error: "unavailable" }, { status: 503 });
       published.push(JSON.parse(String(init?.body)));
+      publishHeaders.push(Object.fromEntries(new Headers(init?.headers)));
       return Response.json({ messageId: "queue-message" });
     }
     if (url === `${env.MULTICA_API_BASE_URL}/api/issues/${issueId}`)
       return Response.json(issue);
     if (url === `${env.MULTICA_API_BASE_URL}/api/issues/${issueId}/task-runs`)
       return Response.json(runs);
-    if (url.includes("/messages")) return Response.json(logMessages);
+    if (url.includes("/messages"))
+      return Response.json(
+        runLogs.get(new URL(url).pathname.split("/")[3]!) ?? [],
+      );
     if (url.endsWith("/auth.test"))
       return Response.json({ ok: true, team_id: "T1", user_id: "U1" });
     if (url.endsWith("/conversations.replies")) {
@@ -232,14 +285,17 @@ function fixture() {
   return {
     fetcher,
     kv,
+    pending,
     issue,
     run,
     runs,
     logMessages,
+    runLogs,
     message,
     messages,
     writes,
     published,
+    publishHeaders,
     urls,
     failQueue: () => {
       queueFails = true;
@@ -255,24 +311,33 @@ function fixture() {
     },
   };
 }
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.useRealTimers();
+});
 
 describe("完成通知到原消息的集成链路", () => {
-  it("登记、验签、队列消费后只给原消息添加耗时，并保留正文和附件", async () => {
+  it("登记、验签、队列消费后给原消息添加统计，并保留正文和附件", async () => {
     const f = fixture(),
       body = structuredClone(f.message.blocks);
     f.run.status = "running";
     expect(
       (await registerSlackReply(registration(), env, f.fetcher)).status,
     ).toBe(200);
-    expect(f.published).toHaveLength(0);
+    expect(f.published).toHaveLength(1);
+    expect(f.publishHeaders[0]!["upstash-delay"]).toBe("900s");
     f.run.status = "completed";
     expect((await acceptMulticaHook(hook(), env, f.fetcher)).status).toBe(202);
-    expect(f.published).toEqual([{ version: 1, issueId, taskId }]);
+    expect(f.published).toEqual([
+      { version: 1, issueId, taskId },
+      { version: 1, issueId, taskId },
+    ]);
     expect((await consumeFooter(queued(), env, f.fetcher)).status).toBe(200);
     expect(f.writes).toHaveLength(1);
     expect(f.writes[0]!.blocks.slice(0, -1)).toEqual(body);
-    expect(f.writes[0]!.text).toBe("正文 **必须保留**\n\n:agent_time: 6m 30s");
+    expect(f.writes[0]!.text).toBe(
+      "正文 **必须保留**\n\n:agent_time: 6m 30s · :agent_mdi_robot_outline: gpt-6-astra: 1.0k tokens (0% cached) · :agent_tool: 0 tools · :agent_skill: 0 skills",
+    );
     expect(f.writes[0]!.attachments).toEqual(f.message.attachments);
     expect(f.writes[0]!.ts).toBe(ref.messageTs);
     expect([...f.kv.values()].join(" ")).not.toContain("DO-NOT-PERSIST");
@@ -291,6 +356,7 @@ describe("完成通知到原消息的集成链路", () => {
         cache_write_tokens: 0,
       },
     ];
+    f.logMessages.splice(0);
     f.logMessages.push(
       {
         seq: 1,
@@ -387,6 +453,10 @@ describe("完成通知到原消息的集成链路", () => {
       messageTs: "1788862801.000000",
     };
     f.runs.push({ ...f.run, id: other.taskId });
+    f.runLogs.set(
+      other.taskId,
+      f.logMessages.map((m) => ({ ...m, task_id: other.taskId })),
+    );
     f.messages.set(other.messageTs, {
       ...structuredClone(f.message),
       ts: other.messageTs,
@@ -514,22 +584,24 @@ describe("身份、签名与正文边界", () => {
       (await registerSlackReply(registration(other), env, f.fetcher)).status,
     ).toBe(409);
   });
-  it("正文在登记后被编辑时不覆盖新正文", async () => {
+  it("正文在登记后被编辑时停止自动恢复，不覆盖新正文", async () => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
     const f = fixture();
     await registerSlackReply(registration(), env, f.fetcher);
     f.message.text = "人工修订";
-    expect((await consumeFooter(queued(), env, f.fetcher)).status).toBe(503);
+    expect(
+      await (await consumeFooter(queued(), env, f.fetcher)).json(),
+    ).toEqual({ action: "stopped", reason: "footer_body_changed" });
     expect(f.writes).toHaveLength(0);
+    expect(f.pending.size).toBe(0);
   });
-  it("时间缺失时不生成占位 footer", async () => {
+  it("时间缺失时只隐藏耗时片段，保留其他统计", async () => {
     const f = fixture();
     await registerSlackReply(registration(), env, f.fetcher);
     f.run.completed_at = "";
-    expect(
-      await (await consumeFooter(queued(), env, f.fetcher)).json(),
-    ).toEqual({ action: "skipped", reason: "missing_stats" });
-    expect(f.writes).toHaveLength(0);
+    expect((await consumeFooter(queued(), env, f.fetcher)).status).toBe(200);
+    expect(f.writes[0]!.text).not.toContain(":agent_time:");
+    expect(f.writes[0]!.text).toContain(":agent_mdi_robot_outline:");
   });
   it("已有 50 个 blocks 时不截断正文", async () => {
     const f = fixture();
@@ -537,7 +609,7 @@ describe("身份、签名与正文边界", () => {
     await registerSlackReply(registration(), env, f.fetcher);
     expect(
       await (await consumeFooter(queued(), env, f.fetcher)).json(),
-    ).toEqual({ action: "skipped", reason: "unsupported_message" });
+    ).toEqual({ action: "stopped", reason: "unsupported_message" });
     expect(f.writes).toHaveLength(0);
   });
   it("关闭开关后新增接口不可用且不调用外部服务", async () => {
@@ -568,4 +640,331 @@ describe("身份、签名与正文边界", () => {
       }),
     ).toBe(expected);
   });
+});
+
+function recoveryRequest(operation: "inspect" | "retry") {
+  return new Request("https://relay.test/api/footer/recovery", {
+    method: "POST",
+    headers: { authorization: `Bearer ${env.CRON_SECRET}` },
+    body: JSON.stringify({ version: 1, issueId, taskId, operation }),
+  });
+}
+function sweepRequest() {
+  return new Request("https://relay.test/api/cron/footer", {
+    headers: { authorization: `Bearer ${env.CRON_SECRET}` },
+  });
+}
+function advance(ms: number) {
+  vi.setSystemTime(Date.now() + ms);
+}
+function savedRecovery(f: ReturnType<typeof fixture>) {
+  return JSON.parse(
+    [...f.kv.entries()].find(([key]) => key.endsWith(":recovery"))![1],
+  );
+}
+
+describe("持久化恢复与有限补查", () => {
+  it("完成 Hook 全部丢失时，登记产生的延迟检查仍更新原回复", async () => {
+    const f = fixture();
+    f.run.status = "running";
+    await registerSlackReply(registration(), env, f.fetcher);
+    expect(f.pending.size).toBe(1);
+    expect(f.publishHeaders[0]!["upstash-delay"]).toBe("900s");
+    f.run.status = "completed";
+    expect((await consumeFooter(queued(), env, f.fetcher)).status).toBe(200);
+    expect(f.writes).toHaveLength(1);
+    expect(f.pending.size).toBe(0);
+  });
+  it("登记后入队失败，扫描仍可根据已保存索引重新发布", async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    f.failQueue();
+    expect(
+      (await registerSlackReply(registration(), env, f.fetcher)).status,
+    ).toBe(503);
+    expect(f.pending.size).toBe(1);
+    f.restoreQueue();
+    advance(900001);
+    const before = f.urls.length;
+    expect(
+      await (await recoverFooters(sweepRequest(), env, f.fetcher)).json(),
+    ).toMatchObject({ claimed: 1, published: 1, failed: 0 });
+    expect(
+      f.urls.slice(before).some((url) => url.includes("/api/issues")),
+    ).toBe(false);
+    expect((await consumeFooter(queued(), env, f.fetcher)).status).toBe(200);
+    expect(f.writes).toHaveLength(1);
+  });
+  it("并发扫描只领取一次；领取后发布失败的索引仍可再次领取", async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    await registerSlackReply(registration(), env, f.fetcher);
+    advance(900001);
+    const responses = await Promise.all([
+      recoverFooters(sweepRequest(), env, f.fetcher),
+      recoverFooters(sweepRequest(), env, f.fetcher),
+    ]);
+    const bodies = await Promise.all(responses.map((r) => r.json()));
+    expect(bodies.map((b) => b.claimed).sort()).toEqual([0, 1]);
+    advance(3600001);
+    f.failQueue();
+    expect((await recoverFooters(sweepRequest(), env, f.fetcher)).status).toBe(
+      503,
+    );
+    expect(f.pending.size).toBe(1);
+    advance(3600001);
+    f.restoreQueue();
+    expect(
+      await (await recoverFooters(sweepRequest(), env, f.fetcher)).json(),
+    ).toMatchObject({ claimed: 1, published: 1 });
+  });
+  it("usage 迟到时等待后补齐，已读取的完整日志不重读", async () => {
+    vi.useFakeTimers();
+    const f = fixture(),
+      usage = f.run.usage;
+    f.run.usage = undefined;
+    await registerSlackReply(registration(), env, f.fetcher);
+    expect(
+      await (await consumeFooter(queued(), env, f.fetcher)).json(),
+    ).toEqual({ action: "deferred", reason: "stats_pending" });
+    expect(f.writes).toHaveLength(0);
+    const runQueries = f.urls.filter((url) =>
+      url.endsWith("/task-runs"),
+    ).length;
+    await consumeFooter(queued(), env, f.fetcher);
+    expect(f.urls.filter((url) => url.endsWith("/task-runs"))).toHaveLength(
+      runQueries,
+    );
+    expect(f.publishHeaders.at(-1)!["upstash-delay"]).toBe("30s");
+    f.run.usage = usage;
+    advance(30000);
+    expect((await consumeFooter(queued(), env, f.fetcher)).status).toBe(200);
+    expect(f.writes).toHaveLength(1);
+    expect(f.urls.filter((url) => url.includes("/messages"))).toHaveLength(1);
+    expect(savedRecovery(f).statsReads).toBe(2);
+  });
+  it("日志一直缺失时最多读取三次，最终展示其他可靠项", async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    f.logMessages.splice(0);
+    await registerSlackReply(registration(), env, f.fetcher);
+    await consumeFooter(queued(), env, f.fetcher);
+    advance(30000);
+    await consumeFooter(queued(), env, f.fetcher);
+    expect(f.publishHeaders.at(-1)!["upstash-delay"]).toBe("120s");
+    advance(120000);
+    await consumeFooter(queued(), env, f.fetcher);
+    await consumeFooter(queued(), env, f.fetcher);
+    expect(f.urls.filter((url) => url.includes("/messages"))).toHaveLength(3);
+    expect(f.writes).toHaveLength(1);
+    expect(f.writes[0]!.text).toContain("1.0k tokens");
+    expect(f.writes[0]!.text).not.toContain(":agent_tool:");
+    expect(f.pending.size).toBe(0);
+  });
+  it("第二次查询字段消失时保留此前已确认的 usage", async () => {
+    vi.useFakeTimers();
+    const f = fixture(),
+      logs = [...f.logMessages];
+    f.logMessages.splice(0);
+    await registerSlackReply(registration(), env, f.fetcher);
+    await consumeFooter(queued(), env, f.fetcher);
+    f.run.usage = undefined;
+    f.logMessages.push(...logs);
+    advance(30000);
+    await consumeFooter(queued(), env, f.fetcher);
+    expect(f.writes[0]!.text).toContain("1.0k tokens");
+    expect(f.writes[0]!.text).toContain(":agent_tool: 0 tools");
+  });
+  it("没有任何统计时有限补查后停止，不生成空 footer", async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    f.run.usage = undefined;
+    f.run.completed_at = "";
+    f.logMessages.splice(0);
+    await registerSlackReply(registration(), env, f.fetcher);
+    await consumeFooter(queued(), env, f.fetcher);
+    advance(30000);
+    await consumeFooter(queued(), env, f.fetcher);
+    advance(120000);
+    expect(
+      await (await consumeFooter(queued(), env, f.fetcher)).json(),
+    ).toEqual({ action: "stopped", reason: "missing_stats" });
+    expect(f.writes).toHaveLength(0);
+    expect(f.pending.size).toBe(0);
+  });
+  it("运行未结束时继续延迟检查，七天后不再无限检查", async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    f.run.status = "running";
+    await registerSlackReply(registration(), env, f.fetcher);
+    expect(
+      await (await consumeFooter(queued(), env, f.fetcher)).json(),
+    ).toEqual({ action: "deferred", reason: "run_not_terminal" });
+    expect(f.writes).toHaveLength(0);
+    advance(7 * 86400000 + 1);
+    expect(
+      await (await consumeFooter(queued(), env, f.fetcher)).json(),
+    ).toEqual({ action: "stopped", reason: "run_not_terminal" });
+    expect(f.pending.size).toBe(0);
+  });
+  it.each(["failed", "cancelled"])(
+    "%s 的已登记运行只更新自己的回复",
+    async (status) => {
+      const f = fixture();
+      f.run.status = "running";
+      await registerSlackReply(registration(), env, f.fetcher);
+      f.run.status = status;
+      if (status === "failed")
+        expect(
+          (
+            await acceptMulticaHook(
+              hook({ event_type: "task.failed" }),
+              env,
+              f.fetcher,
+            )
+          ).status,
+        ).toBe(202);
+      await consumeFooter(queued(), env, f.fetcher);
+      expect(f.writes).toHaveLength(1);
+      expect(f.writes[0]!.ts).toBe(ref.messageTs);
+      expect(f.writes[0]!.text).not.toContain(status);
+    },
+  );
+  it("失败且没有登记回复的运行保持静默", async () => {
+    const f = fixture();
+    f.run.status = "failed";
+    await acceptMulticaHook(
+      hook({ event_type: "task.failed" }),
+      env,
+      f.fetcher,
+    );
+    expect(
+      await (await consumeFooter(queued(), env, f.fetcher)).json(),
+    ).toEqual({ action: "waiting_for_reply" });
+    expect(f.writes).toHaveLength(0);
+    expect(f.pending.size).toBe(0);
+  });
+  it("队列多次重试耗尽后，扫描仍可恢复临时服务失败", async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    await registerSlackReply(registration(), env, f.fetcher);
+    const failing: typeof fetch = async (url, init) =>
+      String(url).endsWith("/task-runs")
+        ? new Response("private failure", { status: 503 })
+        : f.fetcher(url, init);
+    for (let i = 0; i < 4; i++)
+      expect((await consumeFooter(queued(), env, failing)).status).toBe(503);
+    expect(savedRecovery(f).errors).toBe(4);
+    expect(f.pending.size).toBe(1);
+    advance(900001);
+    await recoverFooters(sweepRequest(), env, f.fetcher);
+    expect((await consumeFooter(queued(), env, f.fetcher)).status).toBe(200);
+    expect(f.writes).toHaveLength(1);
+  });
+  it("连续十二次故障后停止，可查看原因并在核对原消息后人工重放", async () => {
+    const f = fixture();
+    await registerSlackReply(registration(), env, f.fetcher);
+    const failing: typeof fetch = async (url, init) =>
+      String(url).endsWith("/task-runs")
+        ? new Response("private failure", { status: 503 })
+        : f.fetcher(url, init);
+    for (let i = 0; i < 11; i++)
+      expect((await consumeFooter(queued(), env, failing)).status).toBe(503);
+    expect(await (await consumeFooter(queued(), env, failing)).json()).toEqual({
+      action: "stopped",
+      reason: "footer_multica_unavailable",
+    });
+    expect(f.pending.size).toBe(0);
+    const inspected = await (
+      await manageFooterRecovery(recoveryRequest("inspect"), env, f.fetcher)
+    ).json();
+    expect(inspected.state.errors).toBe(12);
+    expect(inspected.stopped.reason).toBe("footer_multica_unavailable");
+    expect(JSON.stringify(inspected)).not.toContain("private failure");
+    expect(
+      (await manageFooterRecovery(recoveryRequest("retry"), env, f.fetcher))
+        .status,
+    ).toBe(202);
+    expect(savedRecovery(f).errors).toBe(0);
+    await consumeFooter(queued(), env, f.fetcher);
+    expect(f.writes).toHaveLength(1);
+    expect(
+      await (
+        await manageFooterRecovery(recoveryRequest("retry"), env, f.fetcher)
+      ).json(),
+    ).toEqual({ action: "duplicate" });
+  });
+  it("人工重放不能覆盖编辑过的正文或绕过目标范围", async () => {
+    const f = fixture();
+    await registerSlackReply(registration(), env, f.fetcher);
+    f.message.text = "edited";
+    await consumeFooter(queued(), env, f.fetcher);
+    expect(
+      (await manageFooterRecovery(recoveryRequest("retry"), env, f.fetcher))
+        .status,
+    ).toBe(503);
+    expect(f.writes).toHaveLength(0);
+    expect([...f.kv.keys()].some((key) => key.endsWith(":stopped"))).toBe(true);
+    f.issue.project_id = "other";
+    expect(
+      (await manageFooterRecovery(recoveryRequest("retry"), env, f.fetcher))
+        .status,
+    ).toBe(409);
+  });
+  it.each(["empty-blocks", "full-text"])(
+    "%s 超出容量时停止，不截断正文",
+    async (mode) => {
+      const f = fixture();
+      if (mode === "empty-blocks") f.message.blocks = [];
+      else f.message.text = "x".repeat(40000);
+      const original = structuredClone(f.message);
+      await registerSlackReply(registration(), env, f.fetcher);
+      expect(
+        await (await consumeFooter(queued(), env, f.fetcher)).json(),
+      ).toEqual({ action: "stopped", reason: "unsupported_message" });
+      expect(f.message).toEqual(original);
+      expect(f.writes).toHaveLength(0);
+    },
+  );
+  it("恢复接口拒绝错误凭据，关闭开关后定时扫描不访问外部服务", async () => {
+    const f = fixture(),
+      request = sweepRequest();
+    request.headers.set("authorization", "Bearer wrong");
+    expect((await recoverFooters(request, env, f.fetcher)).status).toBe(401);
+    const manual = recoveryRequest("retry");
+    manual.headers.delete("authorization");
+    expect((await manageFooterRecovery(manual, env, f.fetcher)).status).toBe(
+      401,
+    );
+    expect(
+      await (
+        await recoverFooters(
+          sweepRequest(),
+          { ...env, RELAY_FOOTER_ENABLED: "false" },
+          f.fetcher,
+        )
+      ).json(),
+    ).toEqual({ action: "disabled" });
+    expect(f.urls).toHaveLength(0);
+  });
+});
+
+it("回复和恢复状态均过期后清理遗留索引，不永久重复扫描", async () => {
+  const f = fixture();
+  f.pending.set(JSON.stringify({ version: 1, issueId, taskId }), Date.now());
+  await consumeFooter(queued(), env, f.fetcher);
+  expect(f.pending.size).toBe(0);
+  expect(f.writes).toHaveLength(0);
+});
+it("损坏的恢复状态停止并保留原因，不无限重试", async () => {
+  const f = fixture();
+  await registerSlackReply(registration(), env, f.fetcher);
+  const key = [...f.kv.keys()].find((k) => k.endsWith(":recovery"))!;
+  f.kv.set(key, "invalid json");
+  expect(await (await consumeFooter(queued(), env, f.fetcher)).json()).toEqual({
+    action: "stopped",
+    reason: "footer_recovery_invalid",
+  });
+  expect(f.pending.size).toBe(0);
+  expect(f.writes).toHaveLength(0);
 });

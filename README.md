@@ -45,6 +45,6 @@ pnpm lint
 
 ## 完成后补 Footer
 
-前两阶段代码与本地验证已提供，默认 `RELAY_FOOTER_ENABLED=false`。开启后，由统一发送脚本登记实际回复，Multica Hook 经 QStash 唤醒 Vercel 函数，在同一条消息后追加耗时、模型、Tokens/cache、Tools 和已加载 Skills 数量，缺失项隐藏。Relay 不再查询或传递旧 Agent 模型快照。当前线上发送身份为 User，更新必须使用同一作者。
+三个阶段的代码与本地验证已提供，默认 `RELAY_FOOTER_ENABLED=false`。开启后，由统一发送脚本登记实际回复，Multica Hook 经 QStash 唤醒 Vercel 函数，在同一条消息后追加耗时、模型、Tokens/cache、Tools 和已加载 Skills 数量，缺失项隐藏。Relay 不再查询或传递旧 Agent 模型快照。当前线上发送身份为 User，更新必须使用同一作者。
 
-计划、最终展示格式、当前支持范围和未完成的线上验收见 [Footer 实施计划](FOOTER-PLAN.zh-CN.md)。新增接口为 `/api/multica/events`、`/api/slack/replies`、`/api/queue/footer`，本阶段仅提供 Vercel 入口。低频补偿和线上验收在第三阶段完成。
+计划、最终展示格式、当前支持范围和未完成的线上验收见 [Footer 实施计划](FOOTER-PLAN.zh-CN.md)。新增接口为 `/api/multica/events`、`/api/slack/replies`、`/api/queue/footer`，本阶段仅提供 Vercel 入口。已实现延迟检查、每日漏事件扫描和有限重试；线上验收仍待完成。单运行查询/重放及 DLQ 步骤见 [Footer 运维](FOOTER-OPERATIONS.zh-CN.md)。

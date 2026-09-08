@@ -1,6 +1,10 @@
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { Receiver } from "@upstash/qstash";
-import { buildRunFooter, readRunLogStats } from "./footer-stats.js";
+import {
+  buildRunFooter,
+  readRunLogStats,
+  type LogStats,
+} from "./footer-stats.js";
 import { loadFooterConfig, type FooterConfig } from "./footer-config.js";
 import {
   footerKey,
@@ -18,7 +22,15 @@ import {
 } from "./footer-slack.js";
 import { json, readBody } from "./http.js";
 import { digest, STATE_TTL_SECONDS } from "./thread-router.js";
-import { UpstashThreadStore, type ThreadStore } from "./thread-store.js";
+import {
+  UpstashFooterStore,
+  readRecoveryState,
+  FALLBACK_DELAY_MS,
+  MAX_RECOVERY_AGE_MS,
+  MAX_RECOVERY_ERRORS,
+  type FooterStore,
+  type RecoveryState,
+} from "./footer-store.js";
 
 interface Binding extends ReplyRef {
   bodyDigest: string;
@@ -56,8 +68,9 @@ export function verifyMulticaHook(
 async function publish(
   config: FooterConfig,
   ref: RunRef,
-  source: "hook" | "reply",
+  source: string,
   fetchImpl: typeof fetch,
+  dueAt = 0,
 ) {
   const response = await fetchImpl(
     `${config.queueUrl}/v2/publish/${config.footerConsumerUrl}`,
@@ -69,6 +82,9 @@ async function publish(
         "Upstash-Deduplication-Id": digest(
           `${config.footerConsumerUrl}:${ref.taskId}:${source}:v1`,
         ),
+        ...(dueAt > Date.now()
+          ? { "Upstash-Delay": `${Math.ceil((dueAt - Date.now()) / 1000)}s` }
+          : {}),
         "Upstash-Retries": "3",
         "Upstash-Timeout": "50s",
         "Upstash-Flow-Control-Key": digest(
@@ -93,12 +109,13 @@ async function withFooter(
   fetchImpl: typeof fetch,
   handler: (
     config: FooterConfig,
-    store: ThreadStore,
+    store: FooterStore,
     raw: string,
     fetcher: typeof fetch,
   ) => Promise<Response>,
+  method = "POST",
 ) {
-  if (request.method !== "POST")
+  if (request.method !== method)
     return json({ error: "method_not_allowed" }, 405);
   let config: FooterConfig;
   try {
@@ -123,13 +140,15 @@ async function withFooter(
       ...init,
       signal: init.signal ? AbortSignal.any([deadline, init.signal]) : deadline,
     });
-  const store = new UpstashThreadStore(
-    config.kvRestApiUrl,
-    config.kvRestApiToken,
-    fetcher,
-  );
+  const store = new UpstashFooterStore(config, fetcher);
+  const startedAt = Date.now();
   try {
-    return await handler(config, store, raw, fetcher);
+    const result = await handler(config, store, raw, fetcher);
+    console.info("relay_footer_http", {
+      status: result.status,
+      durationMs: Date.now() - startedAt,
+    });
+    return result;
   } catch (error) {
     const code =
       error instanceof Error && /^footer_[a-z_]+$/u.test(error.message)
@@ -175,7 +194,7 @@ export async function acceptMulticaHook(
         body.trigger !== "event"
       )
         throw new Error("invalid_footer_request");
-      if (body.event_type !== "task.completed")
+      if (!["task.completed", "task.failed"].includes(String(body.event_type)))
         return json({ action: "ignored" });
       if (
         !isRecord(body.input) ||
@@ -233,6 +252,7 @@ export async function registerSlackReply(
         bodyDigest: replyBodyDigest(message, ref.taskId),
       };
       const encoded = JSON.stringify(binding);
+      await store.track(parseRunRef(ref), Date.now());
       if (
         !(await store.setIfAbsent(key + ":reply", encoded, STATE_TTL_SECONDS))
       ) {
@@ -240,8 +260,16 @@ export async function registerSlackReply(
           throw new Error("footer_reply_conflict");
       }
       // 两种到达顺序都闭合：完成通知已消费却尚未登记时，由登记端重新唤醒。
-      if (run.status === "completed" || (await store.get(key + ":event")))
+      if (isTerminal(run.status) || (await store.get(key + ":event")))
         await publish(config, parseRunRef(ref), "reply", fetcher);
+      else
+        await publish(
+          config,
+          parseRunRef(ref),
+          "registered",
+          fetcher,
+          Date.now() + FALLBACK_DELAY_MS,
+        );
       return json({
         action: "registered",
         taskId: ref.taskId,
@@ -251,38 +279,147 @@ export async function registerSlackReply(
   );
 }
 
+function isTerminal(status: string): boolean {
+  return ["completed", "failed", "cancelled"].includes(status);
+}
+
+async function stopRecovery(
+  ref: RunRef,
+  config: FooterConfig,
+  store: FooterStore,
+  reason: string,
+) {
+  await store.set(
+    footerKey(config, ref) + ":stopped",
+    JSON.stringify({ reason, stoppedAt: Date.now() }),
+    STATE_TTL_SECONDS,
+  );
+  await store.finish(ref);
+  console.warn("relay_footer_stopped", {
+    taskId: ref.taskId,
+    issueId: ref.issueId,
+    reason,
+  });
+  return { action: "stopped", reason };
+}
+
 export async function processFooter(
   ref: RunRef,
   config: FooterConfig,
-  store: ThreadStore,
+  store: FooterStore,
   fetchImpl: typeof fetch,
 ) {
   const key = footerKey(config, ref),
     owner = randomUUID();
   if (!(await store.setIfAbsent(key + ":lock", owner, 120)))
     throw new Error("footer_busy");
+  let state: RecoveryState | undefined;
   try {
-    if (await store.get(key + ":done")) return { action: "duplicate" };
+    if (await store.get(key + ":done")) {
+      await store.finish(ref);
+      return { action: "duplicate" };
+    }
+    const stopped = await store.get(key + ":stopped");
+    if (stopped) {
+      await store.finish(ref);
+      return { action: "stopped", reason: JSON.parse(stopped).reason };
+    }
     const raw = await store.get(key + ":reply");
-    if (!raw) return { action: "waiting_for_reply" };
+    if (!raw) {
+      const tracked = await store.get(key + ":recovery");
+      if (
+        tracked &&
+        Date.now() - readRecoveryState(tracked).firstSeenAt >
+          MAX_RECOVERY_AGE_MS
+      )
+        return await stopRecovery(ref, config, store, "reply_missing");
+      if (!tracked) await store.finish(ref);
+      return { action: "waiting_for_reply" };
+    }
     const binding: Binding = JSON.parse(raw);
     parseReplyRef(binding);
     if (binding.taskId !== ref.taskId || binding.issueId !== ref.issueId)
       throw new Error("footer_scope_mismatch");
+    await store.track(ref, Date.now());
+    state = readRecoveryState(await store.get(key + ":recovery"));
+    if (state.nextCheckAt > Date.now()) {
+      await publish(
+        config,
+        ref,
+        `stats-${state.statsReads}`,
+        fetchImpl,
+        state.nextCheckAt,
+      );
+      return { action: "deferred", reason: "stats_pending" };
+    }
     const { run, event } = await readScopedRun(config, ref, fetchImpl);
     if (
       event.channelId !== binding.channelId ||
       event.threadTs !== binding.threadTs
     )
       throw new Error("footer_scope_mismatch");
-    if (run.status !== "completed") throw new Error("footer_run_not_completed");
-    // 保存最终展示快照，Slack 写响应丢失后的重试无需重新拉取日志，也不会改变统计。
+    if (!isTerminal(run.status)) {
+      if (Date.now() - state.firstSeenAt > MAX_RECOVERY_AGE_MS)
+        return await stopRecovery(ref, config, store, "run_not_terminal");
+      const dueAt =
+        (Math.floor(Date.now() / FALLBACK_DELAY_MS) + 1) * FALLBACK_DELAY_MS;
+      await store.schedule(ref, dueAt);
+      await publish(config, ref, `running-${dueAt}`, fetchImpl, dueAt);
+      return { action: "deferred", reason: "run_not_terminal" };
+    }
     let footer = await store.get(key + ":stats");
     if (!footer) {
-      footer =
-        buildRunFooter(run, await readRunLogStats(config, ref, fetchImpl)) ??
-        null;
-      if (!footer) return { action: "skipped", reason: "missing_stats" };
+      state.statsReads++;
+      state.nextCheckAt = 0;
+      await store.set(
+        key + ":recovery",
+        JSON.stringify(state),
+        STATE_TTL_SECONDS,
+      );
+      const cachedLogs = await store.get(key + ":logstats");
+      let logs: LogStats = {};
+      if (cachedLogs) logs = JSON.parse(cachedLogs);
+      else if (state.statsReads <= 3)
+        logs = await readRunLogStats(config, ref, fetchImpl);
+      if (!cachedLogs && (logs.tools !== undefined || state.statsReads >= 3))
+        await store.set(
+          key + ":logstats",
+          JSON.stringify(logs),
+          STATE_TTL_SECONDS,
+        );
+      if (Array.isArray(run.usage) && run.usage.length)
+        await store.set(
+          key + ":usage",
+          JSON.stringify(run.usage),
+          STATE_TTL_SECONDS,
+        );
+      else {
+        const cachedUsage = await store.get(key + ":usage");
+        if (cachedUsage) run.usage = JSON.parse(cachedUsage);
+      }
+      const usageMissing = !Array.isArray(run.usage) || !run.usage.length;
+      if ((usageMissing || logs.tools === undefined) && state.statsReads < 3) {
+        state.nextCheckAt =
+          Date.now() + (state.statsReads === 1 ? 30000 : 120000);
+        await store.set(
+          key + ":recovery",
+          JSON.stringify(state),
+          STATE_TTL_SECONDS,
+        );
+        await store.schedule(ref, state.nextCheckAt);
+        await publish(
+          config,
+          ref,
+          `stats-${state.statsReads}`,
+          fetchImpl,
+          state.nextCheckAt,
+        );
+        return { action: "deferred", reason: "stats_pending" };
+      }
+      footer = buildRunFooter(run, logs) ?? null;
+      if (!footer)
+        return await stopRecovery(ref, config, store, "missing_stats");
+      // Slack 写前冻结展示；写响应丢失后的重试复用，不能重复取日志或改变统计。
       await store.set(key + ":stats", footer, STATE_TTL_SECONDS);
     }
     const message = await readOwnReply(config, binding, fetchImpl);
@@ -296,13 +433,44 @@ export async function processFooter(
       fetchImpl,
     );
     if (action === "unsupported")
-      return { action: "skipped", reason: "unsupported_message" };
+      return await stopRecovery(ref, config, store, "unsupported_message");
     await store.set(
       key + ":done",
       JSON.stringify({ messageTs: binding.messageTs, footer }),
       STATE_TTL_SECONDS,
     );
+    await store.finish(ref);
     return { action, messageTs: binding.messageTs };
+  } catch (error) {
+    const reason =
+      error instanceof Error && /^footer_[a-z_]+$/u.test(error.message)
+        ? error.message
+        : "footer_unavailable";
+    if (
+      [
+        "footer_scope_mismatch",
+        "footer_author_mismatch",
+        "footer_body_changed",
+        "footer_message_invalid",
+        "footer_recovery_invalid",
+      ].includes(reason)
+    )
+      return await stopRecovery(ref, config, store, reason);
+    if (state) {
+      state.errors++;
+      await store.set(
+        key + ":recovery",
+        JSON.stringify(state),
+        STATE_TTL_SECONDS,
+      );
+      if (
+        state.errors >= MAX_RECOVERY_ERRORS ||
+        Date.now() - state.firstSeenAt > MAX_RECOVERY_AGE_MS
+      )
+        return await stopRecovery(ref, config, store, reason);
+      await store.schedule(ref, Date.now() + FALLBACK_DELAY_MS);
+    }
+    throw error;
   } finally {
     await store.releaseIfOwner(key + ":lock", owner);
   }
@@ -342,6 +510,158 @@ export async function consumeFooter(
           fetcher,
         ),
       );
+    },
+  );
+}
+
+function validRecoveryToken(request: Request, env: NodeJS.ProcessEnv): boolean {
+  const secret = env.CRON_SECRET?.trim() ?? "";
+  return (
+    secret.length >= 32 &&
+    safeEqual(request.headers.get("authorization") ?? "", `Bearer ${secret}`)
+  );
+}
+
+export async function recoverFooters(
+  request: Request,
+  env = process.env,
+  fetchImpl: typeof fetch = fetch,
+): Promise<Response> {
+  if (!validRecoveryToken(request, env))
+    return json({ error: "invalid_recovery_token" }, 401);
+  if (env.RELAY_FOOTER_ENABLED !== "true") return json({ action: "disabled" });
+  return withFooter(
+    request,
+    env,
+    fetchImpl,
+    async (config, store, _raw, fetcher) => {
+      const refs = await store.claimDue(Date.now(), 20);
+      let published = 0,
+        finished = 0,
+        failed = 0;
+      for (let offset = 0; offset < refs.length; offset += 5) {
+        const results = await Promise.allSettled(
+          refs.slice(offset, offset + 5).map(async (ref) => {
+            const key = footerKey(config, ref);
+            if (
+              (await store.get(key + ":done")) ||
+              (await store.get(key + ":stopped"))
+            ) {
+              await store.finish(ref);
+              return "finished";
+            }
+            await publish(
+              config,
+              ref,
+              `recovery-${Math.floor(Date.now() / 3600000)}`,
+              fetcher,
+            );
+            return "published";
+          }),
+        );
+        for (const result of results) {
+          if (result.status === "rejected") failed++;
+          else if (result.value === "finished") finished++;
+          else published++;
+        }
+      }
+      console.info("relay_footer_recovery", {
+        claimed: refs.length,
+        published,
+        finished,
+        failed,
+      });
+      // 失败项仍由索引持有，下次领取或 Cron 重试继续；不把部分成功当全部完成。
+      return json(
+        { claimed: refs.length, published, finished, failed },
+        failed ? 503 : 200,
+      );
+    },
+    "GET",
+  );
+}
+
+export async function manageFooterRecovery(
+  request: Request,
+  env = process.env,
+  fetchImpl: typeof fetch = fetch,
+): Promise<Response> {
+  if (!validRecoveryToken(request, env))
+    return json({ error: "invalid_recovery_token" }, 401);
+  return withFooter(
+    request,
+    env,
+    fetchImpl,
+    async (config, store, raw, fetcher) => {
+      const body: unknown = JSON.parse(raw);
+      if (
+        !isRecord(body) ||
+        !["inspect", "retry"].includes(String(body.operation))
+      )
+        throw new Error("invalid_footer_request");
+      const ref = parseRunRef(body),
+        key = footerKey(config, ref);
+      if (body.operation === "inspect") {
+        const read = async (suffix: string) => {
+          const value = await store.get(key + suffix);
+          return value ? JSON.parse(value) : null;
+        };
+        const [state, stopped, done, binding] = await Promise.all([
+          read(":recovery"),
+          read(":stopped"),
+          read(":done"),
+          read(":reply"),
+        ]);
+        return json({
+          ...ref,
+          state,
+          stopped,
+          done: !!done,
+          messageTs: binding?.messageTs ?? null,
+        });
+      }
+      const owner = randomUUID();
+      if (!(await store.setIfAbsent(key + ":lock", owner, 120)))
+        throw new Error("footer_busy");
+      try {
+        if (await store.get(key + ":done"))
+          return json({ action: "duplicate" });
+        const bindingRaw = await store.get(key + ":reply");
+        if (!bindingRaw) throw new Error("footer_message_missing");
+        const binding: Binding = JSON.parse(bindingRaw);
+        parseReplyRef(binding);
+        const { event } = await readScopedRun(config, ref, fetcher);
+        if (
+          binding.taskId !== ref.taskId ||
+          binding.issueId !== ref.issueId ||
+          binding.channelId !== event.channelId ||
+          binding.threadTs !== event.threadTs
+        )
+          throw new Error("footer_scope_mismatch");
+        const message = await readOwnReply(config, binding, fetcher);
+        if (replyBodyDigest(message, ref.taskId) !== binding.bodyDigest)
+          throw new Error("footer_body_changed");
+        const stopped = await store.get(key + ":stopped");
+        const state: RecoveryState = {
+          version: 1,
+          firstSeenAt: Date.now(),
+          errors: 0,
+          statsReads: 0,
+          nextCheckAt: 0,
+        };
+        await store.set(
+          key + ":recovery",
+          JSON.stringify(state),
+          STATE_TTL_SECONDS,
+        );
+        if (stopped) await store.releaseIfOwner(key + ":stopped", stopped);
+        await store.track(ref, Date.now());
+        await store.schedule(ref, Date.now());
+        await publish(config, ref, `manual-${owner}`, fetcher);
+        return json({ action: "accepted", ...ref }, 202);
+      } finally {
+        await store.releaseIfOwner(key + ":lock", owner);
+      }
     },
   );
 }

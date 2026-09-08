@@ -48,13 +48,15 @@ rtk proxy python3 "$RELAY_REPLY_SCRIPT" \
 
 可加 `--dry-run` 只预览。正式调用先复用 Slack Skill 的预览与身份校验，再发送并登记返回的真实 message ts。一个 run 只发一条最终回复；进度消息不经此入口。不要在包装脚本失败后另跑 Slack send：登记失败可用相同参数补登记；sending 状态表示结果不明，需要核对 Slack 与回执，不清空回执后重发。通用 Slack Skill 不需要修改。
 
-插件 manifest 模板在 [multica.plugin.example.json](multica.plugin.example.json)。安装前把 net scope 和 transport URL 中的域名替换为实际 Vercel 域名；当前仅订阅 task.completed，按 Multica 契约授予 tasks:read 和实际回调域名的 net scope，不需要 Action API 写 scope。Hook 使用服务端配置的 Multica 查询凭据；临时 callback_token 在 HTTP 返回后撤销，不能入队。安装所得 ID、签名密钥必须与 Vercel 配置匹配。
+插件 manifest 模板在 [multica.plugin.example.json](multica.plugin.example.json)。安装前把 net scope 和 transport URL 中的域名替换为实际 Vercel 域名；当前订阅 task.completed 与 task.failed，按 Multica 契约授予 tasks:read 和实际回调域名的 net scope，不需要 Action API 写 scope。Hook 使用服务端配置的 Multica 查询凭据；临时 callback_token 在 HTTP 返回后撤销，不能入队。安装所得 ID、签名密钥必须与 Vercel 配置匹配。
 
-按 AGENTS.md 使用 Multica CLI 管理安装与 Agent 配置。当前 CLI 未提供 plugin 子命令，尚不能通过规定入口创建插件安装；不得猜接口或切换浏览器绕过。本次只准备代码、模板和本地 Prompt 候选。CLI 能力补齐后再安装、按同一 ID 回读，核对线上契约，再完成受控验证。
+按 AGENTS.md 使用 Multica CLI 管理安装与 Agent 配置。已安装 0.4.40 和独立验证的官方最新 0.4.41 CLI 均未提供 plugin 子命令，尚不能通过规定入口创建插件安装；不得猜接口或切换浏览器绕过。本次只准备代码、模板和本地 Prompt 候选。CLI 能力补齐后再安装、按同一 ID 回读，核对线上契约，再完成受控验证。
 
 上线次序：准备安装与配置 → 部署新函数（保持开关关闭）→ 部署 Runtime 脚本并核对路径和 User 身份 → 对照最新线上 instructions 同步本地 Prompt 候选 → 协调开启两端开关 → 以明确获准的测试 thread 验收。不要把未知 Token 配到不可信 Preview，也不要为联调关闭全局部署保护。
 
 验收至少覆盖：完整统计 footer 更新同一条消息、正文和附件保留、重复完成通知、先完成后登记、登记失败只补登记、更新响应丢失后的回读、无最终回复保持静默。缺少 blocks、已有 50 个 blocks 或消息超限时省略 footer，不能截断正文。确认 `:agent_time:`、`:agent_mdi_robot_outline:`、`:agent_tool:`、`:agent_skill:` 在工作区存在。统计口径、日志容量与缺失处理见 Footer 计划。
+
+恢复使用至少 32 字符的 `CRON_SECRET`，仅放在 Vercel 和运维环境，不传给 Runtime。每日 Cron 已写入 vercel.json；关闭 footer 开关时经过认证的 Cron 返回 disabled。延迟检查、有限补查、单运行重放和 DLQ 处理见 [Footer 运维](FOOTER-OPERATIONS.zh-CN.md)。
 
 
 ## 3. Slack App

@@ -15,6 +15,18 @@
     },
     "api/queue/footer.ts": {
       "maxDuration": 60
+    },
+    "api/cron/footer.ts": {
+      "maxDuration": 60
+    },
+    "api/footer/recovery.ts": {
+      "maxDuration": 60
     }
-  }
+  },
+  "crons": [
+    {
+      "path": "/api/cron/footer",
+      "schedule": "0 3 * * *"
+    }
+  ]
 }
