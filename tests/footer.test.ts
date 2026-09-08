@@ -261,8 +261,14 @@ function fixture() {
       );
     if (url.endsWith("/auth.test"))
       return Response.json({ ok: true, team_id: "T1", user_id: "U1" });
-    if (url.endsWith("/conversations.replies")) {
-      const body = JSON.parse(String(init?.body));
+    if (new URL(url).pathname === "/api/conversations.replies") {
+      expect(init?.method).toBe("GET");
+      expect(init?.body).toBeUndefined();
+      const body = Object.fromEntries(new URL(url).searchParams);
+      expect(body.channel).toBe(ref.channelId);
+      expect(body.ts).toBe(ref.threadTs);
+      expect(body.inclusive).toBe("true");
+      expect(body.limit).toBe("2");
       expect(body.latest).toBe(body.oldest);
       return Response.json({
         ok: true,

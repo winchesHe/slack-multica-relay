@@ -19,13 +19,20 @@ async function slack(
   fetchImpl: typeof fetch,
   token = config.slackReplyToken,
 ) {
-  const response = await fetchImpl(`https://slack.com/api/${method}`, {
-    method: "POST",
+  const url = new URL(`https://slack.com/api/${method}`);
+  const readThread = method === "conversations.replies";
+  // conversations.replies 从查询参数读取目标，不接受 JSON POST 中的 channel/ts。
+  if (readThread) {
+    for (const [key, value] of Object.entries(params))
+      url.searchParams.set(key, String(value));
+  }
+  const response = await fetchImpl(url.toString(), {
+    method: readThread ? "GET" : "POST",
     headers: {
       authorization: `Bearer ${token}`,
       "content-type": "application/json; charset=utf-8",
     },
-    body: JSON.stringify(params),
+    ...(readThread ? {} : { body: JSON.stringify(params) }),
     redirect: "error",
     signal: AbortSignal.timeout(8000),
   });
