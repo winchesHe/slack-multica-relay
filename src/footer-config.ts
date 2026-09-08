@@ -7,7 +7,6 @@ export interface FooterConfig extends RelayConfig {
   slackReplyToken: string;
   slackReadToken: string;
   slackReplyActor: "user" | "bot";
-  footerConsumerUrl: string;
 }
 
 export function loadFooterConfig(env: NodeJS.ProcessEnv): FooterConfig {
@@ -27,16 +26,6 @@ export function loadFooterConfig(env: NodeJS.ProcessEnv): FooterConfig {
   const slackReplyActor = required("SLACK_REPLY_ACTOR");
   if (slackReplyActor !== "user" && slackReplyActor !== "bot")
     throw new Error("footer_not_configured");
-  const footerConsumerUrl = required("RELAY_FOOTER_CONSUMER_URL");
-  const url = new URL(footerConsumerUrl);
-  if (
-    url.protocol !== "https:" ||
-    url.username ||
-    url.password ||
-    url.hash ||
-    url.search
-  )
-    throw new Error("footer_not_configured");
   return {
     ...base,
     pluginInstallationId: required("MULTICA_PLUGIN_INSTALLATION_ID"),
@@ -46,6 +35,5 @@ export function loadFooterConfig(env: NodeJS.ProcessEnv): FooterConfig {
     slackReplyToken: required("SLACK_REPLY_TOKEN"),
     slackReadToken:
       env.SLACK_READ_TOKEN?.trim() || required("SLACK_REPLY_TOKEN"),
-    footerConsumerUrl,
   };
 }

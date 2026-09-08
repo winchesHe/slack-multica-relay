@@ -22,14 +22,13 @@ Agent instructions 写入任务工作目录 AGENTS.md。Multica daemon 为 Codex
 
 ### 完成 Hook 与 Footer
 
-完整范围、统计口径和阶段状态见 [Footer 计划](FOOTER-PLAN.zh-CN.md)。现已实现原消息追加完整统计，尚未开启线上链路。Vercel 与 Runtime 的 `RELAY_FOOTER_ENABLED` 必须一致；默认关闭。Relay 已删除 Agent 模型配置查询和 replyContext，不受开关状态影响；关闭开关时 Agent 仍回复完整正文，不展示 footer。
+完整范围、统计口径和阶段状态见 [Footer 计划](FOOTER-PLAN.zh-CN.md)。Footer 采用本地验签后立即返回 200、Vercel waitUntil 异步更新原消息的执行方式。后台失败允许丢失，不重试、不补查。Vercel 与 Runtime 的 `RELAY_FOOTER_ENABLED` 必须一致；默认关闭。Relay 已删除 Agent 模型配置查询和 replyContext，不受开关状态影响；关闭开关时 Agent 仍回复完整正文，不展示 footer。
 
 Vercel 在现有 Redis、QStash 和 Multica 配置之外，还需要：
 
 | 配置 | 用途 |
 | --- | --- |
 | `MULTICA_PLUGIN_INSTALLATION_ID` / `MULTICA_PLUGIN_SIGNING_SECRET` | 目标安装 ID 与对应 whsec 签名密钥；不是 Slack Signing Secret |
-| `RELAY_FOOTER_CONSUMER_URL` | 当前部署的准确 `/api/queue/footer` URL，用于 QStash 发布与验签 |
 | `RELAY_REPLY_TOKEN` | Runtime 登记身份的独立随机凭据，至少 32 字符 |
 | `SLACK_REPLY_ACTOR` / `SLACK_REPLY_TOKEN` | 明确的 user 或 bot 与同一作者写入 token；当前线上使用 user |
 | `SLACK_READ_TOKEN` | 可选，同工作区的 thread 读取 token；省略则使用 SLACK_REPLY_TOKEN |
@@ -50,13 +49,13 @@ rtk proxy python3 "$RELAY_REPLY_SCRIPT" \
 
 插件 manifest 模板在 [multica.plugin.example.json](multica.plugin.example.json)。安装前把 net scope 和 transport URL 中的域名替换为实际 Vercel 域名；当前订阅 task.completed 与 task.failed，按 Multica 契约授予 tasks:read 和实际回调域名的 net scope，不需要 Action API 写 scope。Hook 使用服务端配置的 Multica 查询凭据；临时 callback_token 在 HTTP 返回后撤销，不能入队。安装所得 ID、签名密钥必须与 Vercel 配置匹配。
 
-按 AGENTS.md 使用 Multica CLI 管理安装与 Agent 配置。已安装 0.4.40 和独立验证的官方最新 0.4.41 CLI 均未提供 plugin 子命令，尚不能通过规定入口创建插件安装；不得猜接口或切换浏览器绕过。本次只准备代码、模板和本地 Prompt 候选。CLI 能力补齐后再安装、按同一 ID 回读，核对线上契约，再完成受控验证。
+按 AGENTS.md 优先使用 Multica CLI；当前安装的 CLI 没有 plugin 子命令，本次插件已按用户明确授权通过页面安装、官方 API 生成签名凭据。后续只有改变 manifest 的事件、权限或回调地址才需更新插件，修改统计逻辑只需部署 Relay。Agent Prompt 仍通过 CLI 更新并回读。
 
 上线次序：准备安装与配置 → 部署新函数（保持开关关闭）→ 部署 Runtime 脚本并核对路径和 User 身份 → 对照最新线上 instructions 同步本地 Prompt 候选 → 协调开启两端开关 → 以明确获准的测试 thread 验收。不要把未知 Token 配到不可信 Preview，也不要为联调关闭全局部署保护。
 
-验收至少覆盖：完整统计 footer 更新同一条消息、正文和附件保留、重复完成通知、先完成后登记、登记失败只补登记、更新响应丢失后的回读、无最终回复保持静默。缺少 blocks、已有 50 个 blocks 或消息超限时省略 footer，不能截断正文。确认 `:agent_time:`、`:agent_mdi_robot_outline:`、`:agent_tool:`、`:agent_skill:` 在工作区存在。统计口径、日志容量与缺失处理见 Footer 计划。
+验收至少覆盖：完整统计 footer 更新同一条消息、正文和附件保留、重复完成通知、先完成后登记、登记失败只补登记、后台失败不重试、回调不等待 worker、无最终回复保持静默。缺少 blocks、已有 50 个 blocks 或消息超限时省略 footer，不能截断正文。确认 `:agent_time:`、`:agent_mdi_robot_outline:`、`:agent_tool:`、`:agent_skill:` 在工作区存在。统计口径、日志容量与缺失处理见 Footer 计划。
 
-恢复使用至少 32 字符的 `CRON_SECRET`，仅放在 Vercel 和运维环境，不传给 Runtime。每日 Cron 已写入 vercel.json；关闭 footer 开关时经过认证的 Cron 返回 disabled。延迟检查、有限补查、单运行重放和 DLQ 处理见 [Footer 运维](FOOTER-OPERATIONS.zh-CN.md)。
+Footer 不再使用 QStash、CRON_SECRET 或恢复脚本。旧队列和恢复入口仅返回 disabled，旧状态自然过期；运维只查日志与回执。详见 [Footer 运维](FOOTER-OPERATIONS.zh-CN.md)。
 
 
 ## 3. Slack App

@@ -8,25 +8,10 @@
       "maxDuration": 60
     },
     "api/multica/events.ts": {
-      "maxDuration": 10
+      "maxDuration": 60
     },
     "api/slack/replies.ts": {
       "maxDuration": 60
-    },
-    "api/queue/footer.ts": {
-      "maxDuration": 60
-    },
-    "api/cron/footer.ts": {
-      "maxDuration": 60
-    },
-    "api/footer/recovery.ts": {
-      "maxDuration": 60
     }
-  },
-  "crons": [
-    {
-      "path": "/api/cron/footer",
-      "schedule": "0 3 * * *"
-    }
-  ]
+  }
 }

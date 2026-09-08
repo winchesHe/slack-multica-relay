@@ -45,6 +45,8 @@ pnpm lint
 
 ## 完成后补 Footer
 
-三个阶段的代码已提供并在生产启用；新环境默认 `RELAY_FOOTER_ENABLED=false`。开启后，由统一发送脚本登记实际回复，Multica Hook 经 QStash 唤醒 Vercel 函数，在同一条消息后追加耗时、模型、Tokens/cache、Tools 和已加载 Skills 数量，缺失项隐藏。Relay 不再查询或传递旧 Agent 模型快照。当前线上发送身份为 User，更新必须使用同一作者。
+Agent 使用统一发送脚本登记最终回复。Multica 完成/失败 Hook 经本地验签后立即返回 HTTP 200，使用 Vercel `waitUntil` 在同一次函数调用中异步执行 worker，直接更新原消息的 context footer。统计包括耗时、实际模型、Tokens/cache、Tools 和已加载 Skills，缺失项立即隐藏。
 
-计划、最终展示格式、当前支持范围和线上验收记录见 [Footer 实施计划](FOOTER-PLAN.zh-CN.md)。新增接口为 `/api/multica/events`、`/api/slack/replies`、`/api/queue/footer`，本阶段仅提供 Vercel 入口。已实现延迟检查、每日漏事件扫描和有限重试；正常完成自动更新与登记失败恢复已通过线上验收，完整故障注入及用量测量边界见运维记录。单运行查询/重放及 DLQ 步骤见 [Footer 运维](FOOTER-OPERATIONS.zh-CN.md)。
+Footer 按效率优先的尽力执行方式处理：每个已登记运行只领取一次更新机会，失败不重试、不补查、不进入队列或 Cron；事件丢失或函数终止时允许缺少 Footer。回复登记、作者/thread 校验及正文摘要保护仍保留。Slack 入站任务继续使用原有 QStash 队列。
+
+新环境默认 `RELAY_FOOTER_ENABLED=false`，启用时需同步 Vercel 与 Runtime 配置。入口为 `/api/multica/events` 和 `/api/slack/replies`；旧 Footer 队列、Cron 与恢复入口仅返回 disabled，不执行更新。目标和统计边界见 [Footer 计划](FOOTER-PLAN.zh-CN.md)，部署与排障见 [Footer 运维](FOOTER-OPERATIONS.zh-CN.md)。
