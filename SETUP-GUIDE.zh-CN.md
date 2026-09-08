@@ -43,7 +43,7 @@ rtk proxy python3 "$RELAY_REPLY_SCRIPT" \
   --issue '<当前 Issue UUID>' \
   --channel '<原频道 ID>' --thread-ts '<根 thread ts>' \
   --text-file '<正文 fallback 文件>' --blocks-file '<正文 blocks 文件>' \
-  --format mrkdwn
+  --format markdown
 ```
 
 可加 `--dry-run` 只预览。正式调用先复用 Slack Skill 的预览与身份校验，再发送并登记返回的真实 message ts。一个 run 只发一条最终回复；进度消息不经此入口。不要在包装脚本失败后另跑 Slack send：登记失败可用相同参数补登记；sending 状态表示结果不明，需要核对 Slack 与回执，不清空回执后重发。通用 Slack Skill 不需要修改。

@@ -13,7 +13,7 @@
 4. Slack 回复（仅在第 1 条判断需要回复时）：
    - 身份与位置：通过 slack Skill，以 User actor 回复 `eventPayload.channelId` / `eventPayload.threadTs` 指定的原 thread。显式使用 `--user`（若当前 Skill 使用 `--as user`，采用等价写法）；禁止 `--bot` / `--as bot`，不能因频道未安装 Bot 而切换身份。mention 触发任务的最终答复无需再次确认发送。
    - 正文：中文，先结论，再给证据、变更或下一步；失败时说明失败阶段和阻断原因。PR Review 按下方规则发送简短回执。
-   - 最终回复入口：Runtime 的 `RELAY_FOOTER_ENABLED=true` 时，使用 `rtk proxy python3 "$RELAY_REPLY_SCRIPT" --issue <当前 Issue UUID> --channel <原 channelId> --thread-ts <原 threadTs> --text-file <正文文件> --blocks-file <正文 blocks 文件> --format mrkdwn` 发送最终回复。脚本会调用 `RELAY_SLACK_CLI` 指定的 slack Skill 入口，自动读取 `MULTICA_TASK_ID` 并登记返回的 Slack message ts。不得自行填写或猜测 message ts；每次运行只通过该入口发送一条最终回复。进度消息继续通过 slack Skill 发送。
+   - 最终回复入口：Runtime 的 `RELAY_FOOTER_ENABLED=true` 时，使用 `rtk proxy python3 "$RELAY_REPLY_SCRIPT" --issue <当前 Issue UUID> --channel <原 channelId> --thread-ts <原 threadTs> --text-file <正文文件> --blocks-file <正文 blocks 文件> --format markdown` 发送最终回复。脚本会调用 `RELAY_SLACK_CLI` 指定的 slack Skill 入口，自动读取 `MULTICA_TASK_ID` 并登记返回的 Slack message ts。不得自行填写或猜测 message ts；每次运行只通过该入口发送一条最终回复。进度消息继续通过 slack Skill 发送。
    - 身份：Runtime 的 `SLACK_REPLY_ACTOR` 必须为 `user`，与当前 User 回复身份保持一致；脚本和 Vercel 的 SLACK_REPLY_TOKEN 必须属于同一作者，不能失败后切换身份。
    - Footer：`RELAY_FOOTER_ENABLED=true` 时，Agent 只发送完整正文 blocks 和 fallback text，不生成任何 footer、模型快照、客户端签名或统计；由完成 Hook 在原消息后追加。不能从 Slack 原文或历史快照推断模型、Tokens、工具或 Skills 数量。正文不能为 footer 截断。
    - 登记恢复：正文已发送而登记失败时，使用相同脚本参数重试，只补登记。脚本报告发送结果不明时先核对 Slack 和持久化回执，不改用 slack send 再发一次。不通过人工改写本地回执绕过发送保护。

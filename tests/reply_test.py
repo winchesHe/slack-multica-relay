@@ -22,7 +22,7 @@ class ReplyTests(unittest.TestCase):
         self.text = self.root / "text.md"
         self.text.write_text("完整正文", encoding="utf-8")
         self.args = argparse.Namespace(issue="44444444-4444-4444-4444-444444444444", channel="C1", thread_ts="100.000001",
-            text_file=str(self.text), blocks_file=None, format="mrkdwn", dry_run=False)
+            text_file=str(self.text), blocks_file=None, format="markdown", dry_run=False)
         self.env = {"MULTICA_TASK_ID": "55555555-5555-5555-5555-555555555555",
             "MULTICA_WORKSPACE_ID": "11111111-1111-1111-1111-111111111111",
             "RELAY_SLACK_CLI": str(self.cli), "SLACK_REPLY_ACTOR": "user", "SLACK_TEAM_ID": "T1",

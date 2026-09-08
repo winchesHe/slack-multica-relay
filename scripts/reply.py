@@ -141,7 +141,7 @@ def main():
     parser.add_argument("--thread-ts", required=True)
     parser.add_argument("--text-file", required=True)
     parser.add_argument("--blocks-file")
-    parser.add_argument("--format", choices=["markdown", "mrkdwn", "plain"], default="mrkdwn")
+    parser.add_argument("--format", choices=["markdown"], default="markdown")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     try:
