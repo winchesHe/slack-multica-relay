@@ -22,7 +22,7 @@ Agent 使用统一发送入口正常回复，代码自动关联 Multica task/run
 | 2：完整统计（已交付代码）       | 模型、Tokens、缓存、Tools、Skills 解析，日志分页与数据缺失；最终移除旧 replyContext 查询和兼容渲染代码 | 与真实运行逐项对齐，严格符合最终格式，缺失项不显示，完整正文保留                      |
 | 3：恢复与上线（当前）     | 有限补查、失败/取消终态、低频漏事件补偿、DLQ 运维、消息版本与容量边界、真实冷/热延迟及用量             | 丢失事件和临时故障可恢复，续问不串消息，关闭开关不影响正文                            |
 
-各阶段独立验收，完成后等待确认再进入下一阶段。三个阶段的代码已实现并本地验证；插件安装、部署和真实上线验收仍未完成，不能视为整体交付完成。
+各阶段独立验收，完成后等待确认再进入下一阶段。三个阶段的代码已实现，插件、Vercel 和 Runtime 已部署并开启；正常自动更新与登记失败恢复已在线验收。故障注入和性能测量的覆盖边界见 Footer 运维记录。
 
 ## 当前实现契约
 
@@ -44,7 +44,7 @@ Agent 使用统一发送入口正常回复，代码自动关联 Multica task/run
 
 真实 Multica 运行已只读核对：issue 包含 workspace/project/assignee 与 Relay 来源 marker，run 包含运行 ID、起止时间与 usage。样本可计算 6m 30s、3256.5k tokens、96% cached、51 tools，并找到 4 个成功加载的 Skills；第二阶段代码通过只读 CLI 实时读取同一样本验证，完整 footer 与这六项数据一致；原始运行日志未保存到仓库或 Redis。
 
-已分别验证已安装的 CLI 0.4.40 和官方最新 0.4.41，`multica plugin --help` 均返回 unknown command。0.4.41 下载后通过官方 checksums.txt 校验，仅在临时目录检查，未替换本机 CLI。按项目规定不得因此改用浏览器或绕过 CLI 创建安装。本阶段提供安装 manifest 示例，未创建插件安装、同步线上 Prompt、配置 Secret、部署生产或发送真实 Slack 测试消息。发布前需要补齐可用的 CLI 安装入口，并指定受控验收目标。
+CLI 0.4.40/0.4.41 没有 plugin 子命令。本次按用户明确授权通过页面安装插件，再通过官方 API 获取签名凭据，完成生产部署和 Prompt 同步；详细上线结果见 [Footer 运维](FOOTER-OPERATIONS.zh-CN.md)。
 
 Webhook 分发在检查的 Multica 源码中使用内存队列，可能丢失；现已通过登记索引、延迟检查和每日扫描补偿。QStash 单次消息重试耗尽后索引继续持有恢复责任。发送成功但本地回执未写完的进程崩溃会保留 sending 状态，需人工核对，不承诺 exactly-once。
 
@@ -55,7 +55,7 @@ Webhook 分发在检查的 Multica 源码中使用内存队列，可能丢失；
 - 实际接口 `GET /api/tasks/{taskId}/messages` 返回完整有序数组，支持 since 增量而没有分页游标。因此当前实现一次读取完整数组，不发送虚构的 limit/offset；将计划中的“日志分页”落实为真实接口的完整性与容量校验。超过 4 MiB、10000 条、序号不从 1 连续递增、跨 issue/task、未知消息类型、空数组或查询失败时隐藏 Tools/Skills。
 - Tools 计每条 tool_use，含失败调用但不重复计 tool_result。Skills 按成功读取输出的 frontmatter name 去重；只识别简单 cat 单个 SKILL.md，支持 shell 包装、rtk/proxy 和引号路径。搜索路径与明确失败读取不计数；并发无法配对、未返回或复杂读取无法核实时隐藏 Skills。此值代表本次日志中已证实加载的 Skills，不代表历史上下文复用或实际调用次数。
 - 统计缺失时最多补查三次，间隔 30 秒、120 秒；已拿到的完整日志统计不重复拉取，已确认的 usage 保留。最终展示文本写入 Redis 统计快照后才更新 Slack，写重试复用同一快照；三次后仍缺失的项目隐藏，不自动改写已展示统计。完整日志只在消费进程内存中解析。
-- 代码阶段未新增线上写入。插件安装、Prompt 发布、生产部署与受控 Slack 端到端验收仍待完成。
+- 插件安装、Prompt 发布、生产部署和受控 Slack 正常链路验收已完成；生产故障注入尚未覆盖全部组合。
 
 ## 第三阶段恢复与验收
 
@@ -64,4 +64,4 @@ Webhook 分发在检查的 Multica 源码中使用内存队列，可能丢失；
 - `GET /api/cron/footer` 由 Vercel Cron 每日 03:00 UTC 调用，持有独立 CRON_SECRET。每次最多原子领取 20 项、并发发布 5 项；一小时租约过期后可重新领取，发布失败不移除索引。Hobby Cron 有小时级时间误差，不承诺准点；积压通过后续扫描推进。
 - 运行持续未结束或恢复起点超过七天且仍失败时停止；上游错误累计最多 12 次。正文、作者、范围、消息结构不满足保护条件时直接停止，保留 90 天原因并输出 relay_footer_stopped 结构化日志。停止不是覆盖授权，人工重放仍须通过相同校验。
 - `POST /api/footer/recovery` 支持单运行 inspect/retry；运维脚本先查询，重放后回读。重放只重置该运行恢复预算、保留回复映射与已冻结 footer，不删除或重发 Slack 正文。CRON_SECRET 不下发给 Agent Runtime。
-- 完整运维步骤、原生 DLQ 处理及上线验收记录见 [Footer 运维](FOOTER-OPERATIONS.zh-CN.md)。Vercel production 模式本地构建通过；敏感 Secret 为平台返回的占位符，不能用于真实联调。真实冷/热延迟和资源增量尚未测量，不以本地模拟耗时替代。
+- 完整运维步骤、原生 DLQ 处理及上线验收记录见 [Footer 运维](FOOTER-OPERATIONS.zh-CN.md)。Vercel production 模式本地构建通过；敏感 Secret 为平台返回的占位符，不能用于真实联调。正常完成到 Slack 更新观测约 2 秒；未区分冷/热启动，资源增量尚未测量，不以本地模拟耗时替代。

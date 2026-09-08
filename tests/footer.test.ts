@@ -430,6 +430,20 @@ describe("完成通知到原消息的集成链路", () => {
     expect((await consumeFooter(queued(), env, f.fetcher)).status).toBe(200);
     expect(f.writes).toHaveLength(1);
   });
+  it.each([false, true])("更新响应丢失且 Slack 规范化分隔符，正文修改=%s", async (edited) => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const f = fixture();
+    await registerSlackReply(registration(), env, f.fetcher);
+    f.loseUpdate();
+    expect((await consumeFooter(queued(), env, f.fetcher)).status).toBe(503);
+    f.message.text = f.message.text.replace("\n\n:agent_time:", "  :agent_time:");
+    if (edited) f.message.text = "人工修订" + f.message.text;
+    const result = await (await consumeFooter(queued(), env, f.fetcher)).json();
+    expect(result).toEqual(edited
+      ? { action: "stopped", reason: "footer_body_changed" }
+      : { action: "duplicate", messageTs: ref.messageTs });
+    expect(f.writes).toHaveLength(1);
+  });
   it("入队失败保留事件且返回 503，重投后可消费", async () => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
     const f = fixture();

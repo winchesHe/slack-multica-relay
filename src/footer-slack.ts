@@ -122,11 +122,15 @@ function originalBody(message: SlackMessage, taskId: string) {
       !Array.isArray(elements) ||
       elements.length !== 1 ||
       !isRecord(elements[0]) ||
-      typeof elements[0].text !== "string" ||
-      !text.endsWith(`\n\n${elements[0].text}`)
+      typeof elements[0].text !== "string"
     )
       throw new Error("footer_body_changed");
-    text = text.slice(0, -`\n\n${elements[0].text}`.length);
+    // Slack 会把 fallback 中的换行规范化为空格；只接受这两种精确后缀，正文仍按摘要校验。
+    const suffix = [`\n\n${elements[0].text}`, `  ${elements[0].text}`].find(
+      (candidate) => text.endsWith(candidate),
+    );
+    if (!suffix) throw new Error("footer_body_changed");
+    text = text.slice(0, -suffix.length);
     blocks.pop();
   }
   if (
