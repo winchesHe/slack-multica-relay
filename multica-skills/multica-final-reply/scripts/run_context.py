@@ -217,9 +217,9 @@ def code_evidence(messages):
 def link_context(data, identifier=None, workspace_slug=None, app_url=None, env=None):
     env = env or {}
     if workspace_slug is None:
-        workspace_slug = env.get("MULTICA_WORKSPACE_SLUG")
+        workspace_slug = env.get("FINAL_REPLY_WORKSPACE_SLUG")
     if app_url is None:
-        app_url = env.get("MULTICA_APP_URL")
+        app_url = env.get("FINAL_REPLY_APP_URL")
     identity = data["scope"]
     cli = ["multica", "--server-url", identity["MULTICA_SERVER_URL"],
            "--workspace-id", identity["MULTICA_WORKSPACE_ID"]]

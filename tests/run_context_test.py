@@ -204,14 +204,14 @@ class FinalReplyTests(unittest.TestCase):
             self.assertIn("duration_seconds", saved["statistics"])
 
     def test_runtime_link_environment_does_not_read_personal_config(self):
-        env = {"MULTICA_APP_URL": "https://web.example", "MULTICA_WORKSPACE_SLUG": "grm"}
+        env = {"FINAL_REPLY_APP_URL": "https://web.example", "FINAL_REPLY_WORKSPACE_SLUG": "grm"}
         with patch.object(final, "query") as query:
             self.assertEqual(final.link_context(self.data, "GRM-100", env=env),
                              ("GRM-100", "grm", "https://web.example"))
             query.assert_not_called()
 
     def test_explicit_link_arguments_override_runtime_environment(self):
-        env = {"MULTICA_APP_URL": "https://other.example", "MULTICA_WORKSPACE_SLUG": "other"}
+        env = {"FINAL_REPLY_APP_URL": "https://other.example", "FINAL_REPLY_WORKSPACE_SLUG": "other"}
         with patch.object(final, "query") as query:
             self.assertEqual(final.link_context(self.data, "LAB-5", "lab", "https://web.example", env),
                              ("LAB-5", "lab", "https://web.example"))
@@ -224,7 +224,7 @@ class FinalReplyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             output = str(Path(directory) / "context.json")
             env = {**self.env, "MULTICA_TASK_CONFIG_ROOT": directory,
-                   "MULTICA_APP_URL": "https://web.example", "MULTICA_WORKSPACE_SLUG": "grm"}
+                   "FINAL_REPLY_APP_URL": "https://web.example", "FINAL_REPLY_WORKSPACE_SLUG": "grm"}
             argv = ["run_context.py", "--issue", issue_id, "--output", output]
             with patch("sys.argv", argv), patch.dict(final.os.environ, env, clear=True), \
                     patch.object(final, "query", side_effect=[[self.run], [], issue]) as query, patch("builtins.print"):
