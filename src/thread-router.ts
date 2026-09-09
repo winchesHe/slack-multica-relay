@@ -37,7 +37,6 @@ export interface SlackThreadEvent {
 export interface ThreadRouterConfig extends ApiConfig {
   store: ThreadStore;
   slackReactionToken?: string;
-  slackReactionReadToken?: string;
   slackReactionName?: string;
 }
 export interface ThreadState {

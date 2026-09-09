@@ -16,7 +16,7 @@ const baseEnv = {
   QSTASH_CURRENT_SIGNING_KEY: "test",
   QSTASH_NEXT_SIGNING_KEY: "test",
   RELAY_CONSUMER_URL: "https://relay.test/api/queue/consume",
-  SLACK_REACTION_TOKEN: "test-token",
+  SLACK_USER_TOKEN: "test-token",
   SLACK_REACTION_NAME: "eyes",
   SLACK_TARGET_USER_IDS: "U123,U456",
   SLACK_TARGET_SUBTEAM_IDS: "S123",
@@ -34,6 +34,29 @@ function matches(text: string, keywords?: string): boolean {
     config.cancelKeywords,
   );
 }
+
+describe("reaction token 选择", () => {
+  it.each([
+    [" bot-token ", "user-token", "bot-token"],
+    ["bot-token", undefined, "bot-token"],
+    [undefined, " user-token ", "user-token"],
+    ["", "user-token", "user-token"],
+    [" \n ", "user-token", "user-token"],
+  ])("bot 配置为 %j、user 配置为 %j 时选择 %s", (bot, user, expected) => {
+    const config = loadRelayConfig({
+      ...baseEnv,
+      SLACK_BOT_TOKEN: bot,
+      SLACK_USER_TOKEN: user,
+    });
+    expect(config.slackReactionToken).toBe(expected);
+  });
+
+  it("两种 token 均未配置时拒绝运行", () => {
+    expect(() => loadRelayConfig({
+      ...baseEnv, SLACK_BOT_TOKEN: " ", SLACK_USER_TOKEN: " ",
+    })).toThrow("relay_not_configured");
+  });
+});
 
 describe("取消关键词配置", () => {
   it.each([undefined, "", "  ", ", ,"])(

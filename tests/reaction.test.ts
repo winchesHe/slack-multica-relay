@@ -25,30 +25,34 @@ describe('addSlackReaction', () => {
 });
 
 describe('取消后的 reaction 清理', () => {
-  it('使用 Bot GET 读取并以 owner 删除，读取列表省略 owner 时也能清理且保留他人表情', async () => {
-    const own = new Set(['eyes']);
-    const others = new Set(['eyes', 'heart']);
+  it.each(['bot', 'user'])('所有 reaction 请求使用同一个 %s token，取消时保留其他身份表情', async (token) => {
+    const reactions = new Map<string, Set<string>>([
+      ['eyes', new Set(['OTHER'])], ['heart', new Set(['OTHER'])],
+    ]);
     const fetcher: typeof fetch = async (input, init) => {
       const url = new URL(String(input));
       const authorization = new Headers(init?.headers).get('authorization');
+      expect(authorization).toBe(`Bearer ${token}`);
       if (url.pathname.endsWith('reactions.get')) {
         expect(init?.method).toBe('GET');
         expect(init?.body).toBeUndefined();
-        expect(authorization).toBe('Bearer bot');
         expect(Object.fromEntries(url.searchParams)).toEqual({ channel: 'C1', timestamp: '1.000001', full: 'true' });
-        return Response.json({ ok: true, message: { reactions: [
-          { name: 'eyes', users: ['BOT'] }, { name: 'heart', users: ['BOT'] },
-        ] } });
+        return Response.json({ ok: true, message: { reactions: [...reactions].map(([name, users]) => ({ name, users: [...users] })) } });
       }
-      expect(authorization).toBe('Bearer owner');
-      if (url.pathname.endsWith('auth.test')) return Response.json({ ok: true, user_id: 'OWNER' });
-      expect(url.pathname).toBe('/api/reactions.remove');
+      if (url.pathname.endsWith('auth.test')) return Response.json({ ok: true, user_id: 'CURRENT' });
       const name = JSON.parse(String(init?.body)).name;
-      return Response.json(own.delete(name) ? { ok: true } : { ok: false, error: 'no_reaction' });
+      if (url.pathname.endsWith('reactions.add')) {
+        reactions.get(name)!.add('CURRENT');
+        return Response.json({ ok: true });
+      }
+      expect(url.pathname).toBe('/api/reactions.remove');
+      return Response.json(reactions.get(name)!.delete('CURRENT') ? { ok: true } : { ok: false, error: 'no_reaction' });
     };
-    await clearOwnSlackReactions('owner', 'C1', '1.000001', fetcher, 'bot');
-    expect([...own]).toEqual([]);
-    expect([...others]).toEqual(['eyes', 'heart']);
+    await addSlackReaction(token, 'C1', '1.000001', 'eyes', fetcher);
+    expect([...reactions.get('eyes')!]).toEqual(['OTHER', 'CURRENT']);
+    await clearOwnSlackReactions(token, 'C1', '1.000001', fetcher);
+    expect([...reactions.get('eyes')!]).toEqual(['OTHER']);
+    expect([...reactions.get('heart')!]).toEqual(['OTHER']);
   });
   it('仅移除 token 身份自己的表情', async () => {
     const removed: string[] = [];
