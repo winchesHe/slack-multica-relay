@@ -104,10 +104,10 @@ function fixture() {
     }
     if (url.endsWith("/auth.test"))
       return Response.json({ ok: true, user_id: "U1" });
-    if (url.endsWith("/reactions.get"))
+    if (new URL(url).pathname.endsWith("/reactions.get"))
       return Response.json({
         ok: true,
-        message: { reactions: reactions.get(body.timestamp) ?? [] },
+        message: { reactions: reactions.get(new URL(url).searchParams.get("timestamp")!) ?? [] },
       });
     if (url.endsWith("/reactions.remove")) {
       if (failCleanup)

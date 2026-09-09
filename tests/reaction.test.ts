@@ -25,11 +25,36 @@ describe('addSlackReaction', () => {
 });
 
 describe('取消后的 reaction 清理', () => {
+  it('使用 Bot GET 读取并以 owner 删除，读取列表省略 owner 时也能清理且保留他人表情', async () => {
+    const own = new Set(['eyes']);
+    const others = new Set(['eyes', 'heart']);
+    const fetcher: typeof fetch = async (input, init) => {
+      const url = new URL(String(input));
+      const authorization = new Headers(init?.headers).get('authorization');
+      if (url.pathname.endsWith('reactions.get')) {
+        expect(init?.method).toBe('GET');
+        expect(init?.body).toBeUndefined();
+        expect(authorization).toBe('Bearer bot');
+        expect(Object.fromEntries(url.searchParams)).toEqual({ channel: 'C1', timestamp: '1.000001', full: 'true' });
+        return Response.json({ ok: true, message: { reactions: [
+          { name: 'eyes', users: ['BOT'] }, { name: 'heart', users: ['BOT'] },
+        ] } });
+      }
+      expect(authorization).toBe('Bearer owner');
+      if (url.pathname.endsWith('auth.test')) return Response.json({ ok: true, user_id: 'OWNER' });
+      expect(url.pathname).toBe('/api/reactions.remove');
+      const name = JSON.parse(String(init?.body)).name;
+      return Response.json(own.delete(name) ? { ok: true } : { ok: false, error: 'no_reaction' });
+    };
+    await clearOwnSlackReactions('owner', 'C1', '1.000001', fetcher, 'bot');
+    expect([...own]).toEqual([]);
+    expect([...others]).toEqual(['eyes', 'heart']);
+  });
   it('仅移除 token 身份自己的表情', async () => {
     const removed: string[] = [];
     const fetcher: typeof fetch = async (input, init) => {
       if (String(input).endsWith('auth.test')) return Response.json({ ok: true, user_id: 'U1' });
-      if (String(input).endsWith('reactions.get')) return Response.json({ ok: true, message: { reactions: [
+      if (new URL(String(input)).pathname.endsWith('reactions.get')) return Response.json({ ok: true, message: { reactions: [
         { name: 'eyes', users: ['U1', 'U2'] }, { name: 'heart', users: ['U2'] },
       ] } });
       removed.push(JSON.parse(String(init?.body)).name);

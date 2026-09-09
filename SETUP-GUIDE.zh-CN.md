@@ -84,7 +84,7 @@ EdgeOne Cloud Functions 会把 `Request.body` 暴露为解析值，入口通过 
 
 可选环境变量 `SLACK_CANCEL_KEYWORDS=cancel,取消`：未配置或空列表使用默认值；例如设置为 `stop,停止` 后只识别这两个词。取消权限直接复用 `SLACK_TARGET_USER_IDS`，用户组本身不授予权限。
 
-继续使用现有 message 事件订阅。`SLACK_REACTION_TOKEN` 需要 `reactions:read` 与 `reactions:write`；如果原 token 缺少读取权限，应补齐 scope 并重新授权。无需增加 reaction 事件订阅。
+继续使用现有 message 事件订阅。`SLACK_REACTION_TOKEN` 使用 owner USER token，需要 `reactions:write`。可配置 `SLACK_REACTION_READ_TOKEN`，使用具有 `reactions:read` 且能访问目标频道的 Bot token 读取列表，删除仍使用 owner USER token。未配置读取 token 时，owner token 还需要 `reactions:read`。无需增加 reaction 事件订阅。
 
 在专用测试 thread 中启动任务，再由配置的用户回复 `@目标 取消`。检查运行状态变为 cancelled、原触发消息上 owner 的 reaction 被清除、其他人的 reaction 保留；已完成任务不应被改写或清理。取消结束后发送一条新的任务 mention，检查继续原卡。非授权用户发送取消指令应被忽略。
 
