@@ -23,11 +23,11 @@ def write_new(path, value):
         json.dump(value, file, ensure_ascii=False, indent=2)
 
 
-def query(command):
+def query(command, *, text=False):
     try:
         result = subprocess.run(["rtk", "proxy", *command], capture_output=True,
                                 text=True, timeout=30, check=True)
-        return json.loads(result.stdout)
+        return result.stdout if text else json.loads(result.stdout)
     except (subprocess.SubprocessError, ValueError):
         raise RunContextError("只读查询失败；请检查 CLI 认证和目标") from None
 
@@ -214,8 +214,39 @@ def code_evidence(messages):
     return evidence
 
 
+def link_context(data, identifier=None, workspace_slug=None, app_url=None):
+    identity = data["scope"]
+    cli = ["multica", "--server-url", identity["MULTICA_SERVER_URL"],
+           "--workspace-id", identity["MULTICA_WORKSPACE_ID"]]
+    if identifier is None:
+        try:
+            issue = query(cli + ["issue", "get", data["run"]["issue_id"], "--output", "json"])
+            if (isinstance(issue, dict) and issue.get("id") == data["run"]["issue_id"]
+                    and issue.get("workspace_id") == identity["MULTICA_WORKSPACE_ID"]):
+                identifier = issue.get("identifier")
+        except RunContextError:
+            pass
+    if workspace_slug is None:
+        try:
+            workspace = query(cli + ["workspace", "get", identity["MULTICA_WORKSPACE_ID"], "--output", "json"])
+            if isinstance(workspace, dict) and workspace.get("id") == identity["MULTICA_WORKSPACE_ID"]:
+                workspace_slug = workspace.get("slug")
+        except RunContextError:
+            pass
+    if app_url is None:
+        try:
+            # config show 暂无 JSON 输出；只读取完整配置键，不把 API 地址猜成网页地址。
+            config = query(cli + ["config", "show"], text=True)
+            values = dict(re.findall(r"^(server_url|app_url):[ \t]*(.+)$", config, re.M))
+            if values.get("server_url", "").strip().rstrip("/") == identity["MULTICA_SERVER_URL"].rstrip("/"):
+                app_url = values.get("app_url", "").strip()
+        except RunContextError:
+            pass
+    return identifier, workspace_slug, app_url
+
+
 def issue_link(data, identifier, workspace_slug, app_url):
-    # 编号和工作区 slug 来自 Agent 已读取的当前任务上下文；只组装链接，不补查。
+    # 参数已由调用方提供或通过当前任务配置补齐，此处只组装链接。
     if not isinstance(identifier, str) or not re.fullmatch(r"[A-Z][A-Z0-9]{0,31}-[1-9][0-9]{0,15}", identifier):
         return {}
     if not isinstance(workspace_slug, str) or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", workspace_slug):
@@ -253,8 +284,9 @@ def main():
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
     try:
-        summary = summarize(snapshot(args.issue, os.environ), args.issue_identifier,
-                            args.workspace_slug, args.app_url)
+        data = snapshot(args.issue, os.environ)
+        link_args = link_context(data, args.issue_identifier, args.workspace_slug, args.app_url)
+        summary = summarize(data, *link_args)
         write_new(args.output, summary)
     except Exception as error:
         print(json.dumps({"error": str(error) if isinstance(error, RunContextError) else "运行资料整理失败，请检查 CLI 返回和输出路径"}, ensure_ascii=False))
