@@ -214,7 +214,12 @@ def code_evidence(messages):
     return evidence
 
 
-def link_context(data, identifier=None, workspace_slug=None, app_url=None):
+def link_context(data, identifier=None, workspace_slug=None, app_url=None, env=None):
+    env = env or {}
+    if workspace_slug is None:
+        workspace_slug = env.get("MULTICA_WORKSPACE_SLUG")
+    if app_url is None:
+        app_url = env.get("MULTICA_APP_URL")
     identity = data["scope"]
     cli = ["multica", "--server-url", identity["MULTICA_SERVER_URL"],
            "--workspace-id", identity["MULTICA_WORKSPACE_ID"]]
@@ -285,7 +290,7 @@ def main():
     args = parser.parse_args()
     try:
         data = snapshot(args.issue, os.environ)
-        link_args = link_context(data, args.issue_identifier, args.workspace_slug, args.app_url)
+        link_args = link_context(data, args.issue_identifier, args.workspace_slug, args.app_url, os.environ)
         summary = summarize(data, *link_args)
         write_new(args.output, summary)
     except Exception as error:
