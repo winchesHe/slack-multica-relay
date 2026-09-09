@@ -103,6 +103,65 @@ def words(message):
         return []
 
 
+def skill_paths(message):
+    parsed = words(message)
+    if len(parsed) > 1 and parsed[1] == "--":
+        parsed = [parsed[0], *parsed[2:]]
+    paths = parsed[1:]
+    if paths and parsed[0] in ("cat", "/bin/cat") and all(
+            re.fullmatch(r"(?:/|~/)[^*?\[\]]+/SKILL\.md", path) for path in paths):
+        return paths
+    return []
+
+
+def loaded_names(output, count):
+    if not isinstance(output, str) or not re.match(r"^---\r?\n", output):
+        return []
+    # 单文件只读取开头的 frontmatter，正文中的 Skill 示例不参与统计。
+    headers = re.findall(r"^---\r?\n(.*?)\r?\n---(?:\r?\n|$)", output, re.S | re.M)
+    if count == 1:
+        headers = headers[:1]
+    loaded = [re.findall(r"^name:\s*['\"]?([A-Za-z0-9_:/.-]+)['\"]?\s*$", header, re.M) for header in headers]
+    if len(loaded) == count and all(len(name) == 1 for name in loaded):
+        return [name[0] for name in loaded]
+    return []
+
+
+def skill_names(messages):
+    names = set()
+    calls, results = [], []
+    for message in messages:
+        if message["type"] == "tool_use":
+            calls.append(message)
+        elif message["type"] == "tool_result":
+            results.append(message)
+        else:
+            continue
+        if not calls or len(results) != len(calls):
+            continue
+        # API 没有 call_id。等待并行批次收齐，按实际 frontmatter 与请求路径
+        # 关联 Skill；不按返回顺序配对，也不让无关搜索清空已确认的名称。
+        reads = [(call, skill_paths(call)) for call in calls]
+        for result in results:
+            matches = []
+            for call, paths in reads:
+                if not paths or call["seq"] >= result["seq"] or call.get("tool") != result.get("tool"):
+                    continue
+                loaded = loaded_names(result.get("output"), len(paths))
+                if not loaded:
+                    continue
+                sequential_single = len(calls) == 1 and len(paths) == 1
+                path_names = [Path(path).parent.name for path in paths]
+                returned_names = [name.rsplit(":", 1)[-1] for name in loaded]
+                if sequential_single or returned_names == path_names:
+                    matches.append(loaded)
+            # 多个候选仅在名称完全一致时可按名称去重，具体 call 归属不作推断。
+            if matches and all(match == matches[0] for match in matches):
+                names.update(matches[0])
+        calls, results = [], []
+    return names
+
+
 def statistics(data):
     stats = {}
     try:
@@ -118,42 +177,8 @@ def statistics(data):
     calls = [m for m in messages if m["type"] == "tool_use"]
     if calls:
         stats["tools"] = len(calls)
-    names = set()
-    known = True
-    pending = []
-    for message in messages:
-        if message["type"] == "tool_use":
-            pending.append(message)
-            continue
-        if message["type"] != "tool_result":
-            continue
-        call = pending[0] if len(pending) == 1 else None
-        candidates = [p for p in pending if p.get("tool") == message.get("tool")]
-        for candidate in candidates:
-            if "SKILL.md" not in json.dumps(candidate.get("input", {})):
-                continue
-            parsed = words(candidate)
-            if len(parsed) > 1 and parsed[1] == "--":
-                parsed = [parsed[0], *parsed[2:]]
-            paths = parsed[1:]
-            is_read = bool(paths) and parsed[0] in ("cat", "/bin/cat") and all(
-                re.fullmatch(r"(?:/|~/)[^*?\[\]]+/SKILL\.md", path) for path in paths)
-            if not is_read or call != candidate or candidate["seq"] + 1 != message["seq"]:
-                known = False
-                continue
-            output = message.get("output") or ""
-            headers = re.findall(r"^---\r?\n(.*?)\r?\n---(?:\r?\n|$)", output, re.S | re.M)
-            loaded = [re.findall(r"^name:\s*['\"]?([A-Za-z0-9_:/.-]+)['\"]?\s*$", header, re.M) for header in headers]
-            # 批量 cat 仅在每个路径都返回一个完整且唯一的 frontmatter 时计数。
-            if len(loaded) == len(paths) and all(len(name) == 1 for name in loaded):
-                names.update(name[0] for name in loaded)
-            elif not re.match(r"cat: .*: (No such file or directory|Permission denied)", output):
-                known = False
-        if candidates:
-            pending.remove(candidates[0])
-    if any("SKILL.md" in json.dumps(c.get("input", {})) for c in pending):
-        known = False
-    if known and names:
+    names = skill_names(messages)
+    if names:
         stats.update(skills=len(names), skill_names=sorted(names))
     return stats
 
