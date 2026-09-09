@@ -4,19 +4,25 @@
 
 ## 常用选择
 
-以下自定义表情已于 2026-09-09 在 MoeGo 工作区核对名称和实际图片；是可选表达，不代表个人使用频率。
+优先使用 Winches 本人上传的以下 64 个表情，上传者已于 2026-09-09 根据 MoeGo 工作区网页核对。按语境选择，不随机轮换；分类用于查找，不代表所有梗图都有固定含义。
 
-| 语境 | MoeGo 自定义表情 | 标准表情备选 | 使用边界 |
-| --- | --- | --- | --- |
-| 实际完成、验证通过 | `:done:` | ✅ | 只用于已确认的结果 |
-| 收到、理解 | `:ack:` | 👍 | 不代表工作已经完成 |
-| 关注、正在看 | `:eyes_gif:` | 👀 | 不暗示未实际执行的检查 |
-| 有疑问、需要讨论 | `:thinking_cat_face:` | 🤔 | 配合具体疑问，不代替说明 |
-| 感谢帮助 | `:thanks:` | 🙏 | 有实际感谢对象或原因时使用 |
-| 认可、赞同 | `:lark_thumbsup_v2:` | 👍 | 不替代正式审批或验收结论 |
-| 轻松自嘲 | `:lark_facepalm:` | 😅 | 适合熟悉同事间的轻松语境，不用于事故或对他人的嘲讽 |
+| 语境或用途 | 表情 |
+| --- | --- |
+| 收到、理解 | `:shoudao:`、`:mingbai:` |
+| 完成、认可 | `:gude:`、`:lark_ai_nailed_it_zh_v2:`、`:lark_checkmark:`、`:lark_lgtm_v3:`、`:lark_awesome:`、`:lark_awesomen_v2:`、`:lark_thumbsup_v2:` |
+| 关注、疑问、思考 | `:wenhao:`、`:think:`、`:naotou_dan:`、`:fluent-thinking-3d:`、`:lark_attention:`、`:lark_onesecond:` |
+| 鼓励、喝彩 | `:lark_gogogo_v4:`、`:lark_clap:` |
+| 微笑、开心、得意 | `:lark_smile:`、`:lark_grin:`、`:lark_joyful:`、`:lark_laugh:`、`:lark_lol:`、`:lark_chuckle:`、`:lark_proud:`、`:laugh-2:` |
+| 惊讶 | `:lark_wow:` |
+| 无奈、自嘲、情绪表达 | `:lark_angry:`、`:lark_blackface:`、`:lark_clownface_v1:`、`:lark_cry:`、`:lark_embarrassed:`、`:lark_facepalm:`、`:lark_fullmoonface_v1:`、`:lark_wail:` |
+| 亲切、喜爱 | `:lark_bigkiss:`、`:lark_kiss:`、`:lark_love:`、`:lark_smooch:` |
+| 吃瓜、围观 | `:lark_eating:` |
+| 个性梗图、宠物与装饰（按实际图意选择） | `:hongwen:`、`:kpc:`、`:laoshi:`、`:renqi:`、`:sb:`、`:smoke:`、`:tou-xiang:`、`:vision-white:`、`:woma:`、`:xieyan:`、`:zhangd-dong:`、`:恶俗:`、`:doctor-pet:`、`:sparkle-mid:` |
+| Agent 与 Footer 图标 | `:agent_lucide_bot:`、`:agent_mark:`、`:agent_mdi_github:`、`:agent_mdi_robot_outline:`、`:agent_mdi_robot_outline_muted:`、`:agent_memory:`、`:agent_skill:`、`:agent_thinkg:`、`:agent_thinking:`、`:agent_time:`、`:agent_tool:` |
 
-自定义表情写作 `:name:`，不要放进代码格式；标准表情可直接使用 Unicode。具体消息格式遵循 slack Skill。在其他工作区或无法确认自定义表情可用时，选标准表情。
+正文优先使用日常表达和 Lark 系列；个性梗图不确定含义时先查看目录里的图片，结合当前对话选择。`agent_*` 用于 Agent 标识或 Footer，现有 Footer 图标不变。完成、认可类表情应符合实际结果；情绪和亲昵表达随双方熟悉程度使用。
+
+自定义表情写作 `:name:`，不要放进代码格式；具体消息格式遵循 slack Skill。在其他工作区或无法确认自定义表情可用时，选合适的标准 Unicode 表情。
 
 ## 按需检索完整目录
 
