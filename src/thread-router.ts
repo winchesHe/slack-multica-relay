@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   ApiError,
+  threadScopeId,
+  validateMappedIssue,
   createIssue,
   findIssue,
   createComment,
@@ -62,7 +64,7 @@ export async function routeSlackThreadEvent(
       ":" +
       config.multicaProjectId +
       ":" +
-      config.multicaAgentId,
+      threadScopeId(config),
   );
   const key = `relay:${scope}:thread:${digest(threadKey(event))}`;
   const msgKey = `relay:${scope}:message:${digest(messageKey(event))}`;
@@ -88,6 +90,7 @@ export async function routeSlackThreadEvent(
         creating: false,
       };
     const marker = `<!-- relay-thread:${scope}:${digest(threadKey(event))} -->`;
+    if (state.issueId) await validateMappedIssue(config, state.issueId, marker, fetchImpl);
     if (!state.issueId) {
       // Recover by immutable description marker before any write. A POST whose
       // result is unknown must never be repeated blindly.

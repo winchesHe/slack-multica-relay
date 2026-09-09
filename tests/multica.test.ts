@@ -66,3 +66,17 @@ describe("Multica API contract", () => {
     );
   });
 });
+
+describe("Team API", () => {
+  const team = { ...config, multicaAssigneeType: "squad" as const, multicaAssigneeId: "team" };
+  it("writes squad assignment", async () => {
+    const f = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ id: "i", title: "t" }));
+    await createIssue(team, "t", "marker", f);
+    expect(JSON.parse(String(f.mock.calls[0]![1]?.body))).toMatchObject({ assignee_type: "squad", assignee_id: "team" });
+  });
+  it.each(["squad", "agent"])("checks 409 ownership type %s", async (type) => {
+    const f: typeof fetch = async () => Response.json({ code: "active_duplicate_issue", issue: { id: "i", title: "t", project_id: "project", assignee_type: type, assignee_id: "team", description: "marker\nbody" } }, { status: 409 });
+    if (type === "squad") expect((await createIssue(team, "t", "marker\nbody", f)).id).toBe("i");
+    else await expect(createIssue(team, "t", "marker\nbody", f)).rejects.toThrow("multica_http_error");
+  });
+});
