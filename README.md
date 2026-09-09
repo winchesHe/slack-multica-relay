@@ -50,5 +50,3 @@ pnpm lint
 取消指令复用现有消息订阅，经 QStash 持久化处理，不会建卡、追加任务评论或添加启动 reaction。消费者保存目标运行 ID，取消排队或执行中的运行并回读状态，然后清理已记录触发消息上 owner 身份的全部 reaction（包括启动标记）；其他人的 reaction 保留。已完成、已失败且没有活动运行时保留原标记。
 
 取消期间的任务请求会被忽略。取消完成后重新发送 mention 可继续原任务卡；已处理的旧事件不会重新启动任务。API 或清理失败保留进度，由 QStash 重试；重试耗尽需检查 DLQ 并重放原消息。清理需要 token 具有 `reactions:read` 和 `reactions:write`，无需订阅 `reaction_added`。
-
-接口契约、兼容与故障边界见 [REVIEW.md](REVIEW.md#取消与清理)。

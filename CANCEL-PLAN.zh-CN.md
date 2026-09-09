@@ -27,4 +27,4 @@
 - 本次直接建卡架构无 Autopilot run ID；取消使用从 issue 运行列表读取的 Agent run ID。
 - 正常事件的启动 reaction 与取消共用线程锁，避免 Relay 自身迟到回写。
 - 本地测试覆盖上述主要路径，真实 Slack、Multica、QStash 联调与部署按搭建手册执行。
-- Multica 的 cancelled 终态是本实现的确认依据；运行时停止确认、状态保留期限和旧数据兼容边界见 REVIEW.md。
+- Multica 的 cancelled 终态是本实现的确认依据；接口未提供独立的 daemon 停止确认，已完成的外部操作不会撤销。
