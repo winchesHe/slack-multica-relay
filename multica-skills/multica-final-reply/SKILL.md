@@ -9,7 +9,7 @@ description: 在 Multica 的 Slack Task Router 完成业务任务后，整理当
 
 ## 回复流程
 
-1. 读取目标环境的 slack Skill。写清最终结论、实际完成的动作、必要证据和未完成事项；避免过程流水账。
+1. 读取目标环境的 slack Skill，以及 [个人回复风格](references/reply-style.md) 和 [Emoji 使用指南](references/emoji-guide.md)。按个人风格组织结论、实际完成的动作、必要证据和未完成事项；需要更多自定义表情时才检索本地完整目录，不逐次联网拉取。
 2. 执行 `rtk proxy python3 <本 Skill 路径>/scripts/run_context.py --issue <当前 Issue UUID> --output <任务私有目录/context.json>`。脚本使用真实 `MULTICA_TASK_ID`，查询当前 run、所属 Agent 配置和 run-messages，输出 `statistics` 与带日志序号的 `code_evidence`。不选择最近一次 run，不轮询等日志补齐。
 3. 读取输出，根据业务任务从 `code_evidence` 的调用与结果中提取实际处理的 PR、仓库和分支。证据是候选，不等于已完成的成果；排除仅讨论、示例及失败操作。缺失或截断的输出不能当完整证据，必要时按 github-workflow 只读补查。没有 PR 的分支也可展示，但必须有明确的仓库归属和实际分支证据。
 4. 由你组装最终正文、Footer context blocks 和包含同样信息的 fallback。每个 PR 单独一行，PR 去重；仓库只显示 repo，查询、去重和链接使用完整 owner/repo。保留每个 PR 对应的分支，无成果时省略对应行。
