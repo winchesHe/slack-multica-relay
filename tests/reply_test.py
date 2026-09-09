@@ -85,6 +85,31 @@ class ReplyTests(unittest.TestCase):
                 reply.execute(self.args, self.env)
             invoke.assert_not_called()
 
+    def test_snapshot_send_needs_no_register_config_and_is_idempotent(self):
+        self.env.pop("RELAY_REPLY_TOKEN")
+        self.env.pop("RELAY_REPLY_REGISTER_URL")
+        with patch.object(reply, "invoke", side_effect=[self.preview, self.sent]) as invoke, patch.object(reply, "register") as register:
+            self.assertEqual(reply.execute(self.args, self.env, register_footer=False)["action"], "sent")
+            self.assertEqual(reply.execute(self.args, self.env, register_footer=False)["action"], "duplicate")
+            self.assertEqual(invoke.call_count, 2)
+            register.assert_not_called()
+
+    def test_snapshot_unknown_send_never_retries_or_registers(self):
+        with patch.object(reply, "invoke", side_effect=[self.preview, reply.ReplyError("超时")]) as invoke, patch.object(reply, "register") as register:
+            with self.assertRaises(reply.ReplyError):
+                reply.execute(self.args, self.env, register_footer=False)
+            with self.assertRaisesRegex(reply.ReplyError, "上次发送结果不明"):
+                reply.execute(self.args, self.env, register_footer=False)
+            self.assertEqual(invoke.call_count, 2)
+            register.assert_not_called()
+
+    def test_modes_cannot_send_twice_for_one_run(self):
+        with patch.object(reply, "invoke", side_effect=[self.preview, self.sent]) as invoke, patch.object(reply, "register"):
+            reply.execute(self.args, self.env)
+            with self.assertRaisesRegex(reply.ReplyError, "不同的最终回复"):
+                reply.execute(self.args, self.env, register_footer=False)
+            self.assertEqual(invoke.call_count, 2)
+
     def test_wrong_actor_stops_before_send(self):
         self.preview["actor"]["selected"] = "bot"
         with patch.object(reply, "invoke", return_value=self.preview) as invoke:

@@ -58,9 +58,11 @@ def register(url, token, ref):
         raise ReplyError("登记尚未确认")
 
 
-def execute(args, env):
+def execute(args, env, *, register_footer=True):
     required = ["MULTICA_TASK_ID", "MULTICA_WORKSPACE_ID", "SLACK_TEAM_ID", "RELAY_SLACK_CLI",
-                "SLACK_REPLY_ACTOR", "RELAY_REPLY_REGISTER_URL", "RELAY_REPLY_TOKEN"]
+                "SLACK_REPLY_ACTOR"]
+    if register_footer:
+        required += ["RELAY_REPLY_REGISTER_URL", "RELAY_REPLY_TOKEN"]
     if any(not env.get(key, "").strip() for key in required):
         raise ReplyError("缺少 Runtime 回复配置，未发送")
     task = env["MULTICA_TASK_ID"]
@@ -72,11 +74,12 @@ def execute(args, env):
     actor = env["SLACK_REPLY_ACTOR"]
     if actor not in ("user", "bot"):
         raise ReplyError("必须固定 User 或 Bot 身份，未发送")
-    parsed = urllib.parse.urlparse(env["RELAY_REPLY_REGISTER_URL"])
-    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
-        raise ReplyError("登记地址必须是固定 HTTPS 地址，未发送")
-    if len(env["RELAY_REPLY_TOKEN"]) < 32:
-        raise ReplyError("登记凭据无效，未发送")
+    if register_footer:
+        parsed = urllib.parse.urlparse(env["RELAY_REPLY_REGISTER_URL"])
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise ReplyError("登记地址必须是固定 HTTPS 地址，未发送")
+        if len(env["RELAY_REPLY_TOKEN"]) < 32:
+            raise ReplyError("登记凭据无效，未发送")
     cli = Path(env["RELAY_SLACK_CLI"]).expanduser()
     if not cli.is_absolute() or not cli.is_file():
         raise ReplyError("Slack Skill 入口不存在，未发送")
@@ -84,6 +87,8 @@ def execute(args, env):
     blocks = Path(args.blocks_file).read_text(encoding="utf-8") if args.blocks_file else None
     intent = {"issue": args.issue, "channel": args.channel, "thread": args.thread_ts, "team": env["SLACK_TEAM_ID"],
               "text": text, "blocks": blocks, "format": args.format, "actor": actor}
+    if not register_footer:
+        intent["delivery"] = "final-snapshot"
     fingerprint = hashlib.sha256(json.dumps(intent, sort_keys=True).encode()).hexdigest()
     root = Path(env.get("RELAY_RECEIPT_DIR", "~/.local/state/slack-multica-relay")).expanduser()
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -98,7 +103,7 @@ def execute(args, env):
                 raise ReplyError("本次运行已有不同的最终回复记录，未发送")
             if state.get("phase") not in ("sent", "registered"):
                 raise ReplyError("上次发送结果不明，必须人工核对，禁止自动重发")
-            if state["phase"] == "registered":
+            if state["phase"] == "registered" or not register_footer:
                 return {"action": "duplicate", **state["ref"]}
         else:
             command = ["send", "--as", actor, "--channel", args.channel,
@@ -123,6 +128,8 @@ def execute(args, env):
             state.update(phase="sent", ref={"version": 1, "issueId": args.issue, "taskId": task,
                 "channelId": args.channel, "threadTs": args.thread_ts, "messageTs": message["ts"]})
             save(path, state)
+        if not register_footer:
+            return {"action": "sent", **state["ref"]}
         if args.dry_run:
             return {"action": "registration_pending", **state["ref"]}
         try:
