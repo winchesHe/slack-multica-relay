@@ -42,11 +42,3 @@ pnpm lint
 | 消费503                 | 保留队列重试/DLQ责任，原因包括 timeout、thread*lock_busy、ambiguous*\* |
 
 `GET /api/health` 仅证明函数可响应。消费有45秒整体预算，部署函数上限60秒；入站发布请求超时2秒。平台冷启动、网络延迟与配额仍须实测。
-
-## 完成后补 Footer
-
-Agent 使用统一发送脚本登记最终回复。Multica 完成/失败 Hook 经本地验签后立即返回 HTTP 200，使用 Vercel `waitUntil` 在同一次函数调用中异步执行 worker，直接更新原消息的 context footer。统计包括耗时、实际模型、Tokens/cache、Tools 和已加载 Skills，缺失项立即隐藏。
-
-Footer 按效率优先的尽力执行方式处理：每个已登记运行只领取一次更新机会，失败不重试、不补查、不进入队列或 Cron；事件丢失或函数终止时允许缺少 Footer。回复登记、作者/thread 校验及正文摘要保护仍保留。Slack 入站任务继续使用原有 QStash 队列。
-
-新环境默认 `RELAY_FOOTER_ENABLED=false`，启用时需同步 Vercel 与 Runtime 配置。入口为 `/api/multica/events` 和 `/api/slack/replies`；旧 Footer 队列、Cron 与恢复入口仅返回 disabled，不执行更新。目标和统计边界见 [Footer 计划](FOOTER-PLAN.zh-CN.md)，部署与排障见 [Footer 运维](FOOTER-OPERATIONS.zh-CN.md)。

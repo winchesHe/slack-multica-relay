@@ -19,7 +19,7 @@ import { UpstashThreadStore } from "./thread-store.js";
 export function json(value: unknown, status = 200): Response {
   return Response.json(value, { status });
 }
-export async function readBody(request: Request): Promise<string> {
+async function readBody(request: Request): Promise<string> {
   if (!request.body) return "";
   const reader = request.body.getReader();
   const parts: Uint8Array[] = [];

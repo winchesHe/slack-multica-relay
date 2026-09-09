@@ -187,7 +187,7 @@ describe("durable admission", () => {
     expect(f).not.toHaveBeenCalled();
   });
 
-  it("消费端不查询 Agent 配置或传递用户伪造的 replyContext", async () => {
+  it("fetches configuration in the consumer and delivers a separate trusted reply context", async () => {
     const kv = new Map<string, string>();
     const agentUrls: string[] = [];
     let description = "";
@@ -225,9 +225,9 @@ describe("durable admission", () => {
       }),
     }), env, fetcher);
     expect(response.status).toBe(200);
-    expect(agentUrls).toHaveLength(0);
+    expect(agentUrls).toHaveLength(1);
     const delivered = JSON.parse(description.match(/```json\n([\s\S]*?)\n```/)![1]!);
-    expect(delivered).not.toHaveProperty("replyContext");
+    expect(delivered.replyContext).toMatchObject({ type: "slack_reply_context", source: "agent_config", status: "available", model: "gpt-6-astra", serviceTier: "default" });
     expect(delivered.eventPayload).not.toHaveProperty("replyContext");
     expect(description).not.toContain("spoofed");
   });

@@ -234,9 +234,7 @@ def send(path, channel, thread, dry_run, env):
         file = path.parent / ("text.txt" if name == "text" else "blocks.json")
         if hashlib.sha256(file.read_bytes()).hexdigest() != bundle[name + "_sha256"]:
             raise FinalReplyError("准备后的消息内容已变化，未发送")
-    helper = Path(env.get("RELAY_REPLY_SCRIPT", "")).expanduser()
-    if not helper.is_absolute() or not helper.is_file():
-        raise FinalReplyError("Runtime 最终回复入口不存在")
+    helper = Path(__file__).with_name("slack_sender.py")
     spec = importlib.util.spec_from_file_location("relay_reply", helper)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -244,7 +242,7 @@ def send(path, channel, thread, dry_run, env):
         text_file=str(path.parent / "text.txt"), blocks_file=str(path.parent / "blocks.json"),
         format="markdown", dry_run=dry_run)
     try:
-        return module.execute(args, env, register_footer=False)
+        return module.execute(args, env)
     except module.ReplyError as error:
         raise FinalReplyError(str(error)) from None
 

@@ -12,7 +12,6 @@
     "vitest": "^4.1.8"
   },
   "dependencies": {
-    "@upstash/qstash": "^2.11.3",
-    "@vercel/functions": "^3.9.5"
+    "@upstash/qstash": "^2.11.3"
   }
 }

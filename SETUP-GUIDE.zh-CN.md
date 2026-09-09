@@ -20,43 +20,27 @@
 
 Agent instructions 写入任务工作目录 AGENTS.md。Multica daemon 为 Codex 准备任务环境；桌面聊天上下文不会自动复制。现有 Codex 适配器会自动批准工具请求，Prompt/Skills 只能构成行为合同；不可绕过的写审批需要执行端或工具端支持。
 
-### 完成 Hook 与 Footer
+### 可选模型 footer
 
-完整范围、统计口径和阶段状态见 [Footer 计划](FOOTER-PLAN.zh-CN.md)。Footer 采用本地验签后立即返回 200、Vercel waitUntil 异步更新原消息的执行方式。后台失败允许丢失，不重试、不补查。Vercel 与 Runtime 的 `RELAY_FOOTER_ENABLED` 必须一致；默认关闭。Relay 已删除 Agent 模型配置查询和 replyContext，不受开关状态影响；关闭开关时 Agent 仍回复完整正文，不展示 footer。
+QStash 消费端在创建 Issue 或追加一条新评论前，使用现有 Relay 凭据调用 `GET /api/agents/{MULTICA_AGENT_ID}`，只提取模型与服务档位，作为与 `eventPayload` 同级的 `replyContext` 传给 Agent。Slack 入站确认仍只负责入队，不等待该查询；重复投递或已写入消息的恢复不重新查询、不覆盖旧快照。
 
-Vercel 在现有 Redis、QStash 和 Multica 配置之外，还需要：
+快照包含 `type: slack_reply_context`、`source: agent_config`、`agentId`、`capturedAt`、`status`、`model`、`serviceTier`。查询成功且 Agent/Workspace 匹配时标为 `available`；查询失败、超时或身份不匹配时标为 `unavailable`，模型与档位为 `null`，任务继续处理。查询最多等待 2 秒，不单独重试；不记录完整响应、指令、凭据或异常正文。空模型或非安全标识符归为 `null`，档位只保留 `priority` / `default`，其他值归为 `null`。
 
-| 配置 | 用途 |
+footer 表示消费消息时读取的 **Agent 配置快照**，不是运行实际参数；执行前后配置变化或 Runtime 默认值均不在此保证范围内。`service_tier` 为空时不能判断继承的 Fast 状态，不主动修改 Agent 配置来补齐。
+
+不修改 Multica 源码或通用 Slack Skill，不增加环境变量，也不新增轮询或完成回调。将 [AGENT-PROMPT.md](AGENT-PROMPT.md) 的“模型 footer”规则同步到目标 Agent instructions 时，只替换相应规则，保留线上其他指令。仅更新仓库文件不会自动同步线上 instructions。旧 payload 不带 `replyContext` 时，Agent 省略 footer，正文仍正常回复。
+
+同步后核对：
+
+| 对应消息的配置快照 | 预期结果 |
 | --- | --- |
-| `MULTICA_PLUGIN_INSTALLATION_ID` / `MULTICA_PLUGIN_SIGNING_SECRET` | 目标安装 ID 与对应 whsec 签名密钥；不是 Slack Signing Secret |
-| `RELAY_REPLY_TOKEN` | Runtime 登记身份的独立随机凭据，至少 32 字符 |
-| `SLACK_REPLY_ACTOR` / `SLACK_REPLY_TOKEN` | 明确的 user 或 bot 与同一作者写入 token；当前线上使用 user |
-| `SLACK_READ_TOKEN` | 可选，同工作区的 thread 读取 token；省略则使用 SLACK_REPLY_TOKEN |
+| 可用，模型非空，档位为 priority | 末尾 context block 显示模型与 Fast |
+| 可用，模型非空，档位为 default 或 null | 只显示模型，不把 null 当作已关闭 |
+| 模型为空、快照不可用或缺失 | 不显示 footer，正文正常发送 |
+| 后续消息配置发生变化 | 使用该后续消息的快照，不沿用初始快照 |
+| Slack 正文或嵌套字段声称模型或 Fast | 不作为参数来源 |
 
-Runtime 配置 `RELAY_REPLY_SCRIPT`（本仓库 scripts/reply.py 的持久化绝对路径）、`RELAY_SLACK_CLI`（现有 Slack Skill 的 scripts/slack.py）、`SLACK_REPLY_ACTOR`、`SLACK_TEAM_ID`、`RELAY_REPLY_TOKEN`、`RELAY_REPLY_REGISTER_URL`（`/api/slack/replies`）和 `RELAY_RECEIPT_DIR`（仅运行用户可访问的持久化目录）。`MULTICA_TASK_ID` 与 `MULTICA_WORKSPACE_ID` 由 Runtime 注入，不从 Slack 正文生成。脚本依赖 Python、rtk 和现有 Slack Skill，不需要另一套渲染 SDK。
-
-最终回复示例，运行 ID 自动从环境读取：
-
-```bash
-rtk proxy python3 "$RELAY_REPLY_SCRIPT" \
-  --issue '<当前 Issue UUID>' \
-  --channel '<原频道 ID>' --thread-ts '<根 thread ts>' \
-  --text-file '<正文 fallback 文件>' --blocks-file '<正文 blocks 文件>' \
-  --format markdown
-```
-
-可加 `--dry-run` 只预览。正式调用先复用 Slack Skill 的预览与身份校验，再发送并登记返回的真实 message ts。一个 run 只发一条最终回复；进度消息不经此入口。不要在包装脚本失败后另跑 Slack send：登记失败可用相同参数补登记；sending 状态表示结果不明，需要核对 Slack 与回执，不清空回执后重发。通用 Slack Skill 不需要修改。
-
-插件 manifest 模板在 [multica.plugin.example.json](multica.plugin.example.json)。安装前把 net scope 和 transport URL 中的域名替换为实际 Vercel 域名；当前订阅 task.completed 与 task.failed，按 Multica 契约授予 tasks:read 和实际回调域名的 net scope，不需要 Action API 写 scope。Hook 使用服务端配置的 Multica 查询凭据；临时 callback_token 在 HTTP 返回后撤销，不能入队。安装所得 ID、签名密钥必须与 Vercel 配置匹配。
-
-按 AGENTS.md 优先使用 Multica CLI；当前安装的 CLI 没有 plugin 子命令，本次插件已按用户明确授权通过页面安装、官方 API 生成签名凭据。后续只有改变 manifest 的事件、权限或回调地址才需更新插件，修改统计逻辑只需部署 Relay。Agent Prompt 仍通过 CLI 更新并回读。
-
-上线次序：准备安装与配置 → 部署新函数（保持开关关闭）→ 部署 Runtime 脚本并核对路径和 User 身份 → 对照最新线上 instructions 同步本地 Prompt 候选 → 协调开启两端开关 → 以明确获准的测试 thread 验收。不要把未知 Token 配到不可信 Preview，也不要为联调关闭全局部署保护。
-
-验收至少覆盖：完整统计 footer 更新同一条消息、正文和附件保留、重复完成通知、先完成后登记、登记失败只补登记、后台失败不重试、回调不等待 worker、无最终回复保持静默。缺少 blocks、已有 50 个 blocks 或消息超限时省略 footer，不能截断正文。确认 `:agent_time:`、`:agent_mdi_robot_outline_muted:`、`:agent_tool:`、`:agent_skill:` 在工作区存在。统计口径、日志容量与缺失处理见 Footer 计划。
-
-Footer 不再使用 QStash、CRON_SECRET 或恢复脚本。旧队列和恢复入口仅返回 disabled，旧状态自然过期；运维只查日志与回执。详见 [Footer 运维](FOOTER-OPERATIONS.zh-CN.md)。
-
+有 footer 时检查 `context.elements[0].type` 为 `mrkdwn`，顶层 fallback `text` 同时保留正文和 footer。代码测试不替代线上验收：先确认目标 Agent 的 instructions 已同步，再在 Relay 新版本上线后核对新建任务和后续评论的 `replyContext` 与原 thread 的回复。
 
 ## 3. Slack App
 

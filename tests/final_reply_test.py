@@ -1,6 +1,8 @@
 """验证发送前快照的归属、证据、缺失字段和一次发送边界。"""
 import importlib.util
+import json
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -155,6 +157,28 @@ class FinalReplyTests(unittest.TestCase):
                 final.send(path, "C1", "100.000001", False, self.env)
             with self.assertRaisesRegex(final.FinalReplyError, "不属于当前运行"):
                 final.send(path, "C1", "100.000001", False, {**self.env, "MULTICA_TASK_ID": "other"})
+
+    def test_bundle_uses_packaged_sender_and_repeated_send_is_noop(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            cli = root / "slack.py"
+            cli.touch()
+            identity = {**self.env, "MULTICA_TASK_ID": "55555555-5555-5555-5555-555555555555",
+                        "MULTICA_WORKSPACE_ID": "11111111-1111-1111-1111-111111111111"}
+            self.data["scope"] = identity
+            self.run["issue_id"] = "44444444-4444-4444-4444-444444444444"
+            prepared = final.prepare(self.data, [], "正文", [{"type": "section", "text": {"type": "plain_text", "text": "正文"}}], root / "bundle")
+            env = {**identity, "RELAY_SLACK_CLI": str(cli), "SLACK_REPLY_ACTOR": "user",
+                   "SLACK_TEAM_ID": "T1", "RELAY_RECEIPT_DIR": str(root / "receipts")}
+            preview = {"status": "preview", "preview_digest": "digest", "actor": {"selected": "user", "team_id": "T1"}}
+            sent = {"status": "sent", "operation_status": "succeeded", "actor": {"selected": "user"},
+                    "message": {"channel_id": "C1", "thread_ts": "100.000001", "ts": "101.000001"}}
+            responses = [subprocess.CompletedProcess([], 0, json.dumps(value)) for value in (preview, sent)]
+            with patch.object(final.subprocess, "run", side_effect=responses) as run:
+                self.assertEqual(final.send(prepared["bundle"], "C1", "100.000001", False, env)["action"], "sent")
+                self.assertEqual(final.send(prepared["bundle"], "C1", "100.000001", False, env)["action"], "duplicate")
+                self.assertEqual(run.call_count, 2)
+                self.assertIn("--blocks-file", run.call_args.args[0])
 
 
 if __name__ == "__main__":
