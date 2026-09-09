@@ -15,6 +15,12 @@ description: 在 Multica 的 Slack Task Router 完成业务任务后，整理当
 4. 由你组装最终正文、Footer context blocks 和包含同样信息的 fallback。每个 PR 单独一行，PR 去重；仓库只显示 repo，查询、去重和链接使用完整 owner/repo。保留每个 PR 对应的分支，无成果时省略对应行。
 5. 按 slack Skill 的发送流程，以 User actor 向原 `channelId` 和根 `threadTs` 一次发送完整消息。直接使用它的 `send --as user --channel ... --thread-ts ... --text-file ... --blocks-file ...`，预检与确认参数以该 Skill 当前版本为准。发送成功后结束，不再追加或更新 Footer。结果不明时先回读原线程，遵守 Slack Skill 的失败处理规则，不自动重发。
 
+发送身份固定为 User，不因 Bot 未安装或发送失败改用 Bot。当前任务已获授权的普通最终答复无需再次确认发送；本 Skill 不决定是否介入、不扩大业务操作权限，静默条件及外部写入授权遵循 Agent Prompt。
+
+## PR Review 回执
+
+审查和 GitHub 写回完成后，Slack 仅发送简短回执：审查结论、各级问题数量、已发布的 GitHub review 链接。非阻断通过时说明建议不阻断合并，不写成“需要修改”。审查未完成或 GitHub 写回失败时说明实际阶段和原因，不在 Slack 重复整份审查内容，不把尚未发布的 review 写成已发布。PR 链接与分支继续在 Footer 中展示。
+
 ## Footer 展示
 
 - 统计行：`:agent_time: 耗时 · :agent_mdi_robot_outline_muted: 模型 · :agent_tool: N tools · :agent_skill: N skills`。按实际有效字段拼接，缺失及零次 tools/skills 隐藏，不展示 token 和缓存率。
