@@ -2,6 +2,7 @@
 import importlib.util
 from pathlib import Path
 import unittest
+import tempfile
 from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location("run_context", Path(__file__).parents[1] / "multica-skills/multica-final-reply/scripts/run_context.py")
@@ -68,6 +69,89 @@ class FinalReplyTests(unittest.TestCase):
             data = final.snapshot("issue", self.env)
         self.assertEqual(data["messages"], [])
         self.assertEqual(final.statistics(self.data), {"duration_seconds": 62})
+
+    def test_issue_link_reuses_current_issue_without_extra_queries(self):
+        issue_id = "00000000-0000-4000-8000-000000000001"
+        self.run.update(issue_id=issue_id, agent_id="agent-current")
+        agent = {"id": "agent-current", "workspace_id": "ws", "model": "gpt-6-astra"}
+        with patch.object(final, "query", side_effect=[[self.run], agent, []]) as query:
+            data = final.snapshot(issue_id, self.env)
+            summary = final.summarize(data, "GRM-87", "grm", "https://multica.example/")
+            self.assertEqual(query.call_count, 3)
+        self.assertEqual(summary["issue_identifier"], "GRM-87")
+        self.assertEqual(summary["issue_url"], f"https://multica.example/grm/issues/{issue_id}")
+        self.assertEqual(summary["run_id"], "run")
+        self.assertEqual(summary["statistics"]["model"], "gpt-6-astra")
+
+    def test_issue_link_requires_all_display_context(self):
+        self.run["issue_id"] = "00000000-0000-4000-8000-000000000001"
+        for args in ((None, "grm", "https://multica.example"),
+                     ("GRM-87", None, "https://multica.example"),
+                     ("GRM-87", "grm", None), (None, None, None)):
+            with self.subTest(args=args):
+                summary = final.summarize(self.data, *args)
+                self.assertNotIn("issue_url", summary)
+                self.assertNotIn("issue_identifier", summary)
+                self.assertEqual(summary["statistics"]["duration_seconds"], 62)
+
+    def test_invalid_issue_context_hides_only_link(self):
+        self.run["issue_id"] = "00000000-0000-4000-8000-000000000001"
+        cases = [(value, "grm", "https://multica.example") for value in
+                 ("#GRM-87", "GRM-0", "GRM-87|<!here>", "GRM-87\n", "", 87)]
+        cases += [("GRM-87", value, "https://multica.example") for value in
+                  ("../other", "grm/issues", "grm?x=1", "", "x" * 101)]
+        cases += [("GRM-87", "grm", value) for value in
+                  ("javascript:alert(1)", "http://multica.example", "https://name:password@multica.example",
+                   "https://multica.example/api", "https://multica.example/?token=secret",
+                   "https://multica.example/#section", "https://multica.example|other",
+                   "https://multica.example:invalid", "https://multica.example:0",
+                   "https://multica.example\n", "https://[invalid", "https://", "")]
+        for args in cases:
+            with self.subTest(args=args):
+                summary = final.summarize(self.data, *args)
+                self.assertNotIn("issue_url", summary)
+                self.assertNotIn("issue_identifier", summary)
+                self.assertEqual(summary["statistics"]["duration_seconds"], 62)
+
+    def test_issue_link_uses_explicit_web_origin_and_workspace(self):
+        self.run["issue_id"] = "00000000-0000-4000-8000-000000000001"
+        self.env["MULTICA_SERVER_URL"] = "https://api.example"
+        summary = final.summarize(self.data, "LAB-5", "winches-lab", "https://web.example:8443")
+        self.assertEqual(summary["issue_url"],
+                         "https://web.example:8443/winches-lab/issues/00000000-0000-4000-8000-000000000001")
+        self.assertEqual(summary["issue_identifier"], "LAB-5")
+
+    def test_invalid_issue_id_never_becomes_link_path(self):
+        for issue_id in ("run", "../other", "", None):
+            with self.subTest(issue_id=issue_id):
+                self.run["issue_id"] = issue_id
+                summary = final.summarize(self.data, "GRM-87", "grm", "https://multica.example")
+                self.assertNotIn("issue_url", summary)
+
+    def test_issue_link_survives_unavailable_run_messages(self):
+        issue_id = "00000000-0000-4000-8000-000000000001"
+        self.run["issue_id"] = issue_id
+        with patch.object(final, "query", side_effect=[[self.run], final.RunContextError("日志不可用")]):
+            data = final.snapshot(issue_id, self.env)
+        summary = final.summarize(data, "GRM-87", "grm", "https://multica.example")
+        self.assertIn("issue_url", summary)
+        self.assertNotIn("tools", summary["statistics"])
+
+    def test_cli_persists_issue_link_with_statistics(self):
+        issue_id = "00000000-0000-4000-8000-000000000001"
+        self.run["issue_id"] = issue_id
+        with tempfile.TemporaryDirectory() as directory:
+            output = str(Path(directory) / "context.json")
+            argv = ["run_context.py", "--issue", issue_id, "--issue-identifier", "GRM-87",
+                    "--workspace-slug", "grm", "--app-url", "https://multica.example", "--output", output]
+            with patch("sys.argv", argv), patch.dict(final.os.environ, self.env), \
+                    patch.object(final, "query", side_effect=[[self.run], []]) as query, patch("builtins.print"):
+                self.assertEqual(final.main(), 0)
+                self.assertEqual(query.call_count, 2)
+            saved = final.json.loads(Path(output).read_text())
+            self.assertEqual(saved["issue_identifier"], "GRM-87")
+            self.assertTrue(saved["issue_url"].endswith("/" + issue_id))
+            self.assertIn("duration_seconds", saved["statistics"])
 
     def test_skill_names_deduplicate_and_tokens_never_render(self):
         self.run.update(model="gpt-6-astra", usage=[{"input_tokens": 999}])

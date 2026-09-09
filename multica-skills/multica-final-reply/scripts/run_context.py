@@ -8,6 +8,8 @@ from pathlib import Path
 import re
 import shlex
 import subprocess
+from urllib.parse import urlsplit
+from uuid import UUID
 
 
 class RunContextError(Exception):
@@ -212,9 +214,32 @@ def code_evidence(messages):
     return evidence
 
 
-def summarize(data):
+def issue_link(data, identifier, workspace_slug, app_url):
+    # 编号和工作区 slug 来自 Agent 已读取的当前任务上下文；只组装链接，不补查。
+    if not isinstance(identifier, str) or not re.fullmatch(r"[A-Z][A-Z0-9]{0,31}-[1-9][0-9]{0,15}", identifier):
+        return {}
+    if not isinstance(workspace_slug, str) or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", workspace_slug):
+        return {}
+    if len(workspace_slug) > 100 or not isinstance(app_url, str):
+        return {}
+    try:
+        issue_id = str(UUID(data["run"]["issue_id"]))
+        origin = urlsplit(app_url)
+        if (origin.scheme != "https" or not origin.hostname or origin.username is not None
+                or origin.password is not None or origin.path not in ("", "/")
+                or origin.query or origin.fragment or origin.port == 0
+                or re.search(r"[\s<>|\\]", app_url)):
+            return {}
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return {}
+    return {"issue_identifier": identifier,
+            "issue_url": f"{origin.scheme}://{origin.netloc}/{workspace_slug}/issues/{issue_id}"}
+
+
+def summarize(data, issue_identifier=None, workspace_slug=None, app_url=None):
     messages = valid_messages(data)
     return {"version": 1, "run_id": data["run"]["id"], "issue_id": data["run"]["issue_id"],
+            **issue_link(data, issue_identifier, workspace_slug, app_url),
             "captured_at": data["captured_at"], "last_message_seq": messages[-1]["seq"] if messages else None,
             "statistics": statistics(data), "code_evidence": code_evidence(messages)}
 
@@ -222,10 +247,14 @@ def summarize(data):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--issue", required=True)
+    parser.add_argument("--issue-identifier", help="已有任务详情中的编号，例如 GRM-87")
+    parser.add_argument("--workspace-slug", help="已确认的当前工作区 slug，例如 grm")
+    parser.add_argument("--app-url", help="已确认的 Multica 网页根地址，必须为 HTTPS")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
     try:
-        summary = summarize(snapshot(args.issue, os.environ))
+        summary = summarize(snapshot(args.issue, os.environ), args.issue_identifier,
+                            args.workspace_slug, args.app_url)
         write_new(args.output, summary)
     except Exception as error:
         print(json.dumps({"error": str(error) if isinstance(error, RunContextError) else "运行资料整理失败，请检查 CLI 返回和输出路径"}, ensure_ascii=False))
