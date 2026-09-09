@@ -13,7 +13,7 @@
 - 在目标 Workspace 创建专用 Project 和 Agent，绑定需要使用的 Runtime。
 - 将 [AGENT-PROMPT.md](AGENT-PROMPT.md) 同步为 Agent instructions。
 - 配置 Agent 的 `RELAY_OWNER_SLACK_USER_ID`、`RELAY_SKILL_ROOT`。频道和发送者的白名单/黑名单由 Relay 统一校验，Agent 不再读取单频道 `RELAY_ALLOWED_CHANNEL_ID`。
-- Slack 操作使用被授权的 USER token；每次 CLI 调用显式覆盖 SLACK_BOT_TOKEN 与 SLACK_TOKEN，防止 shell/Skill 配置选到 Bot。
+- Agent 的 Slack 回复操作使用被授权的 USER token；每次 CLI 调用显式覆盖 SLACK_BOT_TOKEN 与 SLACK_TOKEN，防止 shell/Skill 配置选到 Bot。
 - 回读 Agent 的 Runtime、权限和并发。初期并发2即可；Mac 休眠/断网会影响执行。
 - 读取本地 Skills 和 Workspace 指派 Skills 的实际加载结果。数据库 Skill 数量不能单独说明任务可用能力。
 - Relay 使用 MULTICA_PROJECT_ID/MULTICA_AGENT_ID 调用普通 Issue API；不再需要 Autopilot。
@@ -44,7 +44,7 @@ footer 表示消费消息时读取的 **Agent 配置快照**，不是运行实�
 
 ## 3. Slack App
 
-使用专用 App 或明确获准复用的 App 接收需要的 message 事件。私有频道订阅 `message.groups`，并将接收 App 加入指定频道。接收事件的 App 身份与外发身份分开配置：`SLACK_REACTION_TOKEN` 和 Agent 回复使用获准的 owner USER token。验收时核对 `reaction.users` 和回复消息的 `user` 是否等于 owner ID。
+使用专用 App 或明确获准复用的 App 接收需要的 message 事件。私有频道订阅 `message.groups`，并将接收 App 加入指定频道。Relay 的 reaction 操作优先使用 `SLACK_BOT_TOKEN`，未配置时使用 `SLACK_USER_TOKEN`；添加、读取和删除始终使用选中的同一身份，API 调用失败不会切换到另一 token。Agent 回复仍使用获准的 owner USER token。验收时分别核对 reaction 所属身份和回复消息的 `user`。
 
 配置 Request URL 为 `https://<当前部署>/api/slack/events`，对应 Signing Secret 填入部署环境。新增 scopes 后重新安装。只修改已授权用于 Relay 的 App。
 
@@ -84,8 +84,12 @@ EdgeOne Cloud Functions 会把 `Request.body` 暴露为解析值，入口通过 
 
 可选环境变量 `SLACK_CANCEL_KEYWORDS=cancel,取消`：未配置或空列表使用默认值；例如设置为 `stop,停止` 后只识别这两个词。取消权限直接复用 `SLACK_TARGET_USER_IDS`，用户组本身不授予权限。
 
-继续使用现有 message 事件订阅。`SLACK_REACTION_TOKEN` 使用 owner USER token，需要 `reactions:write`。可配置 `SLACK_REACTION_READ_TOKEN`，使用具有 `reactions:read` 且能访问目标频道的 Bot token 读取列表，删除仍使用 owner USER token。未配置读取 token 时，owner token 还需要 `reactions:read`。无需增加 reaction 事件订阅。
+继续使用现有 message 事件订阅。选中的 `SLACK_BOT_TOKEN` 或 `SLACK_USER_TOKEN` 需要同时具有 `reactions:read`、`reactions:write`，且能访问目标频道。取消只清理该身份的表情，切换 token 身份前添加的其他身份表情保留。无需增加 reaction 事件订阅。
 
-在专用测试 thread 中启动任务，再由配置的用户回复 `@目标 取消`。检查运行状态变为 cancelled、原触发消息上 owner 的 reaction 被清除、其他人的 reaction 保留；已完成任务不应被改写或清理。取消结束后发送一条新的任务 mention，检查继续原卡。非授权用户发送取消指令应被忽略。
+在专用测试 thread 中启动任务，再由配置的用户回复 `@目标 取消`。检查运行状态变为 cancelled、原触发消息上所选 token 身份的 reaction 被清除、其他身份的 reaction 保留；已完成任务不应被改写或清理。取消结束后发送一条新的任务 mention，检查继续原卡。非授权用户发送取消指令应被忽略。
 
 消费失败仍使用现有 QStash 重试与 DLQ：`cancellation_pending` 表示建卡/运行/终态仍待确认；`reaction_cleanup_failed` 表示任务可能已取消但清理未完成。补齐权限或修复上游后，重放原消息会从保存的阶段继续。`cancellation_new_run` 或 `cancellation_run_missing` 需要先人工核对 Multica，不应通过删除 KV 状态强行重建任务。
+
+### Reaction token 配置迁移
+
+旧部署的 `SLACK_REACTION_READ_TOKEN`、`SLACK_REACTION_TOKEN` 不再被新版本读取。上线前配置 `SLACK_BOT_TOKEN`；若使用 user 身份，将原 owner token 配置为 `SLACK_USER_TOKEN` 并留空 bot token。新版本部署成功后再删除旧变量，以便旧部署在切换期间仍能运行。

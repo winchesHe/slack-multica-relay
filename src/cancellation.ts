@@ -158,7 +158,6 @@ export async function cancelThread(
       event.channelId,
       ts,
       fetchImpl,
-      config.slackReactionReadToken,
     );
     cancellation.remainingMessages = cancellation.remainingMessages!.filter(
       (value) => value !== ts,

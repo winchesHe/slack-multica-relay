@@ -28,7 +28,6 @@ export async function addSlackReaction(
 
 export async function clearOwnSlackReactions(
   token: string, channelId: string, messageTs: string, fetchImpl: typeof fetch = fetch,
-  readToken: string = token,
 ): Promise<void> {
   const call = async (method: string, body: Record<string, string>) => {
     const reading = method === 'reactions.get';
@@ -36,7 +35,7 @@ export async function clearOwnSlackReactions(
     if (reading) url.search = new URLSearchParams(body).toString();
     const response = await fetchImpl(url.toString(), {
       method: reading ? 'GET' : 'POST',
-      headers: { authorization: `Bearer ${reading ? readToken : token}`, 'content-type': 'application/json; charset=utf-8' },
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json; charset=utf-8' },
       body: reading ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(2000),
     });
     if (!response.ok) throw new Error('reaction_cleanup_failed');
@@ -54,8 +53,7 @@ export async function clearOwnSlackReactions(
     throw new Error('reaction_cleanup_failed');
   for (const reaction of message.reactions ?? []) {
     if (typeof reaction.name !== 'string' || !Array.isArray(reaction.users)) throw new Error('reaction_cleanup_failed');
-    // Bot 读取的 users 列表可能省略 owner；逐个以 owner 身份删除，非本人表情返回 no_reaction。
-    if (readToken !== token || reaction.users.includes(identity.user_id))
+    if (reaction.users.includes(identity.user_id))
       await call('reactions.remove', { channel: channelId, timestamp: messageTs, name: reaction.name });
   }
 }

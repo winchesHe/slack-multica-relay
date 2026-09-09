@@ -16,7 +16,7 @@ const env = {
   MULTICA_WORKSPACE_ID: "ws",
   MULTICA_PROJECT_ID: "project",
   MULTICA_AGENT_ID: "agent",
-  SLACK_REACTION_TOKEN: "test",
+  SLACK_USER_TOKEN: "test",
   SLACK_REACTION_NAME: "eyes",
   KV_REST_API_URL: "https://kv.test",
   KV_REST_API_TOKEN: "test",
