@@ -203,6 +203,38 @@ class FinalReplyTests(unittest.TestCase):
             self.assertEqual(saved["issue_url"], f"https://web.example/grm/issues/{issue_id}")
             self.assertIn("duration_seconds", saved["statistics"])
 
+    def test_runtime_link_environment_does_not_read_personal_config(self):
+        env = {"FINAL_REPLY_APP_URL": "https://web.example", "FINAL_REPLY_WORKSPACE_SLUG": "grm"}
+        with patch.object(final, "query") as query:
+            self.assertEqual(final.link_context(self.data, "GRM-100", env=env),
+                             ("GRM-100", "grm", "https://web.example"))
+            query.assert_not_called()
+
+    def test_explicit_link_arguments_override_runtime_environment(self):
+        env = {"FINAL_REPLY_APP_URL": "https://other.example", "FINAL_REPLY_WORKSPACE_SLUG": "other"}
+        with patch.object(final, "query") as query:
+            self.assertEqual(final.link_context(self.data, "LAB-5", "lab", "https://web.example", env),
+                             ("LAB-5", "lab", "https://web.example"))
+            query.assert_not_called()
+
+    def test_cli_grm100_isolated_config_uses_runtime_environment(self):
+        issue_id = "00000000-0000-4000-8000-000000000001"
+        self.run["issue_id"] = issue_id
+        issue = {"id": issue_id, "workspace_id": "ws", "identifier": "GRM-100"}
+        with tempfile.TemporaryDirectory() as directory:
+            output = str(Path(directory) / "context.json")
+            env = {**self.env, "MULTICA_TASK_CONFIG_ROOT": directory,
+                   "FINAL_REPLY_APP_URL": "https://web.example", "FINAL_REPLY_WORKSPACE_SLUG": "grm"}
+            argv = ["run_context.py", "--issue", issue_id, "--output", output]
+            with patch("sys.argv", argv), patch.dict(final.os.environ, env, clear=True), \
+                    patch.object(final, "query", side_effect=[[self.run], [], issue]) as query, patch("builtins.print"):
+                self.assertEqual(final.main(), 0)
+                self.assertEqual(query.call_count, 3)
+                self.assertFalse(any("config" in call.args[0] for call in query.call_args_list))
+            saved = final.json.loads(Path(output).read_text())
+            self.assertEqual(saved["issue_identifier"], "GRM-100")
+            self.assertEqual(saved["issue_url"], f"https://web.example/grm/issues/{issue_id}")
+
     def test_skill_names_deduplicate_and_tokens_never_render(self):
         self.run.update(model="gpt-6-astra", usage=[{"input_tokens": 999}])
         for _ in range(2):
