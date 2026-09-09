@@ -2,7 +2,7 @@
 
 ## 目标与验收标准
 
-Agent 完成业务工作后自行读取当前运行，分析相关成果，将结论与 Footer 一次发送到原 Slack 根线程。统计采用发送前快照，不计发送及后续调用；去掉 token 和缓存率，保留能确认的模型、耗时、非零 tools/skills 及相关仓库、PR、分支。不依赖完成回调、队列或消息二次更新。
+Agent 完成业务工作后自行读取当前运行，分析相关成果，将结论与 Footer 一次发送到原 Slack 根线程。统计采用发送前快照，不计发送及后续调用；去掉 token 和缓存率，保留 Agent 配置模型、耗时、非零 tools/skills 及相关仓库、PR、分支。不依赖完成回调、队列或消息二次更新。
 
 Skill 只发布到 Multica 并绑定 Slack Task Router，不安装到本地全局 Skill 目录。保留现有发送身份、线程目标、未知结果不重发和持久化幂等约束。
 
@@ -27,10 +27,10 @@ Skill 只发布到 Multica 并绑定 Slack Task Router，不安装到本地全�
 
 ## 第一阶段验证结果
 
-2026-09-09：`pnpm test` 的 136 项 TypeScript 与 26 项 Python 测试通过，`pnpm lint` 和 Skill 结构校验通过。覆盖当前 run 归属、日志缺失、跨运行日志拒绝、PR 证据排除、多仓库 PR、分支回读、正文绑定、发送未知结果与重复执行。
+2026-09-09：`pnpm test` 的 136 项 TypeScript 与 28 项 Python 测试通过，`pnpm lint` 和 Skill 结构校验通过。覆盖当前 run 归属、Agent 配置模型及失败降级、日志缺失、跨运行日志拒绝、PR 证据排除、多仓库 PR、分支回读、正文绑定、发送未知结果与重复执行。
 
 真实运行 `01a0841e-8d67-7287-b4eb-0fbf46d899cf` 在运行中通过 Multica CLI 取得前 10 条日志；快照时间为 `2026-09-09T03:03:43.488682+00:00`。同一快照中定位 PR #6 的真实查询，再回读 GitHub 分支为 `feat/completion-hook`。首次发送返回 `sent`，相同 bundle 重复执行返回 `duplicate`；Slack 独立回读确认一条消息包含完整正文和两个 context，正文未被截断。
 
 [真实验收消息](https://moegoworkspace.slack.com/archives/C0B0DSCRBKM/p1788923068395629?thread_ts=1788882331.909789) 展示 `33s · 5 tools` 和 PR／分支。该消息发送时批量读取 Skill 尚未识别，因此隐藏了 skills；随后补充批量 `cat` 支持，使用同一真实快照离线复算得到 `2 skills`，未为此重发或编辑消息。
 
-运行 API 当前未提供实际模型字段，因而隐藏模型；第二阶段需核对 Runtime 是否有可验证的实际模型来源。模型来源未确认前不以 Agent 配置冒充。普通无 PR 分支的 Footer 和生产链路切换仍属于第二阶段。
+模型按用户确认的口径，读取当前 run 所属 Agent 的配置字段 `model`，核对 Agent ID 和工作区，并在快照记录 `model_source=agent_config`。展示值表示配置模型；读取失败、归属不匹配或模型字段无效时隐藏。普通无 PR 分支的 Footer 和生产链路切换仍属于第二阶段。

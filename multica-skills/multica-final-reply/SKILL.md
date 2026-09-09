@@ -21,7 +21,7 @@ description: 在 Multica 的 Slack Task Router 完成业务任务后，获取当
 
 - 正文后使用 context 展示耗时、可确认的模型、非零 tools 和 skills；再按 PR 展示仓库、分支和 PR 链接。多 PR 去重，保留多仓库；没有 PR 时不显示空行。
 - 耗时截至快照采集时刻；tools 是已返回日志中的 `tool_use` 数量；skills 是已成功读取、能与调用唯一对应的 Skill 名称去重数。Multica 日志可能尚在上传，快照不是任务结束后的总量，不轮询等待补齐。
-- 模型仅使用当前 run API 已提供的模型字段；Agent 配置不能证明实际模型。缺失字段隐藏，不显示占位符或 0。token 与缓存率不展示。
+- 模型读取当前 run 所属 Agent 的 `model` 配置，核对 Agent ID 与工作区归属。这是发送前读取的配置模型，不是运行结束后的实际 usage 模型；按用户选择展示配置值。读取失败或字段缺失时隐藏，不显示占位符或 0。token 与缓存率不展示。
 - PR 分支从 GitHub 读取，不从标题猜测。暂未建立 PR 的分支放在正文说明并提供业务证据；第一阶段 Footer 只支持经 PR 核验的分支。
 
 Runtime 依赖：已认证的 `multica`、`gh` CLI，显式 `MULTICA_SERVER_URL`、`MULTICA_WORKSPACE_ID`、`MULTICA_TASK_ID`，以及支持 `register_footer=False` 的 `RELAY_REPLY_SCRIPT`。缺失配置应报告，不能绕过脚本直接发送。

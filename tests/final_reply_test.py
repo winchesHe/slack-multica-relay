@@ -34,6 +34,31 @@ class FinalReplyTests(unittest.TestCase):
                 final.snapshot("issue", self.env)
             self.assertEqual(query.call_count, 1)
 
+    def test_model_comes_from_current_run_agent_config(self):
+        self.run.update(agent_id="agent-current", model="old-run-model")
+        agent = {"id": "agent-current", "workspace_id": "ws", "model": " gpt-6-astra ", "instructions": "private"}
+        with patch.object(final, "query", side_effect=[[self.run], agent, []]) as query:
+            data = final.snapshot("issue", self.env)
+        self.assertEqual(data["run"]["model"], "gpt-6-astra")
+        self.assertEqual(data["run"]["model_source"], "agent_config")
+        self.assertNotIn("instructions", data["run"])
+        self.assertIn("agent-current", query.call_args_list[1].args[0])
+        self.assertIn(":agent_mdi_robot_outline_muted: gpt-6-astra", final.statistics(data))
+
+    def test_unavailable_or_invalid_agent_config_hides_only_model(self):
+        self.run.update(agent_id="agent-current", model="do-not-fallback")
+        invalid = [final.FinalReplyError("读取失败"), None, [],
+                   {"id": "other", "workspace_id": "ws", "model": "gpt-6-astra"},
+                   {"id": "agent-current", "workspace_id": "other", "model": "gpt-6-astra"},
+                   {"id": "agent-current", "workspace_id": "ws", "model": ""},
+                   {"id": "agent-current", "workspace_id": "ws", "model": "<!here>"}]
+        for agent in invalid:
+            with self.subTest(agent=agent), patch.object(final, "query", side_effect=[[self.run], agent, []]) as query:
+                data = final.snapshot("issue", self.env)
+                self.assertNotIn("model", data["run"])
+                self.assertEqual(query.call_count, 3)
+                self.assertIn(":agent_time:", final.statistics(data))
+
     def test_missing_current_run_never_uses_previous(self):
         with patch.object(final, "query", return_value=[{"id": "other"}]):
             with self.assertRaises(final.FinalReplyError):

@@ -54,13 +54,26 @@ def snapshot(issue, env):
     run = matches[0]
     if run.get("issue_id") != issue or run.get("workspace_id") != identity["MULTICA_WORKSPACE_ID"]:
         raise FinalReplyError("运行归属不匹配")
+    model = None
+    agent_id = run.get("agent_id")
+    if agent_id:
+        try:
+            agent = query(cli + ["agent", "get", agent_id, "--output", "json"])
+            if isinstance(agent, dict) and agent.get("id") == agent_id and agent.get("workspace_id") == identity["MULTICA_WORKSPACE_ID"]:
+                candidate = agent.get("model")
+                if isinstance(candidate, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}", candidate.strip()):
+                    model = candidate.strip()
+        except FinalReplyError:
+            pass
     try:
         messages = query(cli + ["issue", "run-messages", run["id"], "--issue", issue, "--output", "json"])
     except FinalReplyError:
         messages = []
     captured = datetime.now(timezone.utc).isoformat()
     # 不保存发起人、邮箱、完整任务正文等与统计无关的 run 字段。
-    selected = {key: run[key] for key in ("id", "issue_id", "workspace_id", "started_at", "status", "model") if key in run}
+    selected = {key: run[key] for key in ("id", "issue_id", "workspace_id", "agent_id", "started_at", "status") if key in run}
+    if model:
+        selected.update(model=model, model_source="agent_config")
     return {"version": 1, "scope": identity, "captured_at": captured, "run": selected, "messages": messages}
 
 
