@@ -309,7 +309,7 @@ describe("快速确认与单次后台执行", () => {
     expect(f.message.blocks.slice(0, -1)).toEqual(original.blocks);
     expect(f.writes[0]!.attachments).toEqual(original.attachments);
     expect(f.writes[0]!.text).toBe(
-      "正文 **必须保留**\n\n:agent_time: 6m 30s · :agent_mdi_robot_outline: gpt-6-astra: 1.0k tokens (0% cached) · :agent_tool: 0 tools · :agent_skill: 0 skills",
+      "正文 **必须保留**\n\n:agent_time: 6m 30s · :agent_mdi_robot_outline_muted: gpt-6-astra: 1.0k tokens (0% cached) · :agent_tool: 0 tools · :agent_skill: 0 skills",
     );
     expect(
       f.urls.some(

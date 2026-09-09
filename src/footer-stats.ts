@@ -63,7 +63,7 @@ function usageFooter(usage: unknown): string | undefined {
   const value = [modelText, tokenText].filter(Boolean).join(": ");
   // Slack context 文本有容量限制；不截断模型名称或伪造剩余模型的统计。
   if (!value || value.length > 1500) return;
-  return `:agent_mdi_robot_outline: ${value}`;
+  return `:agent_mdi_robot_outline_muted: ${value}`;
 }
 
 export function buildRunFooter(

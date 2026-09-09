@@ -45,7 +45,7 @@ describe("运行 footer 统计与显示", () => {
     expect(
       buildRunFooter({ ...run, usage: [usage] }, { tools: 27, skills: 2 }),
     ).toBe(
-      ":agent_time: 14m 12s · :agent_mdi_robot_outline: gpt-5.6-sol: 5399.8k tokens (97% cached) · :agent_tool: 27 tools · :agent_skill: 2 skills",
+      ":agent_time: 14m 12s · :agent_mdi_robot_outline_muted: gpt-5.6-sol: 5399.8k tokens (97% cached) · :agent_tool: 27 tools · :agent_skill: 2 skills",
     );
   });
   it("与已核对的真实运行 usage 数值一致", () => {
@@ -67,7 +67,7 @@ describe("运行 footer 统计与显示", () => {
         { tools: 51, skills: 4 },
       ),
     ).toBe(
-      ":agent_time: 6m 30s · :agent_mdi_robot_outline: gpt-6-astra: 3256.5k tokens (96% cached) · :agent_tool: 51 tools · :agent_skill: 4 skills",
+      ":agent_time: 6m 30s · :agent_mdi_robot_outline_muted: gpt-6-astra: 3256.5k tokens (96% cached) · :agent_tool: 51 tools · :agent_skill: 4 skills",
     );
   });
   it("多个模型去重，聚合全部 usage，不串到其他 run", () => {
@@ -126,14 +126,14 @@ describe("运行 footer 统计与显示", () => {
     (input_tokens) => {
       expect(
         buildRunFooter({ ...run, usage: [{ ...usage, input_tokens }] }),
-      ).toBe(":agent_time: 14m 12s · :agent_mdi_robot_outline: gpt-5.6-sol");
+      ).toBe(":agent_time: 14m 12s · :agent_mdi_robot_outline_muted: gpt-5.6-sol");
     },
   );
   it("非法模型不进入 Slack 文本，可靠 tokens 仍保留", () => {
     expect(
       buildRunFooter({ ...run, usage: [{ ...usage, model: "<!channel>" }] }),
     ).toBe(
-      ":agent_time: 14m 12s · :agent_mdi_robot_outline: 5399.8k tokens (97% cached)",
+      ":agent_time: 14m 12s · :agent_mdi_robot_outline_muted: 5399.8k tokens (97% cached)",
     );
   });
 });

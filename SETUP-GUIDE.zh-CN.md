@@ -53,7 +53,7 @@ rtk proxy python3 "$RELAY_REPLY_SCRIPT" \
 
 上线次序：准备安装与配置 → 部署新函数（保持开关关闭）→ 部署 Runtime 脚本并核对路径和 User 身份 → 对照最新线上 instructions 同步本地 Prompt 候选 → 协调开启两端开关 → 以明确获准的测试 thread 验收。不要把未知 Token 配到不可信 Preview，也不要为联调关闭全局部署保护。
 
-验收至少覆盖：完整统计 footer 更新同一条消息、正文和附件保留、重复完成通知、先完成后登记、登记失败只补登记、后台失败不重试、回调不等待 worker、无最终回复保持静默。缺少 blocks、已有 50 个 blocks 或消息超限时省略 footer，不能截断正文。确认 `:agent_time:`、`:agent_mdi_robot_outline:`、`:agent_tool:`、`:agent_skill:` 在工作区存在。统计口径、日志容量与缺失处理见 Footer 计划。
+验收至少覆盖：完整统计 footer 更新同一条消息、正文和附件保留、重复完成通知、先完成后登记、登记失败只补登记、后台失败不重试、回调不等待 worker、无最终回复保持静默。缺少 blocks、已有 50 个 blocks 或消息超限时省略 footer，不能截断正文。确认 `:agent_time:`、`:agent_mdi_robot_outline_muted:`、`:agent_tool:`、`:agent_skill:` 在工作区存在。统计口径、日志容量与缺失处理见 Footer 计划。
 
 Footer 不再使用 QStash、CRON_SECRET 或恢复脚本。旧队列和恢复入口仅返回 disabled，旧状态自然过期；运维只查日志与回执。详见 [Footer 运维](FOOTER-OPERATIONS.zh-CN.md)。
 

@@ -19,7 +19,7 @@ Agent 先发送最终回复并登记实际消息 ID。Multica 完成/失败 Hook
 单个 context block，顺序固定，以下数字仅示例：
 
 ```text
-:agent_time: 14m 12s · :agent_mdi_robot_outline: gpt-5.6-sol: 5399.8k tokens (97% cached) · :agent_tool: 27 tools · :agent_skill: 2 skills
+:agent_time: 14m 12s · :agent_mdi_robot_outline_muted: gpt-5.6-sol: 5399.8k tokens (97% cached) · :agent_tool: 27 tools · :agent_skill: 2 skills
 ```
 
 缺失项隐藏，不等统计齐备，不添加状态或未知值占位。模型取当前 run usage；Tokens 合计 input/output/cache_read/cache_write，以 k 保留一位小数。已验证 Codex input 不含缓存，cached 为 cache_read/(input+cache_read)，其他 provider 或出现 cache_write 时隐藏比例。
