@@ -309,7 +309,7 @@ describe("快速确认与单次后台执行", () => {
     expect(f.message.blocks.slice(0, -1)).toEqual(original.blocks);
     expect(f.writes[0]!.attachments).toEqual(original.attachments);
     expect(f.writes[0]!.text).toBe(
-      "正文 **必须保留**\n\n:agent_time: 6m 30s · :agent_mdi_robot_outline_muted: gpt-6-astra: 1.0k tokens (0% cached) · :agent_tool: 0 tools · :agent_skill: 0 skills",
+      "正文 **必须保留**\n\n:agent_time: 6m 30s · :agent_mdi_robot_outline_muted: gpt-6-astra: 1.0k tokens (0% cached)",
     );
     expect(
       f.urls.some(
@@ -433,9 +433,8 @@ describe("统计缺失与范围保护", () => {
       } else {
         expect(f.writes).toHaveLength(1);
         expect(f.writes[0]!.text.includes("tokens")).toBe(missing !== "usage");
-        expect(f.writes[0]!.text.includes(":agent_tool:")).toBe(
-          missing !== "logs",
-        );
+        expect(f.writes[0]!.text).not.toContain(":agent_tool:");
+        expect(f.writes[0]!.text).not.toContain(":agent_skill:");
       }
     },
   );

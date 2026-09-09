@@ -87,13 +87,15 @@ describe("运行 footer 统计与显示", () => {
       );
     },
   );
-  it("没有耗时仍保留可靠统计；全部缺失才省略 footer", () => {
+  it("工具与 Skill 为零时省略，正数独立展示", () => {
     expect(
       buildRunFooter(
         { id: "task", status: "completed" },
         { tools: 0, skills: 0 },
       ),
-    ).toBe(":agent_tool: 0 tools · :agent_skill: 0 skills");
+    ).toBeUndefined();
+    expect(buildRunFooter({ id: "task", status: "completed" }, { tools: 2, skills: 0 })).toBe(":agent_tool: 2 tools");
+    expect(buildRunFooter({ id: "task", status: "completed" }, { tools: 0, skills: 1 })).toBe(":agent_skill: 1 skills");
     expect(buildRunFooter({ id: "task", status: "completed" })).toBeUndefined();
   });
   it("真实零 tokens 可显示，零分母不生成 cached", () => {

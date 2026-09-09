@@ -71,8 +71,8 @@ export function buildRunFooter(
   logs: LogStats = {},
 ): string | undefined {
   const parts = [buildDurationFooter(run), usageFooter(run.usage)];
-  if (logs.tools !== undefined) parts.push(`:agent_tool: ${logs.tools} tools`);
-  if (logs.skills !== undefined)
+  if (logs.tools !== undefined && logs.tools > 0) parts.push(`:agent_tool: ${logs.tools} tools`);
+  if (logs.skills !== undefined && logs.skills > 0)
     parts.push(`:agent_skill: ${logs.skills} skills`);
   return parts.filter(Boolean).join(" · ") || undefined;
 }
