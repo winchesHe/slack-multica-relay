@@ -306,7 +306,7 @@ export async function listIssueRuns(
 ): Promise<IssueRun[]> {
   const response = await api(
     config,
-    `/api/issues/${encodeURIComponent(issueId)}/tasks`,
+    `/api/issues/${encodeURIComponent(issueId)}/task-runs`,
     {},
     fetchImpl,
   );

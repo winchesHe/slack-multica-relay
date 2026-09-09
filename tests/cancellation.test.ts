@@ -73,7 +73,7 @@ function fixture() {
       return Response.json(issues[0]);
     }
     if (url.endsWith("/api/issues/issue")) return Response.json(issues[0]);
-    if (url.endsWith("/tasks")) return Response.json(runs);
+    if (url.endsWith("/task-runs")) return Response.json(runs);
     if (url.endsWith("/cancel")) {
       if (refuseCancel) return Response.json({}, { status: 403 });
       const id = url.split("/").at(-2);
@@ -182,7 +182,7 @@ describe("取消和恢复", () => {
     expect(f.comments).toHaveLength(0);
     expect(f.reactions.has(cancel.messageTs)).toBe(false);
     const lastRead = f.calls.lastIndexOf(
-      "GET https://multica.test/api/issues/issue/tasks",
+      "GET https://multica.test/api/issues/issue/task-runs",
     );
     expect(
       f.calls.findIndex((call) => call.endsWith("/reactions.remove")),
