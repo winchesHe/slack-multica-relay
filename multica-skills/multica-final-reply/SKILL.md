@@ -18,3 +18,15 @@ description: 在 Multica 的 Slack Task Router 完成业务任务后，整理当
 发送身份固定为 User，不因 Bot 未安装或发送失败改用 Bot。当前任务已获授权的普通最终答复无需再次确认发送；本 Skill 不决定是否介入、不扩大业务操作权限，静默条件及外部写入授权遵循 Agent Prompt。
 
 资料脚本依赖已认证的 Multica CLI，以及 `MULTICA_SERVER_URL`、`MULTICA_WORKSPACE_ID`、`MULTICA_TASK_ID`。发送凭据、身份预检、消息格式和错误处理全部遵循现有 slack Skill；本 Skill 不提供发送脚本、回执存储或消息更新服务。
+
+## References
+
+以下路径相对于本 SKILL.md。按读取时机加载对应文件，再执行其规则；不把整份 references 目录一次性读入上下文。
+
+| 文件 | 内容 | 读取时机 |
+| --- | --- | --- |
+| [个人回复风格](references/reply-style.md) | 语气、篇幅、标点和结论表达 | 每次撰写最终正文前必读 |
+| [Emoji 使用指南](references/emoji-guide.md) | 本人上传的常用表情、适用语境和选择方式 | 每次撰写最终正文前必读 |
+| [PR Review 回执](references/pr-review-receipt.md) | 审查结论、问题数量、review 链接及未完成状态的回执规则 | 当前任务涉及 PR Review 或复审时必读，包括审查未完成或写回失败的情况 |
+| [Footer 展示](references/footer-display.md) | 统计口径、模型来源、PR/分支布局和缺失字段处理 | 每次组装 Footer 与 fallback 前必读 |
+| [完整 Emoji 目录](references/emoji-catalog.json) | 工作区表情名称、图片地址、别名状态和停用项 | 常用指南不足以选出合适表情时，按名称检索少量条目；不整份加载，不逐次联网刷新 |
