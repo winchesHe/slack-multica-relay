@@ -87,18 +87,71 @@ class FinalReplyTests(unittest.TestCase):
         self.data["messages"][0].update(task_id="run", seq=2)
         self.assertNotIn("tools", final.statistics(self.data))
 
-    def test_concurrent_skill_reads_are_not_guessed(self):
+    def test_concurrent_duplicate_reads_count_one_name(self):
         for _ in range(2):
             self.message("tool_use", tool="exec_command", input={"cmd": "cat /skills/slack/SKILL.md"})
         for _ in range(2):
             self.message("tool_result", tool="exec_command", output="---\nname: slack\n---\n")
+        self.assertEqual(final.statistics(self.data)["skill_names"], ["slack"])
+
+    def test_parallel_skill_results_can_arrive_in_reverse_order(self):
+        for name in ("github-workflow", "multica-final-reply"):
+            self.message("tool_use", tool="exec_command", input={"cmd": f"cat /skills/{name}/SKILL.md"})
+        for name in ("multica-final-reply", "github-workflow"):
+            self.message("tool_result", tool="exec_command", output=f"---\nname: {name}\n---\n正文")
+        self.assertEqual(final.statistics(self.data)["skills"], 2)
+
+    def test_parallel_reference_read_does_not_hide_skill(self):
+        for command in ("cat /skills/slack/references/format.md", "cat /skills/final/SKILL.md"):
+            self.message("tool_use", tool="exec_command", input={"cmd": command})
+        self.message("tool_result", tool="exec_command", output="# 格式参考\n---\nname: example\n---\n")
+        self.message("tool_result", tool="exec_command", output="---\nname: final\n---\n正文")
+        self.assertEqual(final.statistics(self.data)["skill_names"], ["final"])
+
+    def test_failed_unresolved_and_search_calls_preserve_confirmed_names(self):
+        self.message("tool_use", tool="exec_command", input={"cmd": "cat /skills/slack/SKILL.md"})
+        self.message("tool_result", tool="exec_command", output="---\nname: slack\n---\n")
+        for command, output in (
+            ("cat /skills/missing/SKILL.md", "cat: /skills/missing/SKILL.md: No such file or directory"),
+            ("rg --files -g SKILL.md /skills", "/skills/missing/SKILL.md"),
+            ("cat /work/source.md", "---\nname: ordinary-doc\n---\n"),
+            ("cat /skills/truncated/SKILL.md", "---\nname: truncated\n"),
+        ):
+            self.message("tool_use", tool="exec_command", input={"cmd": command})
+            self.message("tool_result", tool="exec_command", output=output)
+        self.message("tool_use", tool="exec_command", input={"cmd": "cat /skills/pending/SKILL.md"})
+        self.assertEqual(final.statistics(self.data)["skill_names"], ["slack"])
+
+    def test_parallel_failed_read_does_not_hide_successful_read(self):
+        for name in ("missing", "slack"):
+            self.message("tool_use", tool="exec_command", input={"cmd": f"cat /skills/{name}/SKILL.md"})
+        self.message("tool_result", tool="exec_command", output="---\nname: slack\n---\n")
+        self.message("tool_result", tool="exec_command", output="cat: /skills/missing/SKILL.md: Permission denied")
+        self.assertEqual(final.statistics(self.data)["skill_names"], ["slack"])
+
+    def test_skill_body_examples_are_not_additional_skills(self):
+        self.message("tool_use", tool="exec_command", input={"cmd": "cat /skills/slack/SKILL.md"})
+        self.message("tool_result", tool="exec_command", output="---\nname: slack\n---\n示例\n```yaml\n---\nname: fake\n---\n```")
+        self.assertEqual(final.statistics(self.data)["skill_names"], ["slack"])
+
+    def test_parallel_unmatched_name_and_unfinished_batch_are_omitted(self):
+        for name in ("a", "b"):
+            self.message("tool_use", tool="exec_command", input={"cmd": f"cat /skills/{name}/SKILL.md"})
+        self.message("tool_result", tool="exec_command", output="---\nname: a\n---\n")
         self.assertNotIn("skills", final.statistics(self.data))
+        self.message("tool_result", tool="exec_command", output="---\nname: unrelated\n---\n")
+        self.assertEqual(final.statistics(self.data)["skill_names"], ["a"])
 
     def test_batch_skill_reads_require_all_headers(self):
         self.message("tool_use", tool="exec_command", input={"cmd": "cat /skills/a/SKILL.md /skills/b/SKILL.md"})
         self.message("tool_result", tool="exec_command", output="---\nname: a\n---\n正文\n---\nname: b\n---\n正文")
         self.assertEqual(final.statistics(self.data)["skills"], 2)
         self.data["messages"][-1]["output"] = "---\nname: a\n---\n部分输出"
+        self.assertNotIn("skills", final.statistics(self.data))
+
+    def test_batch_partial_output_cannot_count_a_body_example(self):
+        self.message("tool_use", tool="exec_command", input={"cmd": "cat /skills/a/SKILL.md /skills/b/SKILL.md"})
+        self.message("tool_result", tool="exec_command", output="---\nname: a\n---\n示例\n---\nname: example\n---\n")
         self.assertNotIn("skills", final.statistics(self.data))
 
     def test_extracts_pr_and_branch_evidence_without_querying_github(self):
