@@ -3,10 +3,11 @@ import { loadRelayConfig, type RelayConfig } from "./config.js";
 import { verifySlackSignature } from "./signature.js";
 import {
   findTargetMention,
+  isCancelCommand,
+  canCancelTask,
   isSupportedMessage,
   type SlackMessageEvent,
 } from "./mentions.js";
-import { addSlackReaction } from "./reaction.js";
 import {
   routeSlackThreadEvent,
   digest,
@@ -43,9 +44,11 @@ function record(value: unknown): value is Record<string, unknown> {
 function admitted(event: SlackThreadEvent, config: RelayConfig): boolean {
   return (
     event.teamId === config.teamId &&
-    (config.allowAllChannels || config.allowedChannelIds.has(event.channelId)) &&
+    (config.allowAllChannels ||
+      config.allowedChannelIds.has(event.channelId)) &&
     !config.blockedChannelIds.has(event.channelId) &&
-    (config.allowAllSenders || config.allowedSenderIds.has(event.senderUserId)) &&
+    (config.allowAllSenders ||
+      config.allowedSenderIds.has(event.senderUserId)) &&
     !config.blockedSenderIds.has(event.senderUserId) &&
     !!findTargetMention(
       event.text,
@@ -67,6 +70,9 @@ function parsedEvent(value: unknown): SlackThreadEvent {
         typeof value[k] !== "string" || !/^\d+\.\d+$/u.test(value[k] as string),
     ) ||
     typeof value.text !== "string" ||
+    (value.operation !== undefined &&
+      value.operation !== "dispatch" &&
+      value.operation !== "cancel") ||
     !record(value.mention) ||
     !["user", "subteam"].includes(String(value.mention.type)) ||
     typeof value.mention.id !== "string"
@@ -94,6 +100,10 @@ function reason(error: unknown): string {
     "multica_http_error",
     "invalid_multica_response",
     "invalid_comment_cursor",
+    "cancellation_pending",
+    "cancellation_run_missing",
+    "cancellation_new_run",
+    "reaction_cleanup_failed",
   ];
   return error instanceof Error && codes.includes(error.message)
     ? error.message
@@ -175,6 +185,19 @@ export async function acceptSlack(
   }
   if (!admitted(payload, config))
     return json({ action: "ignored", reason: "not_allowed" });
+  payload.operation = isCancelCommand(
+    payload.text,
+    config.targetUserIds,
+    config.targetSubteamIds,
+    config.cancelKeywords,
+  )
+    ? "cancel"
+    : "dispatch";
+  if (
+    payload.operation === "cancel" &&
+    !canCancelTask(payload.senderUserId, config.targetUserIds)
+  )
+    return json({ action: "ignored", reason: "cancel_not_allowed" });
   try {
     const response = await fetchImpl(
       config.queueUrl + "/v2/publish/" + config.consumerUrl,
@@ -257,6 +280,20 @@ export async function consumeQueue(
   }
   if (!admitted(event, config))
     return json({ action: "ignored", reason: "policy_changed" });
+  // 新消息保留入队时的指令分类，配置变更不能把排队中的取消变成启动任务。
+  event.operation ??= isCancelCommand(
+    event.text,
+    config.targetUserIds,
+    config.targetSubteamIds,
+    config.cancelKeywords,
+  )
+    ? "cancel"
+    : "dispatch";
+  if (
+    event.operation === "cancel" &&
+    !canCancelTask(event.senderUserId, config.targetUserIds)
+  )
+    return json({ action: "ignored", reason: "cancel_not_allowed" });
   const start = Date.now(),
     deadline = AbortSignal.timeout(45000);
   const boundedFetch: typeof fetch = (input, init = {}) =>
@@ -277,20 +314,6 @@ export async function consumeQueue(
       },
       boundedFetch,
     );
-    try {
-      await addSlackReaction(
-        config.slackReactionToken,
-        event.channelId,
-        event.messageTs,
-        config.slackReactionName,
-        boundedFetch,
-      );
-    } catch {
-      console.warn("relay_reaction", {
-        messageKey: messageKey(event),
-        reason: "reaction_failed",
-      });
-    }
     console.info("relay_dispatch", {
       ...result,
       messageKey: messageKey(event),

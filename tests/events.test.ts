@@ -232,3 +232,56 @@ describe("durable admission", () => {
     expect(description).not.toContain("spoofed");
   });
 });
+
+describe("取消指令的事件路由", () => {
+  it("授权取消入队并保存指令类型", async () => {
+    const f = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ messageId: "cancel-msg" }));
+    const response = await acceptSlack(request({ ...event, user: "U1", text: "<@U1> CANCEL", thread_ts: event.ts }), env, f);
+    expect(response.status).toBe(200);
+    expect(JSON.parse(String(f.mock.calls[0]![1]!.body))).toMatchObject({ operation: "cancel", senderUserId: "U1" });
+  });
+  it("非目标用户的取消指令不会入队或作为新任务处理", async () => {
+    const f = vi.fn<typeof fetch>();
+    const response = await acceptSlack(request({ ...event, text: "<@U1> 取消" }), env, f);
+    expect(await response.json()).toEqual({ action: "ignored", reason: "cancel_not_allowed" });
+    expect(f).not.toHaveBeenCalled();
+  });
+  it("自定义关键词替换默认值，普通讨论仍入队为 dispatch", async () => {
+    for (const [text, operation] of [["<@U1> stop", "cancel"], ["<@U1> cancel", "dispatch"], ["<@U1> 帮我取消", "dispatch"]]) {
+      const f = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ messageId: "msg" }));
+      await acceptSlack(request({ ...event, user: "U1", text }), { ...env, SLACK_CANCEL_KEYWORDS: "stop,停止" }, f);
+      expect(JSON.parse(String(f.mock.calls[0]![1]!.body)).operation).toBe(operation);
+    }
+  });
+  it("消费时重新核对取消身份，不能借队列绕过权限", async () => {
+    const f = vi.fn<typeof fetch>();
+    const response = await consumeQueue(new Request(env.RELAY_CONSUMER_URL, { method: "POST", body: JSON.stringify({
+      teamId: "T1", channelId: "C1", senderUserId: "U2", messageTs: "102.000001", threadTs: "100.000001",
+      text: "<@U1> cancel", mention: { type: "user", id: "U1" }, operation: "cancel",
+    }) }), env, f);
+    expect(await response.json()).toEqual({ action: "ignored", reason: "cancel_not_allowed" });
+    expect(f).not.toHaveBeenCalled();
+  });
+  it.each(["cancel", undefined])("消费取消 %s 不建卡、不加 reaction；已分类取消不随关键词变更变成任务", async (operation) => {
+    const calls: string[] = [];
+    const kv = new Map<string, string>();
+    const f: typeof fetch = async (input, init) => {
+      const url = String(input); calls.push(url);
+      if (url === env.KV_REST_API_URL) {
+        const [command, key, value] = JSON.parse(String(init?.body));
+        if (command === "GET") return Response.json({ result: kv.get(key) ?? null });
+        if (command === "SET") { kv.set(key, value); return Response.json({ result: "OK" }); }
+        if (command === "EVAL") return Response.json({ result: 1 });
+      }
+      if (url.includes("/api/issues?")) return Response.json({ issues: [] });
+      throw new Error("不应调用建卡或 reaction 接口");
+    };
+    const response = await consumeQueue(new Request(env.RELAY_CONSUMER_URL, { method: "POST", body: JSON.stringify({
+      teamId: "T1", channelId: "C1", senderUserId: "U1", messageTs: "102.000001", threadTs: "100.000001",
+      text: "<@U1> cancel", mention: { type: "user", id: "U1" }, operation,
+    }) }), operation ? { ...env, SLACK_CANCEL_KEYWORDS: "stop" } : env, f);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ action: "ignored" });
+    expect(calls.every((url) => url === env.KV_REST_API_URL || url.includes("/api/issues?"))).toBe(true);
+  });
+});

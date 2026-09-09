@@ -3,6 +3,7 @@ export interface RelayConfig {
   teamId: string;
   targetUserIds: Set<string>;
   targetSubteamIds: Set<string>;
+  cancelKeywords: Set<string>;
   allowedChannelIds: Set<string>;
   allowAllChannels: boolean;
   blockedChannelIds: Set<string>;
@@ -46,6 +47,7 @@ export function loadRelayConfig(
     blockedSenderIds,
     targetUserIds,
     targetSubteamIds,
+    cancelKeywords: cancelKeywords(env.SLACK_CANCEL_KEYWORDS),
     multicaApiBaseUrl: https(required(env, "MULTICA_API_BASE_URL")),
     multicaApiToken: required(env, "MULTICA_API_TOKEN"),
     multicaWorkspaceId: required(env, "MULTICA_WORKSPACE_ID"),
@@ -97,4 +99,12 @@ function https(value: string): string {
   )
     throw new Error("invalid_service_url");
   return value.replace(/\/+$/u, "");
+}
+
+function cancelKeywords(value: string | undefined): Set<string> {
+  const keywords = (value ?? "")
+    .split(",")
+    .map((x) => x.trim().toLowerCase())
+    .filter(Boolean);
+  return new Set(keywords.length ? keywords : ["cancel", "取消"]);
 }

@@ -79,3 +79,13 @@ footer 表示消费消息时读取的 **Agent 配置快照**，不是运行实�
 上线前至少回读：Slack Request URL 已验证、`RELAY_CONSUMER_URL` 指向同一部署、真实中文事件验签成功、owner 身份 reaction/回复正确、同 thread 追问复用 Issue、重复事件没有额外任务、临时 503 进入重试且 QStash DLQ 状态可见。Runtime 离线恢复必须单独实测，不能由普通队列重试或 HTTP 200 推断。
 
 EdgeOne Cloud Functions 会把 `Request.body` 暴露为解析值，入口通过 `arrayBuffer()` 保留签名字节；Vercel 入口优先读取原始 Node stream。两边都不能用 `JSON.stringify(parsedBody)` 重建验签原文。
+
+## 取消功能配置与验收
+
+可选环境变量 `SLACK_CANCEL_KEYWORDS=cancel,取消`：未配置或空列表使用默认值；例如设置为 `stop,停止` 后只识别这两个词。取消权限直接复用 `SLACK_TARGET_USER_IDS`，用户组本身不授予权限。
+
+继续使用现有 message 事件订阅。`SLACK_REACTION_TOKEN` 需要 `reactions:read` 与 `reactions:write`；如果原 token 缺少读取权限，应补齐 scope 并重新授权。无需增加 reaction 事件订阅。
+
+在专用测试 thread 中启动任务，再由配置的用户回复 `@目标 取消`。检查运行状态变为 cancelled、原触发消息上 owner 的 reaction 被清除、其他人的 reaction 保留；已完成任务不应被改写或清理。取消结束后发送一条新的任务 mention，检查继续原卡。非授权用户发送取消指令应被忽略。
+
+消费失败仍使用现有 QStash 重试与 DLQ：`cancellation_pending` 表示建卡/运行/终态仍待确认；`reaction_cleanup_failed` 表示任务可能已取消但清理未完成。补齐权限或修复上游后，重放原消息会从保存的阶段继续。`cancellation_new_run` 或 `cancellation_run_missing` 需要先人工核对 Multica，不应通过删除 KV 状态强行重建任务。
