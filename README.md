@@ -42,3 +42,11 @@ pnpm lint
 | 消费503                 | 保留队列重试/DLQ责任，原因包括 timeout、thread*lock_busy、ambiguous*\* |
 
 `GET /api/health` 仅证明函数可响应。消费有45秒整体预算，部署函数上限60秒；入站发布请求超时2秒。平台冷启动、网络延迟与配额仍须实测。
+
+## 在 thread 内取消任务
+
+在原任务 thread 回复 `@目标 cancel` 或 `@目标 取消`。只有发送者在 `SLACK_TARGET_USER_IDS` 中才生效，频道和发送者黑白名单继续生效。`SLACK_CANCEL_KEYWORDS` 可配置逗号分隔的关键词，非空配置替换默认值；去掉目标 mention 和首尾空白后完整匹配，英文忽略大小写。
+
+取消指令复用现有消息订阅，经 QStash 持久化处理，不会建卡、追加任务评论或添加启动 reaction。消费者保存目标运行 ID，取消排队或执行中的运行并回读状态，然后清理已记录触发消息上 owner 身份的全部 reaction（包括启动标记）；其他人的 reaction 保留。已完成、已失败且没有活动运行时保留原标记。
+
+取消期间的任务请求会被忽略。取消完成后重新发送 mention 可继续原任务卡；已处理的旧事件不会重新启动任务。API 或清理失败保留进度，由 QStash 重试；重试耗尽需检查 DLQ 并重放原消息。清理需要读取 token 具有 `reactions:read`、owner token 具有 `reactions:write`；可通过 `SLACK_REACTION_READ_TOKEN` 单独配置 Bot 读取身份，无需订阅 `reaction_added`。

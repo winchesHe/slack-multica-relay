@@ -191,6 +191,16 @@ export async function findComment(
   marker: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<MulticaComment | undefined> {
+  for await (const page of issueCommentPages(config, issueId, fetchImpl)) {
+    const match = page.find((comment) => comment.content.includes(marker));
+    if (match) return match;
+  }
+}
+async function* issueCommentPages(
+  config: ApiConfig,
+  issueId: string,
+  fetchImpl: typeof fetch,
+): AsyncGenerator<MulticaComment[]> {
   let before = "",
     beforeId = "";
   for (let page = 0; page < 50; page++) {
@@ -217,10 +227,7 @@ export async function findComment(
       )
     )
       throw new Error("invalid_multica_response");
-    const match = (body as MulticaComment[]).find((x) =>
-      x.content.includes(marker),
-    );
-    if (match) return match;
+    yield body as MulticaComment[];
     const next = response.headers.get("X-Multica-Next-Before");
     const nextId = response.headers.get("X-Multica-Next-Before-Id");
     if (!next && !nextId) return;
@@ -252,4 +259,110 @@ export async function createComment(
   )
     throw new Error("invalid_multica_response");
   return body as unknown as MulticaComment;
+}
+
+export interface IssueRun {
+  id: string;
+  issue_id: string;
+  workspace_id: string;
+  agent_id: string;
+  status: string;
+}
+export function isActiveRun(run: IssueRun): boolean {
+  return [
+    "queued",
+    "dispatched",
+    "running",
+    "waiting_local_directory",
+    "deferred",
+  ].includes(run.status);
+}
+export async function getIssue(
+  config: ApiConfig,
+  issueId: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<MulticaIssue> {
+  const response = await api(
+    config,
+    `/api/issues/${encodeURIComponent(issueId)}`,
+    {},
+    fetchImpl,
+  );
+  if (!response.ok) throw new ApiError(response.status);
+  const result = issue(await response.json());
+  if (
+    result.id !== issueId ||
+    result.project_id !== config.multicaProjectId ||
+    result.assignee_type !== "agent" ||
+    result.assignee_id !== config.multicaAgentId
+  )
+    throw new Error("invalid_issue_scope");
+  return result;
+}
+export async function listIssueRuns(
+  config: ApiConfig,
+  issueId: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<IssueRun[]> {
+  const response = await api(
+    config,
+    `/api/issues/${encodeURIComponent(issueId)}/task-runs`,
+    {},
+    fetchImpl,
+  );
+  if (!response.ok) throw new ApiError(response.status);
+  const body: unknown = await response.json();
+  if (
+    !Array.isArray(body) ||
+    body.some(
+      (run) =>
+        !object(run) ||
+        typeof run.id !== "string" ||
+        run.issue_id !== issueId ||
+        run.workspace_id !== config.multicaWorkspaceId ||
+        typeof run.agent_id !== "string" ||
+        ![
+          "queued",
+          "dispatched",
+          "running",
+          "waiting_local_directory",
+          "deferred",
+          "completed",
+          "failed",
+          "cancelled",
+        ].includes(String(run.status)),
+    )
+  )
+    throw new Error("invalid_multica_response");
+  return body as IssueRun[];
+}
+export async function cancelIssueRun(
+  config: ApiConfig,
+  issueId: string,
+  runId: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  // 使用绑定 issue 的接口，让服务端再次校验运行归属；终态另行 GET 回读。
+  const response = await api(
+    config,
+    `/api/issues/${encodeURIComponent(issueId)}/tasks/${encodeURIComponent(runId)}/cancel`,
+    { method: "POST", body: "{}" },
+    fetchImpl,
+  );
+  if (!response.ok) throw new ApiError(response.status);
+}
+
+export async function listRelayMessageContents(
+  config: ApiConfig,
+  issueId: string,
+  fetchImpl: typeof fetch,
+): Promise<string[]> {
+  const contents: string[] = [];
+  for await (const page of issueCommentPages(config, issueId, fetchImpl)) {
+    for (const comment of page) {
+      if (/^<!-- relay-message:[a-f0-9]{64} -->\n/u.test(comment.content))
+        contents.push(comment.content);
+    }
+  }
+  return contents;
 }
