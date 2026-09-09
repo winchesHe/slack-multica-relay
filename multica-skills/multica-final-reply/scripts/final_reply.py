@@ -207,7 +207,7 @@ def prepare(data, selection, text, blocks, output):
         raise FinalReplyError("最终正文和 blocks 不能为空")
     stats = statistics(data)
     rows = artifacts(data, selection)
-    lines = ([stats] if stats else []) + [f":agent_mdi_github: {escape(r['repository'])} · `{escape(r['branch'])}` · <{r['url']}|PR #{r['number']}>" for r in rows]
+    lines = ([stats] if stats else []) + [f":agent_mdi_github: {escape(r['repository'].split('/')[-1])} · `{escape(r['branch'])}` · <{r['url']}|PR #{r['number']}>" for r in rows]
     if any(len(line) > 2000 for line in lines) or len(blocks) + len(lines) > 50:
         raise FinalReplyError("消息超出 Block Kit 限制，未发送")
     full_blocks = blocks + [{"type": "context", "elements": [{"type": "mrkdwn", "text": line}]} for line in lines]
