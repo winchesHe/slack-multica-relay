@@ -1,6 +1,6 @@
 # Slack → Multica Relay
 
-在获准频道中 @真人或 User Group，把请求交给 Multica 的专用 Agent，执行环境可以是本地 Codex。适配 Vercel Functions 与 EdgeOne Cloud Functions，共用同一套处理逻辑。
+在获准频道中 @真人或 User Group，把请求交给 Multica 的专用 Agent，执行环境可以是本地 Codex。适配 Vercel Functions、EdgeOne Cloud Functions 与 Cloudflare Workers，共用同一套处理逻辑。
 
 ## 链路
 
@@ -50,3 +50,13 @@ pnpm lint
 取消指令复用现有消息订阅，经 QStash 持久化处理，不会建卡、追加任务评论或添加启动 reaction。消费者保存目标运行 ID，取消排队或执行中的运行并回读状态，然后清理已记录触发消息上当前 reaction token 身份的全部 reaction（包括启动标记）；其他人的 reaction 保留。已完成、已失败且没有活动运行时保留原标记。
 
 取消期间的任务请求会被忽略。取消完成后重新发送 mention 可继续原任务卡；已处理的旧事件不会重新启动任务。API 或清理失败保留进度，由 QStash 重试；重试耗尽需检查 DLQ 并重放原消息。所有 reaction 操作优先使用 `SLACK_BOT_TOKEN`，未配置时使用 `SLACK_USER_TOKEN`；选中的 token 需要 `reactions:read`、`reactions:write` 且能访问目标频道，调用失败不会切换身份。切换身份后，旧身份添加的表情会保留。无需订阅 `reaction_added`。
+
+## 上下文与发送适配器
+
+每次普通请求读取有界的 Slack 主时间线与当前线程，后续请求带独立可读的精选快照，并通过冻结 envelope 和消息指纹避免重复上下文。文件内容及 private URL 不进入队列。取消流程沿用原来的权限、固定 run 集合和 reaction 清理。
+
+配置合同与升级步骤见 [配置说明](docs/CONFIGURATION.md)，完整窗口、裁剪与恢复语义见 [上下文合同](docs/CONTEXT-ASSEMBLY-DESIGN.md)。新增 `SLACK_CONTEXT_TOKEN`，并要求 `SLACK_ALLOWED_CHANNEL_IDS` 显式指定 ID 或 `all`。
+
+`scripts/slack-reply.py` 是可选的确定性发送入口，使用私有 JSON、来源 Issue/comment 校验和 at-most-once delivery ledger。现有最终回复 Skill 仍可使用原 Slack 发送流程；采用 adapter 时按配置文档替换发送命令，保持单一发送入口，不能两种方式同时发。adapter 与公开代码不携带个人 Prompt、表情目录或凭据。
+
+Cloudflare 使用 `pnpm dev:cf`、`pnpm build:cf` 和 `pnpm deploy:cf`，共享同一 consumer 和 QStash/Redis；构建推荐 Node.js 24。

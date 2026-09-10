@@ -16,6 +16,7 @@ export interface RelayConfig {
   multicaProjectId: string;
   multicaAgentId: string;
   slackReactionToken: string;
+  slackContextToken: string;
   slackReactionName: string;
   kvRestApiUrl: string;
   kvRestApiToken: string;
@@ -28,7 +29,7 @@ export interface RelayConfig {
 export function loadRelayConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): RelayConfig {
-  const allowedChannels = policyIds(env.SLACK_ALLOWED_CHANNEL_IDS || "all");
+  const allowedChannels = policyIds(required(env, "SLACK_ALLOWED_CHANNEL_IDS"));
   const blockedChannelIds = ids(env.SLACK_BLOCKED_CHANNEL_IDS);
   const allowedSenders = policyIds(env.SLACK_ALLOWED_SENDER_IDS || "all");
   const blockedSenderIds = ids(env.SLACK_BLOCKED_SENDER_IDS);
@@ -55,6 +56,7 @@ export function loadRelayConfig(
     multicaAgentId: required(env, "MULTICA_AGENT_ID"),
     slackReactionToken:
       env.SLACK_BOT_TOKEN?.trim() || required(env, "SLACK_USER_TOKEN"),
+    slackContextToken: required(env, "SLACK_CONTEXT_TOKEN"),
     slackReactionName: required(env, "SLACK_REACTION_NAME").replace(
       /^:+|:+$/gu,
       "",

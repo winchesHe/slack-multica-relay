@@ -48,7 +48,7 @@ footer 表示消费消息时读取的 **Agent 配置快照**，不是运行实�
 
 配置 Request URL 为 `https://<当前部署>/api/slack/events`，对应 Signing Secret 填入部署环境。新增 scopes 后重新安装。只修改已授权用于 Relay 的 App。
 
-`SLACK_TEAM_ID`、`SLACK_TARGET_USER_IDS` 和 `SLACK_TARGET_SUBTEAM_IDS` 至少一个必填；`SLACK_ALLOWED_CHANNEL_IDS` 保留为白名单配置，默认使用 `all`，也可填写逗号分隔的频道 ID。`SLACK_BLOCKED_CHANNEL_IDS`、`SLACK_ALLOWED_SENDER_IDS` 和 `SLACK_BLOCKED_SENDER_IDS` 可选，黑名单优先于白名单。后续问答仍需再次 mention。
+`SLACK_TEAM_ID` 必填，`SLACK_TARGET_USER_IDS` 和 `SLACK_TARGET_SUBTEAM_IDS` 至少一个必填；`SLACK_ALLOWED_CHANNEL_IDS` 必须显式填写逗号分隔的频道 ID 或 `all`，缺失或空值拒绝启动。`SLACK_BLOCKED_CHANNEL_IDS`、`SLACK_ALLOWED_SENDER_IDS` 和 `SLACK_BLOCKED_SENDER_IDS` 可选，黑名单优先于白名单。后续问答仍需再次 mention。
 
 ## 4. Vercel
 
@@ -93,3 +93,9 @@ EdgeOne Cloud Functions 会把 `Request.body` 暴露为解析值，入口通过 
 ### Reaction token 配置迁移
 
 旧部署的 `SLACK_REACTION_READ_TOKEN`、`SLACK_REACTION_TOKEN` 不再被新版本读取。上线前配置 `SLACK_BOT_TOKEN`；若使用 user 身份，将原 owner token 配置为 `SLACK_USER_TOKEN` 并留空 bot token。新版本部署成功后再删除旧变量，以便旧部署在切换期间仍能运行。
+
+## 有界上下文升级
+
+普通任务新增 `SLACK_CONTEXT_TOKEN`，需要目标会话 history scopes；`users:read` 仅用于可选的参与者姓名。该 token 与 reaction 身份独立。先配置新变量再切换版本，保持原 `SLACK_ALLOWED_CHANNEL_IDS` 的显式取值。新请求生成带上下文树的 envelope，同事件重试复用快照；旧 marker/裸 JSON 仍可恢复原任务映射。任务消息和上下文会保存在 QStash、Redis（24h 快照）与 Multica，按目标频道范围配置访问。
+
+详细配置、Cloudflare 部署和可选确定性发送见 [配置说明](docs/CONFIGURATION.md)。原最终回复 Skill 及个人配置继续有效，采用 adapter 时应替换最终发送步骤，避免双重发送。

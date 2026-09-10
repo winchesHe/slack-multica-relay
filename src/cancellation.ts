@@ -6,7 +6,8 @@ import {
   isActiveRun,
   listRelayMessageContents,
 } from "./multica-api.js";
-import { readTaskMessage } from "./task-presentation.js";
+import { compareTs } from "./context-envelope.js";
+import { readTaskEnvelope } from "./task-presentation.js";
 import { clearOwnSlackReactions } from "./reaction.js";
 import type {
   SlackThreadEvent,
@@ -38,9 +39,9 @@ export async function cancelThread(
   if (
     (!previous || previous.phase === "done") &&
     ((state.lastMessageTs &&
-      compareTimestamp(event.messageTs, state.lastMessageTs) < 0) ||
+      compareTs(event.messageTs, state.lastMessageTs) < 0) ||
       (state.ignoredThrough &&
-        compareTimestamp(event.messageTs, state.ignoredThrough) <= 0))
+        compareTs(event.messageTs, state.ignoredThrough) <= 0))
   )
     return { action: "ignored", issueId: state.issueId };
 
@@ -69,14 +70,14 @@ export async function cancelThread(
       if (state.creating) throw new Error("cancellation_pending");
       return finish("ignored");
     }
-    const original = readTaskMessage(existing.description!);
+    const original = readTaskEnvelope(existing.description!).eventPayload;
     if (
       original.teamId !== event.teamId ||
       original.channelId !== event.channelId ||
       original.threadTs !== event.threadTs
     )
       throw new Error("invalid_thread_state");
-    if (compareTimestamp(event.messageTs, original.messageTs) < 0)
+    if (compareTs(event.messageTs, original.messageTs) < 0)
       return finish("ignored");
     state.rootMessageKey = `${original.teamId}:${original.channelId}:${original.messageTs}`;
     state.issueId = existing.id;
@@ -114,12 +115,12 @@ export async function cancelThread(
     if (!targets.some((run) => run!.status === "cancelled"))
       return finish("no_active_run");
     if (!state.reactionHistoryKnown) {
-      const source = readTaskMessage(issue.description!);
+      const source = readTaskEnvelope(issue.description!).eventPayload;
       const messages = [
         source,
         ...(
           await listRelayMessageContents(config, state.issueId, fetchImpl)
-        ).map(readTaskMessage),
+        ).map((content) => readTaskEnvelope(content).eventPayload),
       ];
       if (
         messages.some(
@@ -167,15 +168,6 @@ export async function cancelThread(
   return finish("cancelled");
 }
 
-export function compareTimestamp(a: string, b: string): number {
-  const [as, af = ""] = a.split("."),
-    [bs, bf = ""] = b.split(".");
-  const left = BigInt(as!) * 1000000n + BigInt(af.padEnd(6, "0"));
-  const right = BigInt(bs!) * 1000000n + BigInt(bf.padEnd(6, "0"));
-  if (left < right) return -1;
-  if (left > right) return 1;
-  return 0;
-}
 export function maxTimestamp(a: string | undefined, b: string): string {
-  return a && compareTimestamp(a, b) > 0 ? a : b;
+  return a && compareTs(a, b) > 0 ? a : b;
 }

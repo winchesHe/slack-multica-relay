@@ -36,6 +36,7 @@ function fixture() {
     slackReactionToken: "test",
     slackReactionName: "eyes",
     store,
+    readContext: async (event) => ({anchorTs:event.threadTs,cutoffTs:event.messageTs,capturedAt:"2026-01-01T00:00:00Z",timeline:{status:"complete",messages:[]}}),
   };
   const issues: Record<string, unknown>[] = [];
   const comments: Record<string, unknown>[] = [];
@@ -65,7 +66,7 @@ function fixture() {
     calls.push(`${init?.method ?? "GET"} ${url}`);
     if (url.includes("/api/agents/"))
       return Response.json({ id: "agent", workspace_id: "ws" });
-    if (url.includes("/api/issues?")) return Response.json({ issues });
+    if (url.includes("/api/issues/search?")) return Response.json({ issues });
     if (url.endsWith("/api/issues")) {
       issues.push({ ...body, id: "issue" });
       newRun("run-1");

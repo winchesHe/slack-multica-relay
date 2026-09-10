@@ -109,37 +109,25 @@ export async function findIssue(
   marker: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<MulticaIssue | undefined> {
-  for (let offset = 0; offset < 10000; offset += 100) {
-    const query = new URLSearchParams({
-      project_id: config.multicaProjectId,
-      limit: "100",
-      offset: String(offset),
-      sort: "created_at",
-      direction: "asc",
-    });
-    const response = await api(config, "/api/issues?" + query, {}, fetchImpl);
-    if (!response.ok) throw new ApiError(response.status);
-    const body: unknown = await response.json();
-    if (!object(body) || !Array.isArray(body.issues))
-      throw new Error("invalid_multica_response");
-    const rows = body.issues.map(issue);
-    const matches = rows.filter((x) =>
-      x.description?.startsWith(marker + "\n"),
-    );
-    if (matches.length > 1) throw new Error("ambiguous_issue_mapping");
-    if (matches[0]) {
-      const candidate = matches[0];
-      if (
-        candidate.project_id !== config.multicaProjectId ||
-        candidate.assignee_type !== "agent" ||
-        candidate.assignee_id !== config.multicaAgentId
-      )
-        throw new Error("invalid_issue_scope");
-      return candidate;
-    }
-    if (rows.length < 100) return;
-  }
-  throw new Error("issue_lookup_limit");
+  const identity = marker.match(/[a-f0-9]{64}(?= -->$)/u)?.[0];
+  if (!identity) throw new Error("invalid_thread_state");
+  const query = new URLSearchParams({ q: identity, limit: "20", include_closed: "true" });
+  const response = await api(config, "/api/issues/search?" + query, {}, fetchImpl);
+  if (!response.ok) throw new ApiError(response.status);
+  const body: unknown = await response.json();
+  if (!object(body) || !Array.isArray(body.issues))
+    throw new Error("invalid_multica_response");
+  const matches = body.issues.map(issue).filter((x) => x.description?.startsWith(marker + "\n"));
+  if (matches.length > 1) throw new Error("ambiguous_issue_mapping");
+  const candidate = matches[0];
+  if (!candidate) return;
+  if (
+    candidate.project_id !== config.multicaProjectId ||
+    candidate.assignee_type !== "agent" ||
+    candidate.assignee_id !== config.multicaAgentId
+  )
+    throw new Error("invalid_issue_scope");
+  return candidate;
 }
 export async function createIssue(
   config: ApiConfig,

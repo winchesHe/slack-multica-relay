@@ -1,0 +1,58 @@
+import { createHash, createHmac } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { createTestHarness } from 'wrangler';
+
+// Inline config uses the production entry/compatibility settings without loading private dotenv files.
+const config = JSON.parse(readFileSync('wrangler.jsonc', 'utf8'));
+const env = {
+  SLACK_SIGNING_SECRET: 'test-signing', SLACK_TEAM_ID: 'T1', SLACK_TARGET_USER_IDS: 'U1',
+  SLACK_ALLOWED_CHANNEL_IDS: 'C1', SLACK_USER_TOKEN: 'test', SLACK_CONTEXT_TOKEN: 'test',
+  SLACK_REACTION_NAME: 'eyes', MULTICA_API_BASE_URL: 'https://multica.invalid', MULTICA_API_TOKEN: 'test',
+  MULTICA_WORKSPACE_ID: 'W1', MULTICA_PROJECT_ID: 'P1', MULTICA_AGENT_ID: 'A1',
+  KV_REST_API_URL: 'https://redis.invalid', KV_REST_API_TOKEN: 'test', QSTASH_TOKEN: 'test',
+  QSTASH_CURRENT_SIGNING_KEY: 'current-test-key', QSTASH_NEXT_SIGNING_KEY: 'next-test-key',
+  RELAY_CONSUMER_URL: 'https://relay.test/api/queue/consume',
+};
+const server = createTestHarness({workers:[{config:{...config, vars:env}}]});
+function slackHeaders(body: string) {
+  const ts = String(Math.floor(Date.now()/1000));
+  return {'x-slack-request-timestamp':ts,'x-slack-signature':'v0='+createHmac('sha256',env.SLACK_SIGNING_SECRET).update(`v0:${ts}:${body}`).digest('hex')};
+}
+function queueSignature(body: string, subject = env.RELAY_CONSUMER_URL, key = env.QSTASH_CURRENT_SIGNING_KEY) {
+  const now = Math.floor(Date.now()/1000);
+  const head = Buffer.from(JSON.stringify({alg:'HS256',typ:'JWT'})).toString('base64url');
+  const claims = Buffer.from(JSON.stringify({iss:'Upstash',sub:subject,iat:now,nbf:now-1,exp:now+60,
+    body:createHash('sha256').update(body).digest('base64url')})).toString('base64url');
+  return `${head}.${claims}.`+createHmac('sha256',key).update(`${head}.${claims}`).digest('base64url');
+}
+describe('Cloudflare workerd runtime',()=>{
+  beforeAll(async()=>{await server.listen();},60_000);
+  afterAll(async()=>{await server.close();},30_000);
+  it('routes health, missing paths and unsupported methods',async()=>{
+    expect(await (await server.fetch('/api/health')).json()).toEqual({ok:true,service:'slack-multica-relay'});
+    expect((await server.fetch('/missing')).status).toBe(404);
+    expect((await server.fetch('/api/slack/events')).status).toBe(405);
+    expect((await server.fetch('/api/queue/consume')).status).toBe(405);
+  });
+  it('preserves escaped Slack bytes and rejects tampering',async()=>{
+    const raw='{"type":"url_verification","challenge":"\\u4f60\\u597d"}';
+    const headers=slackHeaders(raw);
+    expect(await (await server.fetch('/api/slack/events',{method:'POST',body:raw,headers})).json()).toEqual({challenge:'你好'});
+    expect((await server.fetch('/api/slack/events',{method:'POST',body:raw+' ',headers})).status).toBe(401);
+  });
+  it('applies injected channel policy before any external side effect',async()=>{
+    const raw=JSON.stringify({type:'event_callback',team_id:'T1',event:{type:'message',channel:'C2',user:'U2',ts:'100.000001',text:'<@U1> test'}});
+    expect(await (await server.fetch('/api/slack/events',{method:'POST',body:raw,headers:slackHeaders(raw)})).json()).toEqual({action:'ignored',reason:'not_allowed'});
+  });
+  it.each([env.QSTASH_CURRENT_SIGNING_KEY,env.QSTASH_NEXT_SIGNING_KEY])('verifies QStash JWT with %s inside workerd',async(key)=>{
+    const body='{}';
+    const response=await server.fetch(env.RELAY_CONSUMER_URL,{method:'POST',body,headers:{'upstash-signature':queueSignature(body,undefined,key)}});
+    expect(await response.json()).toEqual({action:'rejected',error:'invalid_event',retryable:false});
+  });
+  it('rejects a modified queue body and wrong consumer URL',async()=>{
+    for(const [body,signature] of [['{"changed":true}',queueSignature('{}')],['{}',queueSignature('{}','https://wrong.test/api/queue/consume')]]){
+      expect((await server.fetch(env.RELAY_CONSUMER_URL,{method:'POST',body,headers:{'upstash-signature':signature!}})).status).toBe(401);
+    }
+  });
+});

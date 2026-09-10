@@ -1,23 +1,10 @@
-import { createHash } from "node:crypto";
-import type { SlackThreadEvent } from "./thread-router.js";
-import type { SlackReplyContext } from "./multica-api.js";
-
-const PAYLOAD_START = "<!-- relay-payload:v1 -->";
-const PAYLOAD_END = "<!-- /relay-payload -->";
-const FILE_FIELDS = [
-  "id",
-  "name",
-  "mimetype",
-  "size",
-  "url_private_download",
-  "url_private",
-  "permalink",
-] as const;
-
-function object(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === "object" && !Array.isArray(value);
-}
-
+import { Buffer } from 'node:buffer';
+import {createHash} from 'node:crypto';
+import type {SlackThreadEvent} from './thread-router.js';
+import {clip,serializeEnvelope} from './context-envelope.js';
+const PAYLOAD_START='<!-- relay-payload:v1 -->';
+const PAYLOAD_END='<!-- /relay-payload -->';
+function object(value:unknown):value is Record<string,unknown>{return !!value&&typeof value==='object'&&!Array.isArray(value);}
 function decodeSlack(text: string): string {
   return text
     .replace(/&lt;/g, "<")
@@ -50,38 +37,6 @@ export function formatTaskTitle(
   return `Slack mention · ${chars.slice(0, 80).join("")}${chars.length > 80 ? "..." : ""} · [${identity}]`;
 }
 
-function compactEvent(event: SlackThreadEvent): SlackThreadEvent {
-  const { files } = event;
-  // Slack 入站字段不具有 Relay 元数据权限，只复制事件白名单。
-  const rest: SlackThreadEvent = {
-    teamId: event.teamId,
-    channelId: event.channelId,
-    messageTs: event.messageTs,
-    threadTs: event.threadTs,
-    senderUserId: event.senderUserId,
-    text: event.text,
-    mention: { type: event.mention.type, id: event.mention.id },
-  };
-  if (files === undefined) return rest;
-  return {
-    ...rest,
-    files: Array.isArray(files)
-      ? files
-          .filter(object)
-          .map((file) =>
-            Object.fromEntries(
-              FILE_FIELDS.flatMap((key) =>
-                typeof file[key] === "string" ||
-                (key === "size" && typeof file[key] === "number")
-                  ? [[key, file[key]]]
-                  : [],
-              ),
-            ),
-          )
-      : [],
-  };
-}
-
 function quoteMessage(text: string): string {
   // 原文只作为引用展示，不让消息里的 HTML、围栏或链接语法改写描述结构。
   return text
@@ -94,61 +49,25 @@ function quoteMessage(text: string): string {
     .join("\n");
 }
 
-export function formatTaskDescription(
-  event: SlackThreadEvent,
-  marker: string,
-  followup = false,
-  replyContext?: SlackReplyContext,
-): string {
-  const payload = compactEvent(event);
-  const timestamp = Number(event.messageTs) * 1000;
-  const date = new Date(timestamp);
-  const time = Number.isFinite(date.getTime())
-    ? new Intl.DateTimeFormat("sv-SE", {
-        timeZone: "Asia/Shanghai",
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-        hourCycle: "h23",
-      }).format(date) + "（Asia/Shanghai）"
-    : "未知";
-  const channelUrl =
-    "https://slack.com/app_redirect?" +
-    new URLSearchParams({
-      team: event.teamId,
-      channel: event.channelId,
-    });
-  const json = JSON.stringify(
-    { eventPayload: payload, ...(replyContext ? { replyContext } : {}) },
-    null,
-    2,
-  );
-  const fence = "`".repeat(
-    (json.match(/`+/g) ?? []).reduce(
-      (length, run) => Math.max(length, run.length + 1),
-      3,
-    ),
-  );
-  return [
-    marker,
-    followup ? "## Slack thread 后续消息" : "## Slack 原始消息",
-    quoteMessage(decodeSlack(event.text)),
-    "## 来源",
-    `- Slack 频道：[打开频道](${channelUrl})`,
-    `- 触发时间：${time}`,
-    `- 附件：${Array.isArray(payload.files) ? payload.files.length : 0} 个`,
-    "## 事件上下文",
-    PAYLOAD_START,
-    `${fence}json\n${json}\n${fence}`,
-    PAYLOAD_END,
-  ]
-    .join("\n\n")
-    .replace(marker + "\n\n", marker + "\n");
-}
 
+export function formatTaskDescription(envelope:string, marker:string, followup=false):string {
+  const payload=JSON.parse(envelope);const event=payload.eventPayload as SlackThreadEvent;
+  const raw=clip(event.text,4096);const quote=quoteMessage(decodeSlack(raw))+(raw!==event.text?'\n> （展示已截断，完整请求见数据区）':'');
+  const date=new Date(Number(event.messageTs)*1000);
+  const time=Number.isFinite(date.getTime())?new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).format(date)+'（Asia/Shanghai）':'未知';
+  const link='https://slack.com/app_redirect?'+new URLSearchParams({team:event.teamId,channel:event.channelId});
+  const selection=payload.context?.selection;
+  const summary=selection?.mode==='focused' && selection.added!==undefined ? `旁支变化：新增 ${selection.added} 条，更新 ${selection.updated} 条，明确引用 ${selection.referenced} 条。` : '';
+  const render=(json:string)=>{
+    const fence='`'.repeat((json.match(/`+/g)??[]).reduce((n,run)=>Math.max(n,run.length+1),3));
+    const fileCount=Array.isArray(event.files)?event.files.length:0;
+    return [marker,followup?'## Slack thread 后续消息':'## Slack 原始消息',quote,...(summary?[summary]:[]),'## 来源',`- Slack 频道：[打开频道](${link})`,`- 触发时间：${time}`,`- 附件：${fileCount}${event.filesTruncated?'+':''} 个${event.filesTruncated?'（引用已截断）':''}`,'## 事件上下文',PAYLOAD_START,`${fence}json\n${json}\n${fence}`,PAYLOAD_END].join('\n\n').replace(marker+'\n\n',marker+'\n');
+  };
+  let body=render(serializeEnvelope(payload,2));
+  if(Buffer.byteLength(body)>64*1024)body=render(envelope);
+  if(Buffer.byteLength(body)>64*1024)throw new Error('task_presentation_too_large');
+  return body;
+}
 export interface RecoveredMessage {
   teamId: string;
   channelId: string;
@@ -156,7 +75,7 @@ export interface RecoveredMessage {
   messageTs: string;
 }
 
-export function readTaskMessage(description: string): RecoveredMessage {
+export function readTaskEnvelope(description: string): { eventPayload: SlackThreadEvent; [key:string]: unknown } {
   const body = description
     .slice(description.indexOf("\n") + 1)
     .replace(/\r\n/g, "\n");
@@ -193,5 +112,5 @@ export function readTaskMessage(description: string): RecoveredMessage {
     !/^\d+\.\d+$/.test(event.messageTs as string)
   )
     throw new Error("invalid_thread_state");
-  return event as unknown as RecoveredMessage;
+  return parsed as {eventPayload:SlackThreadEvent;[key:string]:unknown};
 }

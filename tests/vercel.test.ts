@@ -30,6 +30,7 @@ const env = {
   MULTICA_PROJECT_ID: "project",
   MULTICA_AGENT_ID: "agent",
   SLACK_USER_TOKEN: "test",
+  SLACK_CONTEXT_TOKEN: "test",
   SLACK_REACTION_NAME: "eyes",
   KV_REST_API_URL: "https://kv.test",
   KV_REST_API_TOKEN: "test",

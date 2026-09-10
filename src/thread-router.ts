@@ -1,3 +1,5 @@
+import { Buffer } from 'node:buffer';
+import {formatTaskTitle,formatTaskDescription,readTaskEnvelope} from './task-presentation.js';
 import { createHash, randomUUID } from "node:crypto";
 import {
   ApiError,
@@ -12,16 +14,11 @@ import type { MentionMatch } from "./mentions.js";
 import { addSlackReaction } from "./reaction.js";
 import {
   cancelThread,
-  compareTimestamp,
   maxTimestamp,
   type CancellationState,
 } from "./cancellation.js";
 import { type ThreadStore } from "./thread-store.js";
-import {
-  formatTaskTitle,
-  formatTaskDescription,
-  readTaskMessage,
-} from "./task-presentation.js";
+import { buildEnvelope, focusContext, messageFingerprint, compareTs, type ThreadContext } from './context-envelope.js';
 
 export interface SlackThreadEvent {
   teamId: string;
@@ -32,10 +29,13 @@ export interface SlackThreadEvent {
   text: string;
   mention: MentionMatch;
   files?: unknown;
+  filesTruncated?: boolean;
+  sourceFingerprint?: string;
   operation?: "dispatch" | "cancel";
 }
 export interface ThreadRouterConfig extends ApiConfig {
   store: ThreadStore;
+  readContext: (event: SlackThreadEvent) => Promise<ThreadContext>;
   slackReactionToken?: string;
   slackReactionName?: string;
 }
@@ -124,7 +124,7 @@ export async function routeSlackThreadEvent(
     }
     if (
       state.ignoredThrough &&
-      compareTimestamp(event.messageTs, state.ignoredThrough) <= 0
+      compareTs(event.messageTs, state.ignoredThrough) <= 0
     )
       return { action: "ignored", issueId: state.issueId };
     state.lastMessageTs = maxTimestamp(state.lastMessageTs, event.messageTs);
@@ -150,12 +150,73 @@ export async function routeSlackThreadEvent(
           );
         } catch {
           console.warn("relay_reaction", {
-            messageKey: messageKey(event),
+            eventId: digest(messageKey(event)),
             reason: "reaction_failed",
           });
         }
       }
       return { action, issueId: state.issueId };
+    };
+    const selectionKey = key + ':sent-context-index';
+    type SelectionIndex = { version: 2; cutoffTs: string; messages: Record<string,string> };
+    const advanceSelection = async (): Promise<void> => {
+      const pending=await config.store.get(msgKey+':selection-index');
+      if(!pending)return;
+      const next=JSON.parse(pending) as SelectionIndex;
+      const old=await config.store.get(selectionKey);
+      if(old&&compareTs(JSON.parse(old).cutoffTs,next.cutoffTs)>=0)return;
+      await config.store.set(selectionKey,pending,24*60*60);
+    };
+    const prepare = async (): Promise<string> => {
+      const preparedKey = msgKey + ':envelope';
+      const frozen = await config.store.get(preparedKey);
+      if (frozen) {
+        console.info('relay_context',{eventId:digest(messageKey(event)),snapshot:'reused',envelopeBytes:Buffer.byteLength(frozen)});
+        return frozen;
+      }
+      const source=await config.readContext(event);
+      const savedIndex=await config.store.get(selectionKey);
+      const index:SelectionIndex|undefined=savedIndex?JSON.parse(savedIndex):undefined;
+      const baseline=index?.version===2&&compareTs(index.cutoffTs,event.messageTs)<0?index.messages:undefined;
+      const followup=messageKey(event)!==state.rootMessageKey;
+      const agentConfigStartedAt=Date.now();
+      const replyContext=await getSlackReplyContext(config,fetchImpl);
+      const agentConfigMs=Date.now()-agentConfigStartedAt;
+      const assemblyStart=Date.now();
+      const selected=followup?focusContext(event,source,baseline):source;
+      const body=buildEnvelope(event,selected,replyContext);
+      const output=JSON.parse(body).context as ThreadContext;
+      const delivered=output.timeline.messages;
+      const count=(roots:ThreadContext['timeline']['messages'])=>roots.length+roots.reduce((n,m)=>n+(m.replies?.messages.length??0),0);
+      const reasons:Record<string,number>={};
+      const readReasons:Record<string,number>={};
+      for(const section of [source.timeline,...source.timeline.messages.flatMap(m=>m.replies?[m.replies]:[])])if(section.reason)readReasons[section.reason]=(readReasons[section.reason]??0)+1;
+      const sections=[output.timeline,...delivered.flatMap(m=>m.replies?[m.replies]:[])];
+      for(const section of sections)if(section.reason)reasons[section.reason]=(reasons[section.reason]??0)+1;
+      console.info('relay_context',{
+        eventId:digest(messageKey(event)),snapshot:'prepared',mode:followup?'focused':'full',baseline:baseline?'available':'unavailable',
+        slackCalls:source.readStats?.slackCalls,rawMessages:source.readStats?.rawMessages,
+        candidateRoots:source.timeline.messages.length,candidateMessages:count(source.timeline.messages),
+        retainedRoots:delivered.length,retainedMessages:count(delivered),omittedMessages:count(source.timeline.messages)-count(delivered),
+        added:output.selection?.added??0,updated:output.selection?.updated??0,referenced:output.selection?.referenced??0,
+        selectionReasons:selected.selectionStats,byteBudgetOmissions:count(selected.timeline.messages)-count(delivered),
+        readReasons,reasons,messageReadMs:source.readStats?.messageReadMs,nameLookupCalls:source.readStats?.nameLookupCalls,
+        nameReadMs:source.readStats?.nameReadMs,agentConfigMs,assemblyMs:Date.now()-assemblyStart,envelopeBytes:Buffer.byteLength(body),
+      });
+      const hashes={...baseline};
+      const sourceMessages=new Map(source.timeline.messages.flatMap(m=>[m,...(m.replies?.messages??[])]).map(m=>[m.ts,m]));
+      for(const root of delivered){
+        for(const message of [root,...(root.replies?.messages??[])]){
+          const original=sourceMessages.get(message.ts);
+          if(original)hashes[message.ts]=messageFingerprint(original);
+        }
+      }
+      const messages=Object.fromEntries(Object.entries(hashes).sort(([a],[b])=>compareTs(b,a)).slice(0,500));
+      await config.store.setIfAbsent(preparedKey, body, 24 * 60 * 60);
+      const saved = await config.store.get(preparedKey);
+      if (!saved) throw new Error('invalid_thread_state');
+      if(saved===body)await config.store.set(msgKey+':selection-index',JSON.stringify({version:2,cutoffTs:event.messageTs,messages}),24*60*60);
+      return saved;
     };
     if (!state.issueId) {
       // Recover by immutable description marker before any write. A POST whose
@@ -164,27 +225,27 @@ export async function routeSlackThreadEvent(
       if (existing) {
         state.issueId = existing.id;
         if (!raw) {
-          const original = readTaskMessage(existing.description!);
+          const original = readTaskEnvelope(existing.description!);
           if (
-            `${original.teamId}:${original.channelId}:${original.threadTs}` !==
-            threadKey(event)
+            !original.eventPayload ||
+            threadKey(original.eventPayload) !== threadKey(event)
           )
             throw new Error("invalid_thread_state");
-          state.rootMessageKey = `${original.teamId}:${original.channelId}:${original.messageTs}`;
-          if (!state.reactionMessages!.includes(original.messageTs))
-            state.reactionMessages!.push(original.messageTs);
+          state.rootMessageKey = messageKey(original.eventPayload);
+          if (!state.reactionMessages!.includes(original.eventPayload.messageTs))
+            state.reactionMessages!.push(original.eventPayload.messageTs);
         }
       } else {
         if (state.creating) throw new Error("ambiguous_issue_create");
-        const replyContext = await getSlackReplyContext(config, fetchImpl);
+        const envelope = await prepare();
         state.rootMessageKey = messageKey(event);
         state.creating = true;
         await config.store.set(key, JSON.stringify(state), STATE_TTL_SECONDS);
         try {
           const created = await createIssue(
             config,
-            formatTaskTitle(event, scope),
-            formatTaskDescription(event, marker, false, replyContext),
+            formatTaskTitle(event,scope),
+            formatTaskDescription(envelope,marker),
             fetchImpl,
           );
           state.issueId = created.id;
@@ -214,6 +275,7 @@ export async function routeSlackThreadEvent(
     if (previous && (JSON.parse(previous) as MessageState).phase === "done")
       return await finish("duplicate");
     if (messageKey(event) === state.rootMessageKey) {
+      await advanceSelection();
       await config.store.set(
         msgKey,
         JSON.stringify({ phase: "done" }),
@@ -234,7 +296,7 @@ export async function routeSlackThreadEvent(
         (JSON.parse(previous) as MessageState).phase === "writing"
       )
         throw new Error("ambiguous_comment_create");
-      const replyContext = await getSlackReplyContext(config, fetchImpl);
+      const envelope = await prepare();
       await config.store.set(
         msgKey,
         JSON.stringify({ phase: "writing" }),
@@ -244,7 +306,7 @@ export async function routeSlackThreadEvent(
         await createComment(
           config,
           state.issueId,
-          formatTaskDescription(event, messageMarker, true, replyContext),
+          formatTaskDescription(envelope,messageMarker,true),
           fetchImpl,
         );
       } catch (error) {
@@ -263,6 +325,7 @@ export async function routeSlackThreadEvent(
         throw error;
       }
     }
+    await advanceSelection();
     await config.store.set(
       msgKey,
       JSON.stringify({ phase: "done" }),
