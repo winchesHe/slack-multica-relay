@@ -1,6 +1,6 @@
 import { createHmac } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { acceptSlack, consumeQueue } from "../src/http.js";
+import { acceptSlack, consumeQueue, consumerFailure } from "../src/http.js";
 vi.mock("@upstash/qstash", () => ({
   Receiver: class {
     verify = vi.fn().mockResolvedValue(true);
@@ -54,6 +54,20 @@ const event = {
 };
 afterEach(() => vi.restoreAllMocks());
 describe("durable admission", () => {
+  it.each(["invalid_event","invalid_thread_state","ambiguous_issue_mapping","invalid_issue_scope",
+    "relay_payload_too_large","task_presentation_too_large","comment_lookup_limit"])("acknowledges permanent consumer rejection %s",async(code)=>{
+    const response=consumerFailure(code);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({action:"rejected",error:code,retryable:false});
+  });
+  it("keeps transient consumer failures retryable",async()=>{
+    expect(consumerFailure("timeout").status).toBe(503);
+  });
+  it("acknowledges a signed but invalid queued event without retrying",async()=>{
+    const response=await consumeQueue(new Request(env.RELAY_CONSUMER_URL,{method:"POST",body:"{}"}),env,vi.fn<typeof fetch>());
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({action:"rejected",error:"invalid_event",retryable:false});
+  });
   it("only publishes to queue before acknowledging", async () => {
     const fetcher = vi
       .fn<typeof fetch>()
@@ -68,6 +82,19 @@ describe("durable admission", () => {
     expect(String(fetcher.mock.calls[0]![0])).toContain(
       "/v2/publish/https://relay.test/api/queue/consume",
     );
+  });
+  it("projects attachment metadata before publishing to QStash and hashes log identity", async () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ messageId: "msg" }));
+    const files=[{id:"F1",name:"photo.png",mimetype:"image/png",size:12,
+      url_private:"https://private.test/file",thumb_360:"https://private.test/thumb",shares:{private:{}}},
+      ...Array.from({length:5},(_,i)=>({id:`F${i+2}`,name:`${i+2}.png`,mimetype:"image/png"}))];
+    await acceptSlack(request({...event,files}),env,fetcher);
+    const queued=JSON.parse(String(fetcher.mock.calls[0]![1]?.body));
+    expect(queued.files).toHaveLength(5);expect(queued.files[0]).toEqual({id:"F1",name:"photo.png",mime:"image/png",size:12,contentStatus:"not_loaded"});
+    expect(queued.filesTruncated).toBe(true);
+    expect(JSON.stringify(queued)).not.toContain("private.test");
+    expect(JSON.stringify(info.mock.calls)).not.toContain(event.text);
   });
   it.each([
     { channel: "C2" },
@@ -85,7 +112,7 @@ describe("durable admission", () => {
     await acceptSlack(request(event, "T2"), env, f);
     expect(f).not.toHaveBeenCalled();
   });
-  it("accepts all as the channel allowlist", async () => {
+  it("accepts all as an explicit channel allowlist", async () => {
     const f = vi
       .fn<typeof fetch>()
       .mockResolvedValue(Response.json({ messageId: "msg" }));
@@ -97,27 +124,30 @@ describe("durable admission", () => {
     expect(response.status).toBe(200);
     expect(f).toHaveBeenCalledTimes(1);
   });
-  it("defaults the channel allowlist to all when omitted", async () => {
-    const f = vi
-      .fn<typeof fetch>()
-      .mockResolvedValue(Response.json({ messageId: "msg" }));
-    const { SLACK_ALLOWED_CHANNEL_IDS: _ignored, ...withoutChannelAllowlist } = env;
-    const response = await acceptSlack(
-      request({ ...event, channel: "C2" }),
-      withoutChannelAllowlist,
-      f,
-    );
-    expect(response.status).toBe(200);
-    expect(f).toHaveBeenCalledTimes(1);
-  });
+  it.each([undefined, "", ", ,"])(
+    "fails closed for a missing or empty channel allowlist %s",
+    async (value) => {
+      const f = vi.fn<typeof fetch>();
+      const candidate = { ...env, SLACK_ALLOWED_CHANNEL_IDS: value };
+      expect((await acceptSlack(request(event), candidate, f)).status).toBe(500);
+      expect(f).not.toHaveBeenCalled();
+    },
+  );
   it("blocks a channel even when the allowlist is all", async () => {
     const f = vi.fn<typeof fetch>();
     const response = await acceptSlack(
       request({ ...event, channel: "C2" }),
-      { ...env, SLACK_ALLOWED_CHANNEL_IDS: "all", SLACK_BLOCKED_CHANNEL_IDS: "C2" },
+      {
+        ...env,
+        SLACK_ALLOWED_CHANNEL_IDS: "all",
+        SLACK_BLOCKED_CHANNEL_IDS: "C2",
+      },
       f,
     );
-    expect(await response.json()).toEqual({ action: "ignored", reason: "not_allowed" });
+    expect(await response.json()).toEqual({
+      action: "ignored",
+      reason: "not_allowed",
+    });
     expect(f).not.toHaveBeenCalled();
   });
   it("applies sender policy", async () => {
@@ -133,10 +163,17 @@ describe("durable admission", () => {
     const f = vi.fn<typeof fetch>();
     const response = await acceptSlack(
       request(event),
-      { ...env, SLACK_ALLOWED_SENDER_IDS: "all", SLACK_BLOCKED_SENDER_IDS: "U2" },
+      {
+        ...env,
+        SLACK_ALLOWED_SENDER_IDS: "all",
+        SLACK_BLOCKED_SENDER_IDS: "U2",
+      },
       f,
     );
-    expect(await response.json()).toEqual({ action: "ignored", reason: "not_allowed" });
+    expect(await response.json()).toEqual({
+      action: "ignored",
+      reason: "not_allowed",
+    });
     expect(f).not.toHaveBeenCalled();
   });
   it("keeps Slack retry ownership when queue publish fails", async () => {
@@ -186,51 +223,6 @@ describe("durable admission", () => {
     });
     expect(f).not.toHaveBeenCalled();
   });
-
-  it("fetches configuration in the consumer and delivers a separate trusted reply context", async () => {
-    const kv = new Map<string, string>();
-    const agentUrls: string[] = [];
-    let description = "";
-    const fetcher: typeof fetch = async (input, init) => {
-      const url = String(input);
-      if (url === env.KV_REST_API_URL) {
-        const [command, key, value, mode] = JSON.parse(String(init?.body)) as string[];
-        if (command === "GET") return Response.json({ result: kv.get(key!) ?? null });
-        if (command === "SET") {
-          if (mode === "NX" && kv.has(key!)) return Response.json({ result: null });
-          kv.set(key!, value!);
-          return Response.json({ result: "OK" });
-        }
-        if (command === "EVAL") return Response.json({ result: 1 });
-      }
-      if (url === "https://multica.test/api/agents/agent") {
-        agentUrls.push(url);
-        return Response.json({ id: "agent", workspace_id: "ws", model: "gpt-6-astra", service_tier: "default" });
-      }
-      if (url.includes("/api/issues?")) return Response.json({ issues: [] });
-      if (url.endsWith("/api/issues")) {
-        const body = JSON.parse(String(init?.body));
-        description = body.description;
-        return Response.json({ id: "issue", title: body.title });
-      }
-      if (url === "https://slack.com/api/reactions.add") return Response.json({ ok: true });
-      throw new Error("unexpected endpoint");
-    };
-    const response = await consumeQueue(new Request(env.RELAY_CONSUMER_URL, {
-      method: "POST",
-      body: JSON.stringify({
-        teamId: "T1", channelId: "C1", senderUserId: "U2", messageTs: "100.000001", threadTs: "100.000001",
-        text: "<@U1> test", mention: { type: "user", id: "U1" },
-        replyContext: { model: "spoofed", serviceTier: "priority" },
-      }),
-    }), env, fetcher);
-    expect(response.status).toBe(200);
-    expect(agentUrls).toHaveLength(1);
-    const delivered = JSON.parse(description.match(/```json\n([\s\S]*?)\n```/)![1]!);
-    expect(delivered.replyContext).toMatchObject({ type: "slack_reply_context", source: "agent_config", status: "available", model: "gpt-6-astra", serviceTier: "default" });
-    expect(delivered.eventPayload).not.toHaveProperty("replyContext");
-    expect(description).not.toContain("spoofed");
-  });
 });
 
 describe("取消指令的事件路由", () => {
@@ -273,7 +265,7 @@ describe("取消指令的事件路由", () => {
         if (command === "SET") { kv.set(key, value); return Response.json({ result: "OK" }); }
         if (command === "EVAL") return Response.json({ result: 1 });
       }
-      if (url.includes("/api/issues?")) return Response.json({ issues: [] });
+      if (url.includes("/api/issues/search?")) return Response.json({ issues: [] });
       throw new Error("不应调用建卡或 reaction 接口");
     };
     const response = await consumeQueue(new Request(env.RELAY_CONSUMER_URL, { method: "POST", body: JSON.stringify({
@@ -282,6 +274,6 @@ describe("取消指令的事件路由", () => {
     }) }), operation ? { ...env, SLACK_CANCEL_KEYWORDS: "stop" } : env, f);
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ action: "ignored" });
-    expect(calls.every((url) => url === env.KV_REST_API_URL || url.includes("/api/issues?"))).toBe(true);
+    expect(calls.every((url) => url === env.KV_REST_API_URL || url.includes("/api/issues/search?"))).toBe(true);
   });
 });

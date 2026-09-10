@@ -7,6 +7,7 @@ import {
   findComment,
   getSlackReplyContext,
   type ApiConfig,
+  type SlackReplyContext,
 } from "./multica-api.js";
 import type { MentionMatch } from "./mentions.js";
 import { addSlackReaction } from "./reaction.js";
@@ -21,6 +22,7 @@ import {
   formatTaskTitle,
   formatTaskDescription,
   readTaskMessage,
+  compactEvent,
 } from "./task-presentation.js";
 
 export interface SlackThreadEvent {
@@ -32,6 +34,7 @@ export interface SlackThreadEvent {
   text: string;
   mention: MentionMatch;
   files?: unknown;
+  filesTruncated?: boolean;
   operation?: "dispatch" | "cancel";
 }
 export interface ThreadRouterConfig extends ApiConfig {
@@ -150,12 +153,25 @@ export async function routeSlackThreadEvent(
           );
         } catch {
           console.warn("relay_reaction", {
-            messageKey: messageKey(event),
+            eventId: digest(messageKey(event)),
             reason: "reaction_failed",
           });
         }
       }
       return { action, issueId: state.issueId };
+    };
+    const prepare = async (descriptionMarker: string, followup: boolean): Promise<string> => {
+      const preparedKey = msgKey + ":envelope";
+      const previous = await config.store.get(preparedKey);
+      const envelope = previous
+        ? JSON.parse(previous) as { eventPayload: SlackThreadEvent; replyContext: SlackReplyContext }
+        : { eventPayload: compactEvent(event), replyContext: await getSlackReplyContext(config, fetchImpl) };
+      // Freeze the event, not its role as an Issue or comment: a rejected first
+      // create can be overtaken by a follow-up before it is retried.
+      const description = formatTaskDescription(envelope.eventPayload, descriptionMarker, followup, envelope.replyContext);
+      if (!previous)
+        await config.store.set(preparedKey, JSON.stringify(envelope), 24 * 60 * 60);
+      return description;
     };
     if (!state.issueId) {
       // Recover by immutable description marker before any write. A POST whose
@@ -176,7 +192,7 @@ export async function routeSlackThreadEvent(
         }
       } else {
         if (state.creating) throw new Error("ambiguous_issue_create");
-        const replyContext = await getSlackReplyContext(config, fetchImpl);
+        const description = await prepare(marker, false);
         state.rootMessageKey = messageKey(event);
         state.creating = true;
         await config.store.set(key, JSON.stringify(state), STATE_TTL_SECONDS);
@@ -184,7 +200,7 @@ export async function routeSlackThreadEvent(
           const created = await createIssue(
             config,
             formatTaskTitle(event, scope),
-            formatTaskDescription(event, marker, false, replyContext),
+            description,
             fetchImpl,
           );
           state.issueId = created.id;
@@ -234,7 +250,7 @@ export async function routeSlackThreadEvent(
         (JSON.parse(previous) as MessageState).phase === "writing"
       )
         throw new Error("ambiguous_comment_create");
-      const replyContext = await getSlackReplyContext(config, fetchImpl);
+      const description = await prepare(messageMarker, true);
       await config.store.set(
         msgKey,
         JSON.stringify({ phase: "writing" }),
@@ -244,7 +260,7 @@ export async function routeSlackThreadEvent(
         await createComment(
           config,
           state.issueId,
-          formatTaskDescription(event, messageMarker, true, replyContext),
+          description,
           fetchImpl,
         );
       } catch (error) {

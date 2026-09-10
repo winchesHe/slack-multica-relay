@@ -28,7 +28,7 @@ export interface RelayConfig {
 export function loadRelayConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): RelayConfig {
-  const allowedChannels = policyIds(env.SLACK_ALLOWED_CHANNEL_IDS || "all");
+  const allowedChannels = policyIds(required(env, "SLACK_ALLOWED_CHANNEL_IDS"));
   const blockedChannelIds = ids(env.SLACK_BLOCKED_CHANNEL_IDS);
   const allowedSenders = policyIds(env.SLACK_ALLOWED_SENDER_IDS || "all");
   const blockedSenderIds = ids(env.SLACK_BLOCKED_SENDER_IDS);

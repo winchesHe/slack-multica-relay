@@ -8,3 +8,13 @@ node_modules/
 !.env.example
 
 __pycache__/
+
+.private/
+
+.slack-reply-state/
+
+.wrangler/
+
+.dev.vars
+
+.dev.vars.*
