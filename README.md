@@ -25,11 +25,11 @@ pnpm test
 pnpm lint
 ```
 
-配置与两平台部署见 [搭建手册](SETUP-GUIDE.zh-CN.md)，契约边界见 [审查记录](REVIEW.md)。
+配置与部署见 [搭建手册](SETUP-GUIDE.zh-CN.md)，契约边界见 [审查记录](REVIEW.md)。
 
 ## 状态与日志
 
-日志记录关联标识、耗时和有限错误码。正文保存在队列和 Multica；Redis 保存线程/消息状态，不存 pending 正文。状态保留90天。内容级调试日志尚未启用，凭据不进入日志。
+日志记录关联标识、耗时和有限错误码。正文保存在队列和 Multica；Redis 保存线程/消息状态90天，并保存单条事件的冻结正文24小时。内容级调试日志尚未启用，凭据不进入日志。
 
 | 接口结果                | 含义                                                                   |
 | ----------------------- | ---------------------------------------------------------------------- |
@@ -39,6 +39,7 @@ pnpm lint
 | 消费 created            | Issue 已创建或从回读恢复                                               |
 | 消费 comment_persisted  | 后续评论已保存                                                         |
 | 消费 duplicate          | 已处理的消息                                                           |
+| 消费 rejected / HTTP200 | 无效输入或确定性失败，retryable=false，不继续队列重试                      |
 | 消费503                 | 保留队列重试/DLQ责任，原因包括 timeout、thread*lock_busy、ambiguous*\* |
 
 `GET /api/health` 仅证明函数可响应。消费有45秒整体预算，部署函数上限60秒；入站发布请求超时2秒。平台冷启动、网络延迟与配额仍须实测。
@@ -55,6 +56,6 @@ pnpm lint
 
 Relay 将触发消息转为任务；上下文读取由 Agent 的 Prompt 和 Skills 决定。每个事件的正文、附件安全元数据与配置快照冻结 24 小时供重试复用，按稳定 marker 搜索恢复任务；附件内容及 private URL 不进入队列。已有取消权限、固定 run 集合与 reaction 清理保持原有语义。
 
-`scripts/slack-reply.py` 是可选的确定性发送入口，使用私有 JSON、来源 Issue/comment 校验和 at-most-once delivery ledger。现有最终回复 Skill 默认仍用原 Slack 发送流程；采用 adapter 时只保留一个发送入口，避免两种方式同时发。配置及升级步骤见 [配置说明](docs/CONFIGURATION.md)。
+`scripts/slack-reply.py` 是可选的确定性发送入口，使用私有 JSON、来源 Issue/comment 校验和 at-most-once delivery ledger。现有最终回复 Skill 默认仍用原 Slack 发送流程；采用 adapter 时只保留一个发送入口，避免两种方式同时发。配置及升级步骤见 [搭建手册](SETUP-GUIDE.zh-CN.md)。
 
 Cloudflare 使用 `pnpm dev:cf`、`pnpm build:cf` 和 `pnpm deploy:cf`，共享同一 consumer 与 QStash/Redis；构建推荐 Node.js 24。
