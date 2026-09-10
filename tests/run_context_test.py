@@ -153,6 +153,88 @@ class FinalReplyTests(unittest.TestCase):
             self.assertTrue(saved["issue_url"].endswith("/" + issue_id))
             self.assertIn("duration_seconds", saved["statistics"])
 
+    def test_missing_link_parameters_are_resolved_in_current_scope(self):
+        issue = {"id": "issue", "workspace_id": "ws", "identifier": "GRM-99"}
+        workspace = {"id": "ws", "slug": "grm"}
+        config = "server_url: https://multica.example\napp_url: https://web.example\n"
+        with patch.object(final, "query", side_effect=[issue, workspace, config]) as query:
+            self.assertEqual(final.link_context(self.data), ("GRM-99", "grm", "https://web.example"))
+        self.assertEqual(query.call_count, 3)
+        for call in query.call_args_list:
+            self.assertEqual(call.args[0][:5], ["multica", "--server-url", "https://multica.example", "--workspace-id", "ws"])
+
+    def test_explicit_link_parameters_skip_discovery(self):
+        with patch.object(final, "query") as query:
+            self.assertEqual(final.link_context(self.data, "LAB-5", "lab", "https://web.example"),
+                             ("LAB-5", "lab", "https://web.example"))
+            query.assert_not_called()
+
+    def test_foreign_or_missing_link_context_is_not_used(self):
+        cases = [
+            [{"id": "other", "workspace_id": "ws", "identifier": "GRM-99"},
+             {"id": "other", "slug": "grm"}, "server_url: https://other.example\napp_url: https://web.example\n"],
+            [{"id": "issue", "workspace_id": "other", "identifier": "GRM-99"}, None, ""],
+            [final.RunContextError("读取失败")] * 3,
+        ]
+        for responses in cases:
+            with self.subTest(responses=responses), patch.object(final, "query", side_effect=responses):
+                args = final.link_context(self.data)
+                self.assertFalse(args[0])
+                self.assertFalse(args[1])
+                self.assertFalse(args[2])
+                summary = final.summarize(self.data, *args)
+                self.assertNotIn("issue_url", summary)
+                self.assertEqual(summary["statistics"]["duration_seconds"], 62)
+
+    def test_cli_grm99_missing_slug_and_app_url_regression(self):
+        issue_id = "00000000-0000-4000-8000-000000000001"
+        self.run["issue_id"] = issue_id
+        workspace = {"id": "ws", "slug": "grm"}
+        config = "server_url: https://multica.example\napp_url: https://web.example\n"
+        with tempfile.TemporaryDirectory() as directory:
+            output = str(Path(directory) / "context.json")
+            argv = ["run_context.py", "--issue", issue_id, "--issue-identifier", "GRM-99", "--output", output]
+            with patch("sys.argv", argv), patch.dict(final.os.environ, self.env, clear=True), \
+                    patch.object(final, "query", side_effect=[[self.run], [], workspace, config]) as query, patch("builtins.print"):
+                self.assertEqual(final.main(), 0)
+                self.assertEqual(query.call_count, 4)
+            saved = final.json.loads(Path(output).read_text())
+            self.assertEqual(saved["issue_identifier"], "GRM-99")
+            self.assertEqual(saved["issue_url"], f"https://web.example/grm/issues/{issue_id}")
+            self.assertIn("duration_seconds", saved["statistics"])
+
+    def test_runtime_link_environment_does_not_read_personal_config(self):
+        env = {"FINAL_REPLY_APP_URL": "https://web.example", "FINAL_REPLY_WORKSPACE_SLUG": "grm"}
+        with patch.object(final, "query") as query:
+            self.assertEqual(final.link_context(self.data, "GRM-100", env=env),
+                             ("GRM-100", "grm", "https://web.example"))
+            query.assert_not_called()
+
+    def test_explicit_link_arguments_override_runtime_environment(self):
+        env = {"FINAL_REPLY_APP_URL": "https://other.example", "FINAL_REPLY_WORKSPACE_SLUG": "other"}
+        with patch.object(final, "query") as query:
+            self.assertEqual(final.link_context(self.data, "LAB-5", "lab", "https://web.example", env),
+                             ("LAB-5", "lab", "https://web.example"))
+            query.assert_not_called()
+
+    def test_cli_grm100_isolated_config_uses_runtime_environment(self):
+        issue_id = "00000000-0000-4000-8000-000000000001"
+        self.run["issue_id"] = issue_id
+        issue = {"id": issue_id, "workspace_id": "ws", "identifier": "GRM-100"}
+        with tempfile.TemporaryDirectory() as directory:
+            output = str(Path(directory) / "context.json")
+            env = {**self.env, "MULTICA_TASK_CONFIG_ROOT": directory,
+                   "FINAL_REPLY_APP_URL": "https://web.example", "FINAL_REPLY_WORKSPACE_SLUG": "grm"}
+            argv = ["run_context.py", "--issue", issue_id, "--output", output]
+            with patch("sys.argv", argv), patch.dict(final.os.environ, env, clear=True), \
+                    patch.object(final, "query", side_effect=[[self.run], [], issue]) as query, patch("builtins.print"):
+                self.assertEqual(final.main(), 0)
+                self.assertEqual(query.call_count, 3)
+                self.assertFalse(any("config" in call.args[0] for call in query.call_args_list))
+            saved = final.json.loads(Path(output).read_text())
+            self.assertEqual(saved["issue_identifier"], "GRM-100")
+            self.assertEqual(saved["issue_url"], f"https://web.example/grm/issues/{issue_id}")
+
     def test_skill_names_deduplicate_and_tokens_never_render(self):
         self.run.update(model="gpt-6-astra", usage=[{"input_tokens": 999}])
         for _ in range(2):

@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   findComment,
+  findIssue,
   createIssue,
-  getSlackReplyContext,
   type ApiConfig,
+  getSlackReplyContext,
 } from "../src/multica-api.js";
 const config: ApiConfig = {
   multicaApiBaseUrl: "https://multica.test",
@@ -132,6 +133,18 @@ describe("Agent configuration reply context", () => {
   });
 });
 describe("Multica API contract", () => {
+  it("recovers an Issue through a bounded marker search", async () => {
+    const marker = `<!-- relay-thread:${"a".repeat(64)}:${"b".repeat(64)} -->`;
+    const f = vi.fn<typeof fetch>().mockResolvedValue(Response.json({issues:[{
+      id:"issue", title:"Slack", description:marker+"\n{}", project_id:"project",
+      assignee_id:"agent", assignee_type:"agent",
+    }]}));
+    expect((await findIssue(config,marker,f))?.id).toBe("issue");
+    const url=new URL(String(f.mock.calls[0]![0]));
+    expect(url.pathname).toBe("/api/issues/search");
+    expect(url.searchParams.get("q")).toBe("b".repeat(64));
+    expect(url.searchParams.get("include_closed")).toBe("true");
+  });
   it("uses ordinary Issue creation with unique title and no Autopilot", async () => {
     const f = vi
       .fn<typeof fetch>()

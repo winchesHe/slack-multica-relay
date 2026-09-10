@@ -4,6 +4,7 @@ export interface RelayConfig extends ApiConfig {
   teamId: string;
   targetUserIds: Set<string>;
   targetSubteamIds: Set<string>;
+  cancelKeywords: Set<string>;
   allowedChannelIds: Set<string>;
   allowAllChannels: boolean;
   blockedChannelIds: Set<string>;
@@ -23,7 +24,7 @@ export interface RelayConfig extends ApiConfig {
 export function loadRelayConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): RelayConfig {
-  const allowedChannels = policyIds(env.SLACK_ALLOWED_CHANNEL_IDS || "all");
+  const allowedChannels = policyIds(required(env, "SLACK_ALLOWED_CHANNEL_IDS"));
   const blockedChannelIds = ids(env.SLACK_BLOCKED_CHANNEL_IDS);
   const allowedSenders = policyIds(env.SLACK_ALLOWED_SENDER_IDS || "all");
   const blockedSenderIds = ids(env.SLACK_BLOCKED_SENDER_IDS);
@@ -49,6 +50,7 @@ export function loadRelayConfig(
     blockedSenderIds,
     targetUserIds,
     targetSubteamIds,
+    cancelKeywords: cancelKeywords(env.SLACK_CANCEL_KEYWORDS),
     multicaApiBaseUrl: https(required(env, "MULTICA_API_BASE_URL")),
     multicaApiToken: required(env, "MULTICA_API_TOKEN"),
     multicaWorkspaceId: required(env, "MULTICA_WORKSPACE_ID"),
@@ -57,7 +59,8 @@ export function loadRelayConfig(
     multicaAssigneeId: targetId,
     multicaThreadScopeId: scope,
     multicaLegacyAgentId: legacy,
-    slackReactionToken: required(env, "SLACK_REACTION_TOKEN"),
+    slackReactionToken:
+      env.SLACK_BOT_TOKEN?.trim() || required(env, "SLACK_USER_TOKEN"),
     slackReactionName: required(env, "SLACK_REACTION_NAME").replace(
       /^:+|:+$/gu,
       "",
@@ -103,4 +106,12 @@ function https(value: string): string {
   )
     throw new Error("invalid_service_url");
   return value.replace(/\/+$/u, "");
+}
+
+function cancelKeywords(value: string | undefined): Set<string> {
+  const keywords = (value ?? "")
+    .split(",")
+    .map((x) => x.trim().toLowerCase())
+    .filter(Boolean);
+  return new Set(keywords.length ? keywords : ["cancel", "取消"]);
 }

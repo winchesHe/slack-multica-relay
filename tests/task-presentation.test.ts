@@ -91,7 +91,7 @@ describe("task presentation", () => {
     expect(description).toContain("2026-09-07 11:10:11");
     expect(description).toContain("附件：1 个");
     expect(description).toContain('"id": "F1"');
-    expect(description).not.toMatch(/thumb_64|thumb_tiny|original_w/);
+    expect(description).not.toMatch(/thumb_64|thumb_tiny|original_w|url_private|permalink|files.slack.com/);
     expect(readTaskMessage(description)).toMatchObject({
       teamId: event.teamId,
       channelId: event.channelId,

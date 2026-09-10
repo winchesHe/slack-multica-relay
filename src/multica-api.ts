@@ -147,35 +147,23 @@ export async function findIssue(
   marker: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<MulticaIssue | undefined> {
-  for (let offset = 0; offset < 10000; offset += 100) {
-    const query = new URLSearchParams({
-      project_id: config.multicaProjectId,
-      limit: "100",
-      offset: String(offset),
-      sort: "created_at",
-      direction: "asc",
-    });
-    const response = await api(config, "/api/issues?" + query, {}, fetchImpl);
-    if (!response.ok) throw new ApiError(response.status);
-    const body: unknown = await response.json();
-    if (!object(body) || !Array.isArray(body.issues))
-      throw new Error("invalid_multica_response");
-    const rows = body.issues.map(issue);
-    const matches = rows.filter((x) =>
-      x.description?.startsWith(marker + "\n"),
-    );
-    if (matches.length > 1) throw new Error("ambiguous_issue_mapping");
-    if (matches[0]) {
-      const candidate = matches[0];
-      if (
-        !ownsIssue(config, candidate)
-      )
-        throw new Error("invalid_issue_scope");
-      return candidate;
-    }
-    if (rows.length < 100) return;
-  }
-  throw new Error("issue_lookup_limit");
+  const identity = marker.match(/[a-f0-9]{64}(?= -->$)/u)?.[0];
+  if (!identity) throw new Error("invalid_thread_state");
+  const query = new URLSearchParams({ q: identity, limit: "20", include_closed: "true" });
+  const response = await api(config, "/api/issues/search?" + query, {}, fetchImpl);
+  if (!response.ok) throw new ApiError(response.status);
+  const body: unknown = await response.json();
+  if (!object(body) || !Array.isArray(body.issues))
+    throw new Error("invalid_multica_response");
+  const matches = body.issues.map(issue).filter((x) => x.description?.startsWith(marker + "\n"));
+  if (matches.length > 1) throw new Error("ambiguous_issue_mapping");
+  const candidate = matches[0];
+  if (!candidate) return;
+  if (
+    !ownsIssue(config, candidate)
+  )
+    throw new Error("invalid_issue_scope");
+  return candidate;
 }
 export async function createIssue(
   config: ApiConfig,
@@ -225,6 +213,16 @@ export async function findComment(
   marker: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<MulticaComment | undefined> {
+  for await (const page of issueCommentPages(config, issueId, fetchImpl)) {
+    const match = page.find((comment) => comment.content.includes(marker));
+    if (match) return match;
+  }
+}
+async function* issueCommentPages(
+  config: ApiConfig,
+  issueId: string,
+  fetchImpl: typeof fetch,
+): AsyncGenerator<MulticaComment[]> {
   let before = "",
     beforeId = "";
   for (let page = 0; page < 50; page++) {
@@ -251,10 +249,7 @@ export async function findComment(
       )
     )
       throw new Error("invalid_multica_response");
-    const match = (body as MulticaComment[]).find((x) =>
-      x.content.includes(marker),
-    );
-    if (match) return match;
+    yield body as MulticaComment[];
     const next = response.headers.get("X-Multica-Next-Before");
     const nextId = response.headers.get("X-Multica-Next-Before-Id");
     if (!next && !nextId) return;
@@ -286,4 +281,108 @@ export async function createComment(
   )
     throw new Error("invalid_multica_response");
   return body as unknown as MulticaComment;
+}
+
+export interface IssueRun {
+  id: string;
+  issue_id: string;
+  workspace_id: string;
+  agent_id: string;
+  status: string;
+}
+export function isActiveRun(run: IssueRun): boolean {
+  return [
+    "queued",
+    "dispatched",
+    "running",
+    "waiting_local_directory",
+    "deferred",
+  ].includes(run.status);
+}
+export async function getIssue(
+  config: ApiConfig,
+  issueId: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<MulticaIssue> {
+  const response = await api(
+    config,
+    `/api/issues/${encodeURIComponent(issueId)}`,
+    {},
+    fetchImpl,
+  );
+  if (!response.ok) throw new ApiError(response.status);
+  const result = issue(await response.json());
+  if (
+    result.id !== issueId ||
+    !ownsIssue(config, result)
+  )
+    throw new Error("invalid_issue_scope");
+  return result;
+}
+export async function listIssueRuns(
+  config: ApiConfig,
+  issueId: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<IssueRun[]> {
+  const response = await api(
+    config,
+    `/api/issues/${encodeURIComponent(issueId)}/task-runs`,
+    {},
+    fetchImpl,
+  );
+  if (!response.ok) throw new ApiError(response.status);
+  const body: unknown = await response.json();
+  if (
+    !Array.isArray(body) ||
+    body.some(
+      (run) =>
+        !object(run) ||
+        typeof run.id !== "string" ||
+        run.issue_id !== issueId ||
+        run.workspace_id !== config.multicaWorkspaceId ||
+        typeof run.agent_id !== "string" ||
+        ![
+          "queued",
+          "dispatched",
+          "running",
+          "waiting_local_directory",
+          "deferred",
+          "completed",
+          "failed",
+          "cancelled",
+        ].includes(String(run.status)),
+    )
+  )
+    throw new Error("invalid_multica_response");
+  return body as IssueRun[];
+}
+export async function cancelIssueRun(
+  config: ApiConfig,
+  issueId: string,
+  runId: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  // 使用绑定 issue 的接口，让服务端再次校验运行归属；终态另行 GET 回读。
+  const response = await api(
+    config,
+    `/api/issues/${encodeURIComponent(issueId)}/tasks/${encodeURIComponent(runId)}/cancel`,
+    { method: "POST", body: "{}" },
+    fetchImpl,
+  );
+  if (!response.ok) throw new ApiError(response.status);
+}
+
+export async function listRelayMessageContents(
+  config: ApiConfig,
+  issueId: string,
+  fetchImpl: typeof fetch,
+): Promise<string[]> {
+  const contents: string[] = [];
+  for await (const page of issueCommentPages(config, issueId, fetchImpl)) {
+    for (const comment of page) {
+      if (/^<!-- relay-message:[a-f0-9]{64} -->\n/u.test(comment.content))
+        contents.push(comment.content);
+    }
+  }
+  return contents;
 }

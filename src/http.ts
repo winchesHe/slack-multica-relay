@@ -1,12 +1,14 @@
+import { Buffer } from 'node:buffer';
 import { Receiver } from "@upstash/qstash";
 import { loadRelayConfig, type RelayConfig } from "./config.js";
 import { verifySlackSignature } from "./signature.js";
 import {
   findTargetMention,
+  isCancelCommand,
+  canCancelTask,
   isSupportedMessage,
   type SlackMessageEvent,
 } from "./mentions.js";
-import { addSlackReaction, reactionErrorDetails } from "./reaction.js";
 import {
   routeSlackThreadEvent,
   digest,
@@ -15,6 +17,7 @@ import {
   type SlackThreadEvent,
 } from "./thread-router.js";
 import { UpstashThreadStore } from "./thread-store.js";
+import { compactEvent } from "./task-presentation.js";
 
 export function json(value: unknown, status = 200): Response {
   return Response.json(value, { status });
@@ -43,9 +46,11 @@ function record(value: unknown): value is Record<string, unknown> {
 function admitted(event: SlackThreadEvent, config: RelayConfig): boolean {
   return (
     event.teamId === config.teamId &&
-    (config.allowAllChannels || config.allowedChannelIds.has(event.channelId)) &&
+    (config.allowAllChannels ||
+      config.allowedChannelIds.has(event.channelId)) &&
     !config.blockedChannelIds.has(event.channelId) &&
-    (config.allowAllSenders || config.allowedSenderIds.has(event.senderUserId)) &&
+    (config.allowAllSenders ||
+      config.allowedSenderIds.has(event.senderUserId)) &&
     !config.blockedSenderIds.has(event.senderUserId) &&
     !!findTargetMention(
       event.text,
@@ -64,9 +69,12 @@ function parsedEvent(value: unknown): SlackThreadEvent {
     ) ||
     ["messageTs", "threadTs"].some(
       (k) =>
-        typeof value[k] !== "string" || !/^\d+\.\d+$/u.test(value[k] as string),
+        typeof value[k] !== "string" || !/^\d+\.\d{1,6}$/u.test(value[k] as string),
     ) ||
     typeof value.text !== "string" ||
+    (value.operation !== undefined &&
+      value.operation !== "dispatch" &&
+      value.operation !== "cancel") ||
     !record(value.mention) ||
     !["user", "subteam"].includes(String(value.mention.type)) ||
     typeof value.mention.id !== "string"
@@ -89,15 +97,34 @@ function reason(error: unknown): string {
     "invalid_thread_state",
     "ambiguous_issue_mapping",
     "invalid_issue_scope",
-    "issue_lookup_limit",
+    "relay_payload_too_large",
+    "task_presentation_too_large",
     "comment_lookup_limit",
     "multica_http_error",
     "invalid_multica_response",
     "invalid_comment_cursor",
+    "cancellation_pending",
+    "cancellation_run_missing",
+    "cancellation_new_run",
+    "reaction_cleanup_failed",
   ];
   return error instanceof Error && codes.includes(error.message)
     ? error.message
     : "upstream_failed";
+}
+const permanentConsumerErrors = new Set([
+  "invalid_event",
+  "invalid_thread_state",
+  "ambiguous_issue_mapping",
+  "invalid_issue_scope",
+  "relay_payload_too_large",
+  "task_presentation_too_large",
+  "comment_lookup_limit",
+]);
+export function consumerFailure(code: string): Response {
+  if (permanentConsumerErrors.has(code))
+    return json({ action: "rejected", error: code, retryable: false });
+  return json({ error: code, retryable: true }, 503);
 }
 export async function acceptSlack(
   request: Request,
@@ -173,8 +200,22 @@ export async function acceptSlack(
   } catch {
     return json({ error: "invalid_event" }, 400);
   }
+  payload = compactEvent(payload);
   if (!admitted(payload, config))
     return json({ action: "ignored", reason: "not_allowed" });
+  payload.operation = isCancelCommand(
+    payload.text,
+    config.targetUserIds,
+    config.targetSubteamIds,
+    config.cancelKeywords,
+  )
+    ? "cancel"
+    : "dispatch";
+  if (
+    payload.operation === "cancel" &&
+    !canCancelTask(payload.senderUserId, config.targetUserIds)
+  )
+    return json({ action: "ignored", reason: "cancel_not_allowed" });
   try {
     const response = await fetchImpl(
       config.queueUrl + "/v2/publish/" + config.consumerUrl,
@@ -202,14 +243,14 @@ export async function acceptSlack(
     if (!record(queued) || typeof queued.messageId !== "string")
       throw new Error("invalid_queue_response");
     console.info("relay_admission", {
-      messageKey: messageKey(payload),
+      eventId: digest(messageKey(payload)),
       queueMessageId: queued.messageId,
       durationMs: Date.now() - start,
     });
     return json({ action: "accepted", queueMessageId: queued.messageId });
   } catch (error) {
     console.warn("relay_admission", {
-      messageKey: messageKey(payload),
+      eventId: digest(messageKey(payload)),
       reason: reason(error),
       durationMs: Date.now() - start,
     });
@@ -253,17 +294,33 @@ export async function consumeQueue(
   try {
     event = parsedEvent(JSON.parse(raw));
   } catch {
-    return json({ error: "invalid_event" }, 400);
+    return consumerFailure("invalid_event");
   }
   if (!admitted(event, config))
     return json({ action: "ignored", reason: "policy_changed" });
+  // 新消息保留入队时的指令分类，配置变更不能把排队中的取消变成启动任务。
+  event.operation ??= isCancelCommand(
+    event.text,
+    config.targetUserIds,
+    config.targetSubteamIds,
+    config.cancelKeywords,
+  )
+    ? "cancel"
+    : "dispatch";
+  if (
+    event.operation === "cancel" &&
+    !canCancelTask(event.senderUserId, config.targetUserIds)
+  )
+    return json({ action: "ignored", reason: "cancel_not_allowed" });
   const start = Date.now(),
     deadline = AbortSignal.timeout(45000);
-  const boundedFetch: typeof fetch = (input, init = {}) =>
-    fetchImpl(input, {
+  const boundedFetch: typeof fetch = (input, init = {}) => {
+    deadline.throwIfAborted();
+    return fetchImpl(input, {
       ...init,
       signal: init.signal ? AbortSignal.any([init.signal, deadline]) : deadline,
     });
+  };
   try {
     const result = await routeSlackThreadEvent(
       event,
@@ -277,36 +334,20 @@ export async function consumeQueue(
       },
       boundedFetch,
     );
-    try {
-      await addSlackReaction(
-        config.slackReactionToken,
-        event.channelId,
-        event.messageTs,
-        config.slackReactionName,
-        boundedFetch,
-      );
-    } catch (error) {
-      console.warn("relay_reaction", {
-        messageKey: messageKey(event),
-        reason: "reaction_failed",
-        ...reactionErrorDetails(error),
-      });
-    }
     console.info("relay_dispatch", {
       ...result,
-      messageKey: messageKey(event),
+      eventId: digest(messageKey(event)),
       durationMs: Date.now() - start,
     });
     return json(result);
   } catch (error) {
     const code = reason(error);
     console.warn("relay_dispatch", {
-      messageKey: messageKey(event),
+      eventId: digest(messageKey(event)),
       reason: code,
       durationMs: Date.now() - start,
     });
-    // Non-2xx leaves retry and exhausted-message retention to QStash. Even
-    // ambiguous writes remain visible for reconciliation, never acknowledged away.
-    return json({ error: code, retryable: true }, 503);
+    // Acknowledged rejection stops retries for input that cannot fit unchanged.
+    return consumerFailure(code);
   }
 }

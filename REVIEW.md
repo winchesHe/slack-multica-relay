@@ -10,13 +10,13 @@
 
 ## 恢复
 
-Issue查询扫描专用Project，读取description marker；评论查询按服务端的(time,id)游标翻页。写入前记录intent，响应不明时查回读。无法确认时保留错误进入队列重试/失败保留，不盲目再写。
+Issue查询按稳定线程 marker 的摘要搜索，并核对完整description marker、Project与Agent；评论查询按服务端的(time,id)游标翻页。单条事件正文和配置快照先冻结24小时；写入前记录intent，响应不明时查回读。无法确认时保留错误进入队列重试/失败保留，不盲目再写。
 
 不保证跨任意故障的exactly-once：Multica评论没有服务端幂等键，租约/网络/人工编辑仍有边界。线程并发由QStash flow control与Redis锁共同约束。来源字段被修改、状态过期或检索超出上限时应人工核对。
 
 ## 接收与执行
 
-QStash持久化接收后才能ACK Slack；后台消费失败由队列重试，耗尽可在DLQ检查和重放。QStash、Redis和托管函数是需要分别配置与验收的外部组件。
+QStash持久化接收后才能ACK Slack；后台暂时性或结果不明失败由队列重试，耗尽可在DLQ检查和重放。确定性无效输入、scope错误和体积超限返回rejected/不可重试。QStash、Redis和托管函数是需要分别配置与验收的外部组件。
 
 Relay 的频道和发送者准入同时支持白名单与黑名单。白名单可使用 `all`，黑名单优先；入站和队列消费使用同一套策略。目标用户/User Group 配置仍用于判断是否触发任务。
 
@@ -26,7 +26,7 @@ Relay 的频道和发送者准入同时支持白名单与黑名单。白名单�
 
 daemon将Agent instructions写入工作目录AGENTS.md。Skills由本地配置及Workspace指派合入任务环境；不是复制桌面聊天。
 
-[Codex审批处理](https://github.com/multica-ai/multica/blob/v0.4.36/server/pkg/agent/codex.go#L2558)会自动接受命令/文件请求。当前Prompt明确只读默认和逐项授权，但不声称具备强制工具审批。Project不要未经核对就绑定整个个人代码目录为local_directory。
+[Codex审批处理](https://github.com/multica-ai/multica/blob/v0.4.36/server/pkg/agent/codex.go#L2558)会自动接受命令/文件请求。当前Prompt决定业务操作与写回边界，但不构成强制工具审批。Project不要未经核对就绑定整个个人代码目录为local_directory。
 
 ## 本地验证与剩余验收
 
@@ -35,3 +35,7 @@ daemon将Agent instructions写入工作目录AGENTS.md。Skills由本地配置�
 还需要托管平台真实冷/热延迟、QStash签名/重试/DLQ、Redis网络故障、Mac离线恢复和真实Slack事件订阅验收。未完成这些步骤不能宣布公网接管已可用。
 
 官方平台合同：[Vercel Functions](https://vercel.com/docs/functions)、[EdgeOne Node Functions](https://pages.edgeone.ai/document/node-functions)、[QStash](https://upstash.com/docs/qstash/overall/getstarted)。
+
+## 可选最终发送
+
+`scripts/slack-reply.py` 通过来源回读、固定 marker 和本地 ledger 处理发送结果不明与并发重试。仅采用该入口的回复受到它约束；原最终回复 Skill 默认仍使用 Slack Skill。配置与状态处理见 [搭建手册](SETUP-GUIDE.zh-CN.md)。

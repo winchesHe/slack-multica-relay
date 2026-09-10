@@ -40,7 +40,7 @@ function fixture() {
         ...agentConfig,
       });
     }
-    if (url.includes("/api/issues?")) return Response.json({ issues });
+    if (url.includes("/api/issues/search?")) return Response.json({ issues });
     if (url.endsWith("/api/issues")) {
       issuePosts++;
       const data = JSON.parse(String(init?.body));
@@ -110,6 +110,26 @@ describe("direct Issue routing", () => {
   function payload(description: string) {
     return JSON.parse(description.match(/```json\n([\s\S]*?)\n```/)![1]!);
   }
+
+  it.each([false, true])("reuses the event snapshot after a definite write rejection (followup=%s)", async (followup) => {
+    const f = fixture();
+    if (followup) await routeSlackThreadEvent(root, f.config, f.fetcher);
+    const event = followup ? { ...root, messageTs: "102.000001", text: "<@U1> next" } : root;
+    let reject = true;
+    const fetcher: typeof fetch = async (input, init) => {
+      if (reject && init?.method === "POST" && String(input).endsWith(followup ? "/comments" : "/api/issues")) {
+        reject = false;
+        return Response.json({}, { status: 429 });
+      }
+      return f.fetcher(input, init);
+    };
+    await expect(routeSlackThreadEvent(event, f.config, fetcher)).rejects.toThrow();
+    f.agentConfig.model = "new-configuration";
+    await routeSlackThreadEvent({ ...event, text: "changed retry input" }, f.config, fetcher);
+    const saved = payload(followup ? f.comments[0]!.content : f.issues[0]!.description);
+    expect(saved.eventPayload.text).toBe(event.text);
+    expect(saved.replyContext.model).toBe("gpt-6-astra");
+  });
 
   it("attaches a fresh configuration snapshot to each new message, not each duplicate", async () => {
     const f = fixture();
@@ -296,8 +316,8 @@ describe("direct Issue routing", () => {
     await routeSlackThreadEvent(root, f.config, fetcher);
     expect(f.issuePosts).toBe(1);
     expect(f.commentPosts).toBe(1);
-    expect(f.issues[0]!.description).toContain("<@U1> B");
-    expect(f.comments[0]!.content).toContain("<@U1> test");
+    expect(payload(f.issues[0]!.description).eventPayload.text).toBe("<@U1> B");
+    expect(payload(f.comments[0]!.content).eventPayload.text).toBe("<@U1> test");
   });
   it("does not adopt a different configured Agent scope", async () => {
     const f = fixture();
@@ -363,5 +383,23 @@ describe("Team migration", () => {
     expect(f.issues[0]).toMatchObject({ assignee_type: "squad", assignee_id: "team" });
     await routeSlackThreadEvent(root, { ...config, multicaAssigneeId: "another" }, f.fetcher);
     expect(f.issuePosts).toBe(2);
+  });
+});
+
+
+describe("投递成功后的 reaction 诊断", () => {
+  it("表情失败不影响建卡，并只记录允许的诊断字段", async () => {
+    const f = fixture();
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    f.config.slackReactionToken = "test-token";
+    f.config.slackReactionName = "eyes";
+    const fetcher: typeof fetch = (input, init) => String(input).endsWith("/reactions.add")
+      ? Promise.resolve(Response.json({ ok: false, error: "missing_scope", detail: "private-response" }))
+      : f.fetcher(input, init);
+    expect((await routeSlackThreadEvent(root, f.config, fetcher)).action).toBe("created");
+    expect(warning).toHaveBeenCalledWith("relay_reaction", {
+      eventId: expect.any(String), reason: "reaction_failed", errorCode: "missing_scope", httpStatus: 200,
+    });
+    expect(JSON.stringify(warning.mock.calls)).not.toContain("private-response");
   });
 });

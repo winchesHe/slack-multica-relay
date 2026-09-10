@@ -46,3 +46,22 @@ export interface SlackMessageEvent {
   app_id?: unknown;
   files?: unknown;
 }
+
+export function isCancelCommand(
+  text: string,
+  targetUserIds: ReadonlySet<string>,
+  targetSubteamIds: ReadonlySet<string>,
+  cancelKeywords: ReadonlySet<string>,
+): boolean {
+  if (!findTargetMention(text, targetUserIds, targetSubteamIds)) return false;
+  const command = text
+    .replace(USER_MENTION, (mention, id: string) => targetUserIds.has(id) ? '' : mention)
+    .replace(SUBTEAM_MENTION, (mention, id: string) => targetSubteamIds.has(id) ? '' : mention)
+    .trim()
+    .toLowerCase();
+  return cancelKeywords.has(command);
+}
+
+export function canCancelTask(senderUserId: string | undefined, targetUserIds: ReadonlySet<string>): boolean {
+  return senderUserId !== undefined && targetUserIds.has(senderUserId);
+}
