@@ -4,6 +4,7 @@ import argparse
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -12,6 +13,7 @@ import tempfile
 import time
 import urllib.request
 import urllib.parse
+from urllib.error import HTTPError
 from pathlib import Path
 
 
@@ -199,6 +201,19 @@ def delivery_identity(config, issue_id, comment_id):
     return hashlib.sha256('\0'.join(fields).encode()).hexdigest()
 
 
+class SlackRateLimited(ValueError):
+    def __init__(self, retry_after):
+        super().__init__('slack_rate_limited')
+        self.retry_after = retry_after
+
+
+def retry_after_seconds(headers):
+    value = (headers or {}).get('Retry-After', '').strip()
+    # Slack specifies seconds; a missing/malformed header gets a conservative
+    # cooldown instead of an immediate retry loop.
+    return int(value) if re.fullmatch(r'[0-9]+', value) else 60
+
+
 def slack_call(token, method, payload=None, query=None, opener=urllib.request.urlopen, timeout=20):
     url = 'https://slack.com/api/' + method
     if query:
@@ -206,10 +221,43 @@ def slack_call(token, method, payload=None, query=None, opener=urllib.request.ur
     request = urllib.request.Request(url, data=None if payload is None else json.dumps(payload).encode(),
         headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json; charset=utf-8'},
         method='GET' if payload is None else 'POST')
-    with opener(request, timeout=timeout) as response:
-        data = json.load(response)
-    if data.get('ok') is not True:
-        raise ValueError('slack_lookup_failed' if payload is None else 'slack_send_rejected')
+    try:
+        with opener(request, timeout=timeout) as response:
+            headers = getattr(response, 'headers', {})
+            data = json.load(response)
+    except HTTPError as error:
+        try:
+            if error.code == 429:
+                raise SlackRateLimited(retry_after_seconds(error.headers)) from None
+            raise ValueError('slack_lookup_failed' if payload is None else 'slack_delivery_unknown') from None
+        finally:
+            error.close()
+    if not isinstance(data, dict) or data.get('ok') is not True:
+        code = data.get('error') if isinstance(data, dict) else None
+        if isinstance(data, dict) and data.get('ok') is False and code in ('rate_limited', 'ratelimited'):
+            raise SlackRateLimited(retry_after_seconds(headers))
+        if payload is None:
+            raise ValueError('slack_lookup_failed')
+        # Only documented admission/validation failures prove the message was
+        # not sent. Server failures and unknown responses retain the intent.
+        rejected = {
+            'access_denied', 'accesslimited', 'account_inactive', 'app_access_restricted',
+            'as_user_not_supported', 'attachment_payload_limit_exceeded', 'cannot_reply_to_message',
+            'channel_not_found', 'ekm_access_denied', 'enterprise_is_restricted',
+            'invalid_arg_name', 'invalid_arguments', 'invalid_array_arg', 'invalid_auth',
+            'invalid_blocks', 'invalid_blocks_format', 'invalid_charset', 'invalid_form_data',
+            'invalid_metadata_format', 'invalid_metadata_schema', 'invalid_post_type',
+            'is_archived', 'markdown_text_conflict', 'metadata_must_be_sent_from_app',
+            'metadata_too_large', 'missing_post_type', 'missing_scope', 'msg_blocks_too_long',
+            'no_permission', 'no_text', 'not_allowed_token_type', 'not_authed', 'not_in_channel',
+            'restricted_action', 'restricted_action_non_threadable_channel',
+            'restricted_action_read_only_channel', 'restricted_action_thread_locked',
+            'restricted_action_thread_only_channel', 'send_on_behalf_not_allowed',
+            'team_access_not_granted', 'token_expired', 'token_revoked', 'too_many_attachments',
+        }
+        if isinstance(data, dict) and data.get('ok') is False and isinstance(code, str) and code in rejected:
+            raise ValueError('slack_send_rejected')
+        raise ValueError('slack_delivery_unknown')
     return data
 
 
@@ -270,13 +318,15 @@ def read_delivery_state(state_path):
         return None
     state = json.loads(state_path.read_text())
     if (not isinstance(state, dict) or state.get('version') != 1
-            or state.get('phase') not in ('attempting', 'accepted', 'sent')):
+            or state.get('phase') not in ('attempting', 'accepted', 'sent', 'rate_limited')):
         raise ValueError('invalid_delivery_state')
     if state['phase'] == 'attempting' and not re.fullmatch(r'\d+\.\d{6}', state.get('attemptedAt', '')):
         raise ValueError('invalid_delivery_state')
     if state['phase'] == 'attempting' and not re.fullmatch(r'\d+\.\d{6}', state.get('lookupFromTs', '')):
         raise ValueError('invalid_delivery_state')
     if state['phase'] in ('accepted', 'sent') and not re.fullmatch(r'\d+\.\d{1,6}', state.get('messageTs', '')):
+        raise ValueError('invalid_delivery_state')
+    if state['phase'] == 'rate_limited' and not re.fullmatch(r'\d+\.\d{6}', state.get('retryAt', '')):
         raise ValueError('invalid_delivery_state')
     return state
 
@@ -333,6 +383,10 @@ def main(argv=None, opener=urllib.request.urlopen, runner=subprocess.run):
     state_path, lock_path = delivery_paths(config_path, identity)
     with delivery_lock(lock_path):
         state = read_delivery_state(state_path)
+        if state and state['phase'] == 'rate_limited':
+            remaining = math.ceil(float(state['retryAt']) - time.time())
+            if remaining > 0:
+                raise SlackRateLimited(remaining)
         if state and state['phase'] == 'sent':
             print(json.dumps({'ok': True, 'duplicate': True, 'channel': payload['channel'], 'message_ts': state['messageTs'],
                               'thread_ts': payload['thread_ts'], 'footer': payload['blocks'][-1]['elements'][0]['text']}, ensure_ascii=False))
@@ -360,6 +414,10 @@ def main(argv=None, opener=urllib.request.urlopen, runner=subprocess.run):
                                           'lookupFromTs': lookup_from})
         try:
             data = slack_call(token, 'chat.postMessage', payload=payload, opener=opener)
+        except SlackRateLimited as error:
+            write_delivery_state(state_path, {'version': 1, 'phase': 'rate_limited',
+                                              'retryAt': slack_timestamp(time.time() + error.retry_after)})
+            raise
         except ValueError as error:
             if str(error) == 'slack_send_rejected':
                 state_path.unlink(missing_ok=True)
@@ -379,6 +437,10 @@ def main(argv=None, opener=urllib.request.urlopen, runner=subprocess.run):
 if __name__ == '__main__':
     try:
         main()
+    except SlackRateLimited as error:
+        print(json.dumps({'ok': False, 'error': 'slack_rate_limited', 'retryable': True,
+                          'retry_after_seconds': error.retry_after}), file=sys.stderr)
+        sys.exit(1)
     except (ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError) as error:
         # Never echo HTTP bodies, command output, authorization headers or private source content.
         message = str(error) if type(error) is ValueError and re.fullmatch(r'[a-z_]+', str(error)) else 'reply_failed_verify_before_retry'

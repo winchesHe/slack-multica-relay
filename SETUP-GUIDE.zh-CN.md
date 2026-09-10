@@ -133,4 +133,8 @@ GitHub context 使用 `version: 1`、`pullRequests` 数组及可选 `branches` �
 
 adapter 在私有 JSON 旁的 `.slack-reply-state/` 保存 owner-only ledger，每个来源 Issue/comment 对应固定 delivery marker。POST 前持久化 `attempting`；收到 message timestamp 后记为 `accepted`，原 thread 回读成功才进入 `sent`。`sent` 重跑复用已确认结果；结果不明时查找原 marker，未找到则返回 `slack_delivery_unknown`，不自动再发。需独立核对原 thread 才能清理未知状态；同源并发返回 `reply_delivery_busy`。
 
+发送错误按 [Slack 错误契约](https://docs.slack.dev/reference/methods/chat.postMessage/#errors) 分类：只有已知明确的鉴权、权限、参数或目标拒绝才清理发送 intent。`internal_error`、`fatal_error`、其他服务端/未知错误、非 429 HTTP 错误和损坏响应保留 `attempting`，下一次先回读，不能盲目再次 POST。
+
+HTTP 429 或 JSON `rate_limited`/`ratelimited` 表示该次发送被限流，ledger 记为 `rate_limited` 并保存 `Retry-After` 对应的 `retryAt`。CLI 返回 `slack_rate_limited`、`retryable: true` 和 `retry_after_seconds`；调用方等待后重新执行同一发送命令，等待期内 adapter 不调用 Slack，到期后可再次发送，无需手动清 ledger。缺失或无效的 Retry-After 采用 60 秒冷却；CLI 不自行睡眠或循环。回读时遇到限流仅要求延后回读，原 `accepted`/`attempting` 状态保持不变。
+
 复制脚本、修改文档或合入 PR 都不会自动启用 adapter。采用后需同步最终回复指令并回读绑定，再以新任务验证一次发送和后续重试。adapter 成功不代表业务任务已经完成。

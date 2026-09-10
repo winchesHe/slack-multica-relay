@@ -5,6 +5,8 @@ import os
 import subprocess
 import tempfile
 import unittest
+from urllib.error import HTTPError
+from email.message import Message
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
@@ -248,6 +250,124 @@ class ReplyTests(unittest.TestCase):
             self.assertEqual(reply.read_delivery_state(state_path), state)
         self.assertEqual(len(calls), 1)
         self.assertIsNone(calls[0][1])
+
+    def test_ambiguous_send_results_keep_intent_and_recover_without_another_post(self):
+        cases = ['internal_error', 'fatal_error', 'service_unavailable', 'unrecognized_error', 'malformed', 'http_503']
+        config = {**CONFIG, 'workspaceId': 'W1', 'projectId': 'P1', 'serverUrl': 'https://multica.test'}
+        envelope = {'eventPayload': {**EVENT, 'messageTs': '101.000001'}}
+        for failure in cases:
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                config_path, body_path = Path(directory) / 'config.json', Path(directory) / 'body.txt'
+                config_path.write_text(json.dumps(config)); body_path.write_text('answer')
+                calls, posted = [], []
+                def opener(request, timeout=0):
+                    calls.append(request.get_method())
+                    if request.data is not None:
+                        posted.append(json.loads(request.data))
+                        if failure == 'http_503':
+                            raise HTTPError(request.full_url, 503, 'unavailable', {}, io.BytesIO(b'private response'))
+                        if failure == 'malformed':
+                            return io.BytesIO(b'not json')
+                        return io.BytesIO(json.dumps({'ok': False, 'error': failure}).encode())
+                    return io.BytesIO(json.dumps({'ok': True, 'messages': [
+                        {'ts': '102.000001', 'blocks': posted[0]['blocks']}]}).encode())
+                args = ['--config', str(config_path), '--issue-id', 'I1', '--text-file', str(body_path)]
+                with patch.object(reply, 'read_source', return_value=envelope), \
+                        patch.dict(os.environ, {'SLACK_USER_TOKEN': 'xoxp-test'}), redirect_stdout(io.StringIO()):
+                    with self.assertRaises((ValueError, OSError)):
+                        reply.main(args, opener=opener)
+                    state_path, _ = reply.delivery_paths(config_path, reply.delivery_identity(config, 'I1', None))
+                    self.assertEqual(reply.read_delivery_state(state_path)['phase'], 'attempting')
+                    reply.main(args, opener=opener)
+                    self.assertEqual(reply.read_delivery_state(state_path)['phase'], 'sent')
+                self.assertEqual(calls, ['POST', 'GET'])
+
+    def test_rate_limits_persist_retry_after_then_allow_a_single_send(self):
+        config = {**CONFIG, 'workspaceId': 'W1', 'projectId': 'P1', 'serverUrl': 'https://multica.test'}
+        envelope = {'eventPayload': {**EVENT, 'messageTs': '101.000001'}}
+        for error_code in ('http_429', 'rate_limited', 'ratelimited'):
+            with self.subTest(error_code=error_code), tempfile.TemporaryDirectory() as directory:
+                config_path, body_path = Path(directory) / 'config.json', Path(directory) / 'body.txt'
+                config_path.write_text(json.dumps(config)); body_path.write_text('answer')
+                calls, posted = [], []
+                def opener(request, timeout=0):
+                    calls.append(request.get_method())
+                    if len(calls) == 1:
+                        headers = Message(); headers['Retry-After'] = '30'
+                        if error_code == 'http_429':
+                            raise HTTPError(request.full_url, 429, 'Too Many Requests', headers, io.BytesIO(b'ratelimited'))
+                        response = io.BytesIO(json.dumps({'ok': False, 'error': error_code}).encode())
+                        response.headers = headers
+                        return response
+                    if request.data is not None:
+                        posted.append(json.loads(request.data))
+                        return io.BytesIO(json.dumps({'ok': True, 'channel': 'C1', 'ts': '131.000001'}).encode())
+                    return io.BytesIO(json.dumps({'ok': True, 'messages': [
+                        {'ts': '131.000001', 'blocks': posted[0]['blocks']}]}).encode())
+                args = ['--config', str(config_path), '--issue-id', 'I1', '--text-file', str(body_path)]
+                with patch.object(reply, 'read_source', return_value=envelope), \
+                        patch.dict(os.environ, {'SLACK_USER_TOKEN': 'xoxp-test'}), \
+                        patch.object(reply.time, 'time', return_value=1000.0) as now, redirect_stdout(io.StringIO()):
+                    with self.assertRaises((ValueError, OSError)):
+                        reply.main(args, opener=opener)
+                    state_path, _ = reply.delivery_paths(config_path, reply.delivery_identity(config, 'I1', None))
+                    self.assertEqual(reply.read_delivery_state(state_path)['phase'], 'rate_limited')
+                    now.return_value = 1010.0
+                    with self.assertRaisesRegex(ValueError, 'slack_rate_limited'):
+                        reply.main(args, opener=opener)
+                    self.assertEqual(calls, ['POST'])
+                    now.return_value = 1030.0
+                    reply.main(args, opener=opener)
+                    self.assertEqual(reply.read_delivery_state(state_path)['phase'], 'sent')
+                self.assertEqual(calls, ['POST', 'POST', 'GET'])
+                self.assertEqual(len(posted), 1)
+
+
+    def test_definite_json_rejection_allows_a_later_corrected_send(self):
+        config = {**CONFIG, 'workspaceId': 'W1', 'projectId': 'P1', 'serverUrl': 'https://multica.test'}
+        envelope = {'eventPayload': {**EVENT, 'messageTs': '101.000001'}}
+        with tempfile.TemporaryDirectory() as directory:
+            config_path, body_path = Path(directory) / 'config.json', Path(directory) / 'body.txt'
+            config_path.write_text(json.dumps(config)); body_path.write_text('answer')
+            calls, posted = [], []
+            def opener(request, timeout=0):
+                calls.append(request.get_method())
+                if len(calls) == 1:
+                    return io.BytesIO(b'{"ok":false,"error":"invalid_blocks"}')
+                if request.data is not None:
+                    posted.append(json.loads(request.data))
+                    return io.BytesIO(b'{"ok":true,"channel":"C1","ts":"102.000001"}')
+                return io.BytesIO(json.dumps({'ok': True, 'messages': [
+                    {'ts': '102.000001', 'blocks': posted[0]['blocks']}]}).encode())
+            args = ['--config', str(config_path), '--issue-id', 'I1', '--text-file', str(body_path)]
+            with patch.object(reply, 'read_source', return_value=envelope), \
+                    patch.dict(os.environ, {'SLACK_USER_TOKEN': 'xoxp-test'}), redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(ValueError, 'slack_send_rejected'):
+                    reply.main(args, opener=opener)
+                body_path.write_text('corrected body')
+                reply.main(args, opener=opener)
+            self.assertEqual(calls, ['POST', 'POST', 'GET'])
+            self.assertEqual(len(posted), 1)
+
+    def test_rate_limited_readback_keeps_the_accepted_send(self):
+        config = {**CONFIG, 'workspaceId': 'W1', 'projectId': 'P1', 'serverUrl': 'https://multica.test'}
+        envelope = {'eventPayload': {**EVENT, 'messageTs': '101.000001'}}
+        with tempfile.TemporaryDirectory() as directory:
+            config_path, body_path = Path(directory) / 'config.json', Path(directory) / 'body.txt'
+            config_path.write_text(json.dumps(config)); body_path.write_text('answer')
+            identity = reply.delivery_identity(config, 'I1', None)
+            state_path, _ = reply.delivery_paths(config_path, identity)
+            state = {'version': 1, 'phase': 'accepted', 'messageTs': '102.000001'}
+            reply.write_delivery_state(state_path, state)
+            def opener(request, timeout=0):
+                self.assertIsNone(request.data)
+                headers = Message(); headers['Retry-After'] = '30'
+                raise HTTPError(request.full_url, 429, 'Too Many Requests', headers, io.BytesIO())
+            args = ['--config', str(config_path), '--issue-id', 'I1', '--text-file', str(body_path)]
+            with patch.object(reply, 'read_source', return_value=envelope), patch.dict(os.environ, {'SLACK_USER_TOKEN': 'xoxp-test'}):
+                with self.assertRaisesRegex(ValueError, 'slack_rate_limited'):
+                    reply.main(args, opener=opener)
+            self.assertEqual(reply.read_delivery_state(state_path), state)
 
     def test_delivery_state_syncs_file_and_parent_directory(self):
         real_fsync = os.fsync

@@ -194,7 +194,7 @@ class FinalReplyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             output = str(Path(directory) / "context.json")
             argv = ["run_context.py", "--issue", issue_id, "--issue-identifier", "GRM-99", "--output", output]
-            with patch("sys.argv", argv), patch.dict(final.os.environ, self.env), \
+            with patch("sys.argv", argv), patch.dict(final.os.environ, self.env, clear=True), \
                     patch.object(final, "query", side_effect=[[self.run], [], workspace, config]) as query, patch("builtins.print"):
                 self.assertEqual(final.main(), 0)
                 self.assertEqual(query.call_count, 4)
