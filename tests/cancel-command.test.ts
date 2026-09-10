@@ -6,7 +6,6 @@ const baseEnv = {
   SLACK_SIGNING_SECRET: "test-secret",
   SLACK_TEAM_ID: "T1",
   SLACK_ALLOWED_CHANNEL_IDS: "C1",
-  SLACK_CONTEXT_TOKEN: "context-token",
   MULTICA_API_BASE_URL: "https://multica.test",
   MULTICA_API_TOKEN: "test",
   MULTICA_WORKSPACE_ID: "ws",

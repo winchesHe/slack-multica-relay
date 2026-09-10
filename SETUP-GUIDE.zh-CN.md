@@ -94,8 +94,8 @@ EdgeOne Cloud Functions 会把 `Request.body` 暴露为解析值，入口通过 
 
 旧部署的 `SLACK_REACTION_READ_TOKEN`、`SLACK_REACTION_TOKEN` 不再被新版本读取。上线前配置 `SLACK_BOT_TOKEN`；若使用 user 身份，将原 owner token 配置为 `SLACK_USER_TOKEN` 并留空 bot token。新版本部署成功后再删除旧变量，以便旧部署在切换期间仍能运行。
 
-## 有界上下文升级
+## 可靠交付配置
 
-普通任务新增 `SLACK_CONTEXT_TOKEN`，需要目标会话 history scopes；`users:read` 仅用于可选的参与者姓名。该 token 与 reaction 身份独立。先配置新变量再切换版本，保持原 `SLACK_ALLOWED_CHANNEL_IDS` 的显式取值。新请求生成带上下文树的 envelope，同事件重试复用快照；旧 marker/裸 JSON 仍可恢复原任务映射。任务消息和上下文会保存在 QStash、Redis（24h 快照）与 Multica，按目标频道范围配置访问。
+`SLACK_ALLOWED_CHANNEL_IDS` 必须显式配置 ID 或 `all`。事件正文、附件安全元数据与模型配置快照冻结 24 小时；相同事件重试复用原快照，旧 marker/裸 JSON 仍可恢复任务映射。Relay 不抓取频道历史，上下文由 Agent 按现有 Prompt 和 Skills 读取。
 
-详细配置、Cloudflare 部署和可选确定性发送见 [配置说明](docs/CONFIGURATION.md)。原最终回复 Skill 及个人配置继续有效，采用 adapter 时应替换最终发送步骤，避免双重发送。
+Cloudflare 部署、消息体积限制、重试分类与可选确定性发送入口见 [配置说明](docs/CONFIGURATION.md)。采用 adapter 时只替换最终发送步骤，不同时调用两种发送入口。

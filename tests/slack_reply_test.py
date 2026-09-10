@@ -119,7 +119,7 @@ class ReplyTests(unittest.TestCase):
         self.assertTrue(all(len(block['text']['text']) <= 3000 for block in result['blocks'][:-1]))
 
     def test_legacy_and_current_payload_formats(self):
-        payload = {'eventPayload': EVENT, 'context': {'selection': {'mode': 'focused'}}}
+        payload = {'eventPayload': EVENT}
         raw = json.dumps(payload)
         self.assertEqual(reply.envelope_from_text('<!-- relay-thread:x -->\n' + raw), payload)
         text = '<!-- relay-thread:x -->\n## source\n<!-- relay-payload:v1 -->\n```json\n' + raw + '\n```\n<!-- /relay-payload -->'

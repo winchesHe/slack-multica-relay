@@ -9,7 +9,6 @@ import {
   isSupportedMessage,
   type SlackMessageEvent,
 } from "./mentions.js";
-import { readContext, enrichParticipantNames } from "./slack-context.js";
 import {
   routeSlackThreadEvent,
   digest,
@@ -18,7 +17,7 @@ import {
   type SlackThreadEvent,
 } from "./thread-router.js";
 import { UpstashThreadStore } from "./thread-store.js";
-import { projectFiles, sourceMessageFingerprint } from "./context-envelope.js";
+import { compactEvent } from "./task-presentation.js";
 
 export function json(value: unknown, status = 200): Response {
   return Response.json(value, { status });
@@ -73,8 +72,6 @@ function parsedEvent(value: unknown): SlackThreadEvent {
         typeof value[k] !== "string" || !/^\d+\.\d{1,6}$/u.test(value[k] as string),
     ) ||
     typeof value.text !== "string" ||
-    (value.sourceFingerprint !== undefined &&
-      (typeof value.sourceFingerprint !== "string" || !/^[a-f0-9]{64}$/u.test(value.sourceFingerprint))) ||
     (value.operation !== undefined &&
       value.operation !== "dispatch" &&
       value.operation !== "cancel") ||
@@ -100,14 +97,8 @@ function reason(error: unknown): string {
     "invalid_thread_state",
     "ambiguous_issue_mapping",
     "invalid_issue_scope",
-    "invalid_context_scope",
-    "context_request_too_large",
+    "relay_payload_too_large",
     "task_presentation_too_large",
-    "context_rate_limited",
-    "context_upstream_failed",
-    "context_invalid_response",
-    "context_invalid_cursor",
-    "context_response_too_large",
     "comment_lookup_limit",
     "multica_http_error",
     "invalid_multica_response",
@@ -126,8 +117,7 @@ const permanentConsumerErrors = new Set([
   "invalid_thread_state",
   "ambiguous_issue_mapping",
   "invalid_issue_scope",
-  "invalid_context_scope",
-  "context_request_too_large",
+  "relay_payload_too_large",
   "task_presentation_too_large",
   "comment_lookup_limit",
 ]);
@@ -205,13 +195,12 @@ export async function acceptSlack(
       senderUserId: event.user,
       text: event.text,
       mention,
-      sourceFingerprint: sourceMessageFingerprint(event),
-      ...(event.files ? { files: projectFiles(event.files),
-        ...(Array.isArray(event.files) && event.files.length > 5 ? { filesTruncated: true } : {}) } : {}),
+      ...(event.files ? { files: event.files } : {}),
     });
   } catch {
     return json({ error: "invalid_event" }, 400);
   }
+  payload = compactEvent(payload);
   if (!admitted(payload, config))
     return json({ action: "ignored", reason: "not_allowed" });
   payload.operation = isCancelCommand(
@@ -337,9 +326,6 @@ export async function consumeQueue(
       event,
       {
         ...config,
-        readContext: async (event) => enrichParticipantNames(event,
-          await readContext(event, config.slackContextToken, boundedFetch),
-          config.slackContextToken, boundedFetch),
         store: new UpstashThreadStore(
           config.kvRestApiUrl,
           config.kvRestApiToken,

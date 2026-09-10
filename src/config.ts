@@ -16,7 +16,6 @@ export interface RelayConfig {
   multicaProjectId: string;
   multicaAgentId: string;
   slackReactionToken: string;
-  slackContextToken: string;
   slackReactionName: string;
   kvRestApiUrl: string;
   kvRestApiToken: string;
@@ -56,7 +55,6 @@ export function loadRelayConfig(
     multicaAgentId: required(env, "MULTICA_AGENT_ID"),
     slackReactionToken:
       env.SLACK_BOT_TOKEN?.trim() || required(env, "SLACK_USER_TOKEN"),
-    slackContextToken: required(env, "SLACK_CONTEXT_TOKEN"),
     slackReactionName: required(env, "SLACK_REACTION_NAME").replace(
       /^:+|:+$/gu,
       "",

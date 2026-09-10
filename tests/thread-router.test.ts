@@ -1,5 +1,4 @@
-import {readTaskEnvelope} from '../src/task-presentation.js';
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   routeSlackThreadEvent,
   type SlackThreadEvent,
@@ -26,11 +25,21 @@ function fixture() {
   }[] = [];
   const comments: { id: string; content: string }[] = [];
   let issuePosts = 0,
+    agentGets = 0,
     commentPosts = 0,
     failIssue = false,
     failComment = false;
+  const agentConfig = { model: "gpt-6-astra", service_tier: "priority" };
   const fetcher: typeof fetch = async (input, init) => {
     const url = String(input);
+    if (url.includes("/api/agents/")) {
+      agentGets++;
+      return Response.json({
+        id: decodeURIComponent(url.split("/").at(-1)!),
+        workspace_id: "ws",
+        ...agentConfig,
+      });
+    }
     if (url.includes("/api/issues/search?")) return Response.json({ issues });
     if (url.endsWith("/api/issues")) {
       issuePosts++;
@@ -70,13 +79,16 @@ function fixture() {
     multicaProjectId: "project",
     multicaAgentId: "agent",
     store: new MemoryThreadStore(),
-    readContext: async (event) => ({ anchorTs: event.threadTs, cutoffTs: event.messageTs, capturedAt: '2026-01-01T00:00:00Z', timeline: { status: 'complete', messages: [] } }),
   };
   return {
     config,
     fetcher,
     issues,
     comments,
+    agentConfig,
+    get agentGets() {
+      return agentGets;
+    },
     get issuePosts() {
       return issuePosts;
     },
@@ -91,7 +103,75 @@ function fixture() {
     },
   };
 }
+afterEach(() => vi.restoreAllMocks());
 describe("direct Issue routing", () => {
+  function payload(description: string) {
+    return JSON.parse(description.match(/```json\n([\s\S]*?)\n```/)![1]!);
+  }
+
+  it.each([false, true])("reuses the event snapshot after a definite write rejection (followup=%s)", async (followup) => {
+    const f = fixture();
+    if (followup) await routeSlackThreadEvent(root, f.config, f.fetcher);
+    const event = followup ? { ...root, messageTs: "102.000001", text: "<@U1> next" } : root;
+    let reject = true;
+    const fetcher: typeof fetch = async (input, init) => {
+      if (reject && init?.method === "POST" && String(input).endsWith(followup ? "/comments" : "/api/issues")) {
+        reject = false;
+        return Response.json({}, { status: 429 });
+      }
+      return f.fetcher(input, init);
+    };
+    await expect(routeSlackThreadEvent(event, f.config, fetcher)).rejects.toThrow();
+    f.agentConfig.model = "new-configuration";
+    await routeSlackThreadEvent({ ...event, text: "changed retry input" }, f.config, fetcher);
+    const saved = payload(followup ? f.comments[0]!.content : f.issues[0]!.description);
+    expect(saved.eventPayload.text).toBe(event.text);
+    expect(saved.replyContext.model).toBe("gpt-6-astra");
+  });
+
+  it("attaches a fresh configuration snapshot to each new message, not each duplicate", async () => {
+    const f = fixture();
+    await routeSlackThreadEvent(root, f.config, f.fetcher);
+    expect(payload(f.issues[0]!.description).replyContext).toMatchObject({
+      type: "slack_reply_context",
+      source: "agent_config",
+      status: "available",
+      agentId: "agent",
+      model: "gpt-6-astra",
+      serviceTier: "priority",
+    });
+    f.agentConfig.model = "gpt-5.6-sol";
+    f.agentConfig.service_tier = "default";
+    await routeSlackThreadEvent(root, f.config, f.fetcher);
+    const next = { ...root, messageTs: "102.000001" };
+    await routeSlackThreadEvent(next, f.config, f.fetcher);
+    await routeSlackThreadEvent(next, f.config, f.fetcher);
+    expect(payload(f.comments[0]!.content)).toMatchObject({
+      eventPayload: { messageTs: next.messageTs },
+      replyContext: { model: "gpt-5.6-sol", serviceTier: "default" },
+    });
+    expect(payload(f.issues[0]!.description).replyContext.model).toBe("gpt-6-astra");
+    expect(f.agentGets).toBe(2);
+  });
+
+  it("continues both initial and followup writes when Agent configuration times out", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const f = fixture();
+    const fetcher: typeof fetch = async (input, init) => {
+      if (String(input).includes("/api/agents/"))
+        throw new DOMException("timeout", "TimeoutError");
+      return f.fetcher(input, init);
+    };
+    expect((await routeSlackThreadEvent(root, f.config, fetcher)).action).toBe("created");
+    const next = { ...root, messageTs: "102.000001" };
+    expect((await routeSlackThreadEvent(next, f.config, fetcher)).action).toBe("comment_persisted");
+    for (const text of [f.issues[0]!.description, f.comments[0]!.content]) {
+      expect(payload(text).replyContext).toMatchObject({
+        status: "unavailable", model: null, serviceTier: null,
+      });
+      expect(payload(text).eventPayload.text).toBe(root.text);
+    }
+  });
   it("creates distinct issues for two simultaneous different Slack threads", async () => {
     const f = fixture();
     await Promise.all([
@@ -115,6 +195,7 @@ describe("direct Issue routing", () => {
     await routeSlackThreadEvent(next, f.config, f.fetcher);
     await routeSlackThreadEvent(next, f.config, f.fetcher);
     expect(f.issuePosts).toBe(1);
+    expect(f.agentGets).toBe(2);
     expect(f.commentPosts).toBe(1);
   });
   it("recovers a committed Issue after lost response without second POST", async () => {
@@ -127,6 +208,7 @@ describe("direct Issue routing", () => {
       (await routeSlackThreadEvent(root, f.config, f.fetcher)).issueId,
     ).toBe("issue-1");
     expect(f.issuePosts).toBe(1);
+    expect(f.agentGets).toBe(1);
   });
   it("does not blindly replay an ambiguous unconfirmed Issue POST", async () => {
     const f = fixture();
@@ -150,6 +232,7 @@ describe("direct Issue routing", () => {
     ).rejects.toThrow();
     await routeSlackThreadEvent(next, f.config, f.fetcher);
     expect(f.commentPosts).toBe(1);
+    expect(f.agentGets).toBe(2);
   });
   it("recovers original root identity after KV mapping expires", async () => {
     const f = fixture();
@@ -171,7 +254,45 @@ describe("direct Issue routing", () => {
       routeSlackThreadEvent(root, f.config, f.fetcher),
     ).rejects.toThrow("thread_lock_busy");
     expect(f.issuePosts).toBe(0);
+    expect(f.agentGets).toBe(0);
   });
+  it("recovers a legacy description after KV expiry without creating a second Issue", async () => {
+    const f = fixture();
+    await routeSlackThreadEvent(root, f.config, f.fetcher);
+    const row = f.issues[0]!;
+    row.description =
+      row.description.split("\n")[0] +
+      "\n" +
+      JSON.stringify({ eventPayload: root });
+    f.config.store = new MemoryThreadStore();
+    await routeSlackThreadEvent(
+      { ...root, messageTs: "102.000001" },
+      f.config,
+      f.fetcher,
+    );
+    expect(f.issuePosts).toBe(1);
+    expect(f.commentPosts).toBe(1);
+  });
+  it.each(["damaged", "mismatched"])(
+    "does not recreate an Issue with %s recovery data",
+    async (mode) => {
+      const f = fixture();
+      await routeSlackThreadEvent(root, f.config, f.fetcher);
+      f.issues[0]!.description =
+        mode === "damaged"
+          ? f.issues[0]!.description.replace("<!-- /relay-payload -->", "")
+          : f.issues[0]!.description.replace(
+              '"channelId": "C1"',
+              '"channelId": "C2"',
+            );
+      f.config.store = new MemoryThreadStore();
+      await expect(
+        routeSlackThreadEvent(root, f.config, f.fetcher),
+      ).rejects.toThrow("invalid_thread_state");
+      expect(f.issuePosts).toBe(1);
+      expect(f.commentPosts).toBe(0);
+    },
+  );
   it("retains both requests when a rejected first create is overtaken by a followup", async () => {
     const f = fixture();
     let reject = true;
@@ -193,8 +314,8 @@ describe("direct Issue routing", () => {
     await routeSlackThreadEvent(root, f.config, fetcher);
     expect(f.issuePosts).toBe(1);
     expect(f.commentPosts).toBe(1);
-    expect(readTaskEnvelope(f.issues[0]!.description).eventPayload.text).toBe("<@U1> B");
-    expect(readTaskEnvelope(f.comments[0]!.content).eventPayload.text).toBe("<@U1> test");
+    expect(payload(f.issues[0]!.description).eventPayload.text).toBe("<@U1> B");
+    expect(payload(f.comments[0]!.content).eventPayload.text).toBe("<@U1> test");
   });
   it("does not adopt a different configured Agent scope", async () => {
     const f = fixture();
@@ -216,77 +337,4 @@ describe("direct Issue routing", () => {
     ).rejects.toThrow("invalid_issue_scope");
     expect(f.issuePosts).toBe(1);
   });
-});
-
-
-it('keeps cumulative sent branch fingerprints across compact follow-ups, edits and lost responses',async()=>{
-  const f=fixture();let text='original';let reads=0;
-  f.config.readContext=async e=>{reads++;return {anchorTs:e.threadTs,cutoffTs:e.messageTs,capturedAt:'fixed',timeline:{status:'complete',messages:[{ts:'99.000001',authorId:'U1',origin:'unknown',text,files:[]},{ts:e.threadTs,authorId:'U2',origin:'unknown',text:'root',files:[]}]}};};
-  const decode=(s:string):any=>readTaskEnvelope(s);
-  await routeSlackThreadEvent(root,f.config,f.fetcher);
-  for(const ts of ['101.000001','102.000001'])await routeSlackThreadEvent({...root,messageTs:ts},f.config,f.fetcher);
-  expect(f.comments.every(c=>decode(c.content).context.timeline.messages.length===1)).toBe(true);
-  text='edited';f.loseCommentResponse();
-  const e={...root,messageTs:'103.000001'};
-  await expect(routeSlackThreadEvent(e,f.config,f.fetcher)).rejects.toThrow();
-  const before=reads;await routeSlackThreadEvent(e,f.config,f.fetcher);expect(reads).toBe(before);
-  expect(decode(f.comments.at(-1)!.content).context.timeline.messages[0].text).toBe('edited');
-  const fetcher:typeof fetch=async(input,init)=>{
-    if(init?.method==='POST'){const value={id:'last',content:JSON.parse(String(init.body)).content};f.comments.push(value);return Response.json(value);}
-    return f.fetcher(input,init);
-  };
-  await routeSlackThreadEvent({...root,messageTs:'104.000001'},f.config,fetcher);
-  expect(decode(f.comments.at(-1)!.content).context.timeline.messages).toHaveLength(1);
-  await routeSlackThreadEvent({...root,messageTs:'102.500001'},f.config,fetcher);
-  expect(decode(f.comments.at(-1)!.content).context.selection.baseline).toBe('unavailable');
-  await routeSlackThreadEvent({...root,messageTs:'105.000001'},f.config,fetcher);
-  expect(decode(f.comments.at(-1)!.content).context.timeline.messages).toHaveLength(1);
-});
-
-it('freezes the Agent configuration snapshot across retries and refreshes it for new messages',async()=>{
-  const f=fixture();let calls=0;let model='model-one';
-  const fetcher:typeof fetch=async(input,init)=>{
-    if(String(input).includes('/api/agents/')){calls++;return Response.json({id:'agent',workspace_id:'ws',model,service_tier:'priority'});}
-    return f.fetcher(input,init);
-  };
-  f.loseIssueResponse();
-  await expect(routeSlackThreadEvent(root,f.config,fetcher)).rejects.toThrow();
-  model='model-two';await routeSlackThreadEvent(root,f.config,fetcher);
-  expect(calls).toBe(1);
-  expect(readTaskEnvelope(f.issues[0]!.description).replyContext).toMatchObject({model:'model-one'});
-  await routeSlackThreadEvent({...root,messageTs:'101.000001'},f.config,fetcher);
-  expect(calls).toBe(2);
-  expect(readTaskEnvelope(f.comments[0]!.content).replyContext).toMatchObject({model:'model-two'});
-});
-
-it('retains necessary predecessor context when a side thread gains a reply',async()=>{
-  const f=fixture();let added=false;
-  f.config.readContext=async e=>({anchorTs:e.threadTs,cutoffTs:e.messageTs,capturedAt:'fixed',timeline:{status:'complete',messages:[
-    {ts:'90.000001',authorId:'U1',origin:'unknown',text:'side-root',files:[],replies:{status:'complete',messages:[
-      {ts:'91.000001',authorId:'U1',origin:'unknown',text:'old-reply',files:[]},
-      ...(added?[{ts:'100.500001',authorId:'U1',origin:'unknown' as const,text:'new-reply',files:[]}]:[])
-    ]}},
-    {ts:e.threadTs,authorId:'U2',origin:'unknown',text:'current-root',files:[]}
-  ]}});
-  await routeSlackThreadEvent(root,f.config,f.fetcher);added=true;
-  await routeSlackThreadEvent({...root,messageTs:'101.000001'},f.config,f.fetcher);
-  const second=readTaskEnvelope(f.comments[0]!.content) as any;
-  expect(second.context.timeline.messages[0].replies.messages.map((m:any)=>m.text)).toEqual(['old-reply','new-reply']);
-  expect(f.comments[0]!.content).toContain('旁支变化：新增 1 条，更新 0 条');
-  await routeSlackThreadEvent({...root,messageTs:'102.000001'},f.config,f.fetcher);
-  expect((readTaskEnvelope(f.comments[1]!.content) as any).context.timeline.messages).toHaveLength(1);
-});
-
-
-it('logs content-free clipping measurements',async()=>{
-  const f=fixture();const info=vi.spyOn(console,'info').mockImplementation(()=>{});
-  try {
-    f.config.readContext=async e=>({anchorTs:e.threadTs,cutoffTs:e.messageTs,capturedAt:'fixed',readStats:{slackCalls:3,rawMessages:5,messageReadMs:7,nameLookupCalls:2,nameReadMs:3},timeline:{status:'complete',messages:[{ts:e.threadTs,authorId:'U2',origin:'unknown',text:'PRIVATE_BODY_MARKER',files:[]}]}});
-    await routeSlackThreadEvent(root,f.config,f.fetcher);
-    const row=info.mock.calls.find(c=>c[0]==='relay_context')![1] as Record<string,unknown>;
-    expect(row).toMatchObject({slackCalls:3,rawMessages:5,candidateRoots:1,candidateMessages:1,retainedRoots:1,retainedMessages:1,omittedMessages:0});
-    expect(row).toMatchObject({messageReadMs:7,nameLookupCalls:2,nameReadMs:3});
-    expect(row.agentConfigMs).toBeGreaterThanOrEqual(0);expect(row.envelopeBytes).toBeGreaterThan(0);
-    const log=JSON.stringify(row);expect(log).not.toContain('PRIVATE_BODY_MARKER');expect(log).not.toContain(root.text);expect(log).not.toContain('multicaApiToken');
-  } finally {info.mockRestore();}
 });

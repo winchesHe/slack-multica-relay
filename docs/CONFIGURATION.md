@@ -23,7 +23,6 @@ Slack ID 使用逗号分隔的大写标识符。`SLACK_TARGET_USER_IDS` 与 `SLA
 | `SLACK_BOT_TOKEN` | 条件必填 | reaction 添加、查询和清理优先使用的 Bot 身份，需 reactions:read/write。 |
 | `SLACK_USER_TOKEN` | 条件必填 | 未配置 Bot 时用于 reaction 的 User 身份。 |
 | `SLACK_CANCEL_KEYWORDS` | 否 | 逗号分隔的完整取消关键词，默认 cancel,取消。 |
-| `SLACK_CONTEXT_TOKEN` | 是 | 带目标会话 history scopes 的 user token。consumer 用它读取有界 history/replies；如需通过 `users.info` 补充参与者姓名，还需 `users:read`。可以与 reaction 使用同一个已授权 token，但必须显式配置。 |
 | `SLACK_REACTION_NAME` | 是 | 不带冒号的 Slack emoji shortcode，例如 `eyes`。reaction 只确认 Relay 已持久化，不证明 Agent 已完成。 |
 
 Slack App Request URL 为 `https://<deployment-host>/api/slack/events`。只订阅目标频道类型需要的 message events；读取私有频道时必须把 App 安装到对应频道。
@@ -50,17 +49,17 @@ Relay 调用普通 Issue 和 Comment API，不需要 Multica Autopilot 或 webho
 
 Redis 必须由该 Relay 独占，用于保存线程映射、锁和写入确认状态。QStash 保存排队的 Slack payload，并重试失败的 consumer；其访问控制与保留时间应按 Slack 消息内容的敏感程度配置。
 
-Redis 还会保存 24 小时的 scoped message fingerprint index（最多 500 条）用于选择 follow-up 上下文。这些记录表示已持久化内容，不代表 Agent Session 记忆。准备好的 envelope 也保存 24 小时，包括已投递副本，直到 TTL 到期。每次新 mention 都重新读取 timeline；只有同一事件的重试复用冻结快照。旧 background cache key 不再读写，按原 TTL 自然过期。Multica 按自己的保留策略保存已投递 envelope；Redis 到期不会删除 Multica 内容。
+Redis 保存单条事件的冻结 envelope 24 小时，包含触发消息、安全附件元数据和该次 Agent 配置快照。相同事件重试复用它；新的 mention 单独采集配置。Relay 不读取频道或 thread 历史，上下文由 Agent 按自己的 Prompt 和 Skills 读取。
 
-Relay 在发布到 QStash 前，把每个 Slack file object 投影为 `id`、`name`、`mime`、`size` 和 `contentStatus`，并额外携带由完整安全字段生成的 fingerprint。下载内容、private URL、thumbnail、shares 和凭据不会进入队列 payload。暂时性或结果不明的失败返回 503 交给 QStash 有限重试；无效队列 payload、损坏的持久状态、scope 违反、无法消除的映射歧义和确定性体积超限返回 `rejected` 与 `retryable: false`。访问失败和有界读取缺失按上下文合同表达。
+Relay 在发布到 QStash 前，把每个 Slack file object 投影为 `id`、`name`、`mime`、`size` 和 `contentStatus`。下载内容、private URL、thumbnail、shares 和凭据不会进入队列 payload。暂时性或结果不明的失败返回 503 交给 QStash 有限重试；无效队列 payload、损坏的持久状态、scope 违反、无法消除的映射歧义和确定性体积超限返回 `rejected` 与 `retryable: false`。事件 envelope 上限为 48 KiB，任务展示正文上限为 64 KiB，引用展示最多 4 KiB。
 
 ## 取消与 reaction 身份
 
-在原任务 thread 发送目标 mention 加完整的 `cancel` 或 `取消` 可停止关联任务。`SLACK_CANCEL_KEYWORDS` 的非空列表替换默认词；只有 `SLACK_TARGET_USER_IDS` 中的发送者可取消，用户组 mention 不授予取消权，入队与消费时都复核准入。取消不创建新的 Agent 任务，也不读取上下文树。
+在原任务 thread 发送目标 mention 加完整的 `cancel` 或 `取消` 可停止关联任务。`SLACK_CANCEL_KEYWORDS` 的非空列表替换默认词；只有 `SLACK_TARGET_USER_IDS` 中的发送者可取消，用户组 mention 不授予取消权，入队与消费时都复核准入。取消不创建新的 Agent 任务。
 
 取消意图、run ID 集合和清理进度与原线程映射一起保存在 Redis；重试只处理原 run 集合。取消期间收到的普通消息被忽略；结束后新 mention 可继续原 Issue。回读 run 终态后仅清理所选身份自己的 reaction，其他人的表情保留。`cancelled` 证明 Multica 状态及中断请求，不是独立的 daemon 停止确认，也不会撤销已完成的外部写入。
 
-reaction 添加、查询和清理统一使用非空 `SLACK_BOT_TOKEN`，未配置时使用 `SLACK_USER_TOKEN`。所选身份需要 `reactions:read`、`reactions:write` 和目标频道访问权；调用失败不会换身份。上下文仍用 `SLACK_CONTEXT_TOKEN`，Agent 最终回复仍使用 Runtime 自己的 user token。
+reaction 添加、查询和清理统一使用非空 `SLACK_BOT_TOKEN`，未配置时使用 `SLACK_USER_TOKEN`。所选身份需要 `reactions:read`、`reactions:write` 和目标频道访问权；调用失败不会换身份。Agent 最终回复仍使用 Runtime 自己的 user token。
 
 旧 `SLACK_REACTION_TOKEN` / `SLACK_REACTION_READ_TOKEN` 不再读取。升级前将现有凭据按原身份配置到新变量，确认后再切换代码；旧变量可保留给旧部署回滚使用。若从 User 切到 Bot，历史 User reaction 保留。回滚取消功能前应先处理队列内 `operation=cancel` 的消息，避免旧消费者将其当普通请求。QStash 重试耗尽时保留 DLQ 责任，不删除 Redis 状态来强行重发。
 
@@ -101,7 +100,7 @@ HTTP 200、确认 reaction、Issue 创建或部署完成都只能证明对应阶
 
 ## 可选模型 footer
 
-consumer 在准备消息时使用现有 Multica PAT 读取一次目标 Agent 配置，deadline 为两秒，并校验身份，不需要新增凭据。model 不可用、继承或为空时记为 `null`，footer 省略 model 部分；reply adapter 始终追加配置的自动化身份。footer 表示配置快照，不代表该次 run 实际使用的 model 或计费 tier，也不会修改 Agent model 设置。冻结快照和 text/Block Kit 渲染合同见 [Slack 上下文组装](CONTEXT-ASSEMBLY-DESIGN.md)。
+consumer 在准备消息时使用现有 Multica PAT 读取一次目标 Agent 配置，deadline 为两秒，并校验身份，不需要新增凭据。model 不可用、继承或为空时记为 `null`，footer 省略 model 部分；reply adapter 始终追加配置的自动化身份。footer 表示配置快照，不代表该次 run 实际使用的 model 或计费 tier，也不会修改 Agent model 设置。单条事件的快照冻结规则见上文，渲染规则见下文 reply adapter。
 
 ## 本地 reply adapter
 
@@ -158,4 +157,4 @@ Wrangler 本地开发和测试支持 Node.js 22.12+，推荐 Node.js 24 LTS；`.
 5. 运行 `pnpm test`、`pnpm lint` 和 `pnpm build:cf`。最后一项仅构建并验证部署包，不发布。
 6. 配置完成后运行 `pnpm deploy:cf`。在 Slack 中设置公开 Events URL，再按上方部署验收逐阶段验证。生产域名变更必须同步 consumer URL。
 
-Cloudflare 沿用现有 QStash 和 Upstash Redis，不使用 Cloudflare Queues、KV 或 D1。Python reply adapter 和持久 ledger 继续运行在私有 Multica Runtime。账号的 CPU 和 subrequest 限制仍须适配上下文读取与恢复路径；本地测试和 dry-run 不代表线上完整链路验收。
+Cloudflare 沿用现有 QStash 和 Upstash Redis，不使用 Cloudflare Queues、KV 或 D1。Python reply adapter 和持久 ledger 继续运行在私有 Multica Runtime。账号的 CPU 和 subrequest 限制仍须适配事件持久化与恢复路径；本地测试和 dry-run 不代表线上完整链路验收。

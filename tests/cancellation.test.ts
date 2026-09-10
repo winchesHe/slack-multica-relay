@@ -36,7 +36,6 @@ function fixture() {
     slackReactionToken: "test",
     slackReactionName: "eyes",
     store,
-    readContext: async (event) => ({anchorTs:event.threadTs,cutoffTs:event.messageTs,capturedAt:"2026-01-01T00:00:00Z",timeline:{status:"complete",messages:[]}}),
   };
   const issues: Record<string, unknown>[] = [];
   const comments: Record<string, unknown>[] = [];

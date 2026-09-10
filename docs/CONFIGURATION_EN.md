@@ -23,7 +23,6 @@ Slack IDs are comma-separated uppercase identifiers. `SLACK_TARGET_USER_IDS` and
 | `SLACK_BOT_TOKEN` | Conditional | Preferred identity for reaction add/read/remove; requires reactions:read and reactions:write. |
 | `SLACK_USER_TOKEN` | Conditional | Used for reactions when Bot is not configured. |
 | `SLACK_CANCEL_KEYWORDS` | No | Comma-separated whole-command words; defaults to cancel,取消. |
-| `SLACK_CONTEXT_TOKEN` | Yes | User token with history scopes for the selected conversation types. The consumer uses it for bounded history/reply reads; `users:read` enables optional participant names through `users.info`. It may contain the same authorized token as the reaction credential, but configure it explicitly. |
 | `SLACK_REACTION_NAME` | Yes | Slack emoji shortcode without colons, such as `eyes`. The reaction confirms Relay persistence, not Agent completion. |
 
 The Slack App Request URL is `https://<deployment-host>/api/slack/events`. Subscribe only to message events required by the selected conversation types. Install the App in private channels when needed.
@@ -50,17 +49,17 @@ The Relay calls ordinary Issue and Comment APIs. It does not require a Multica A
 
 The Redis database must be dedicated to this Relay. It stores thread mappings, locks, and write-confirmation state. QStash stores queued Slack payloads and retries failed consumers; configure its access and retention for the sensitivity of Slack content.
 
-Redis also keeps scoped message-fingerprint indexes for 24 hours, up to 500 messages, to select follow-up context. These records describe persisted content rather than Agent Session memory. Prepared envelopes remain in Redis for 24 hours, including delivered copies until TTL expiry. A new mention refreshes the timeline; only retries of the same event reuse a frozen snapshot. Legacy background-cache keys are no longer read or written and expire under their existing TTL. Multica retains delivered envelopes under its own policy; Redis expiry does not delete them.
+Redis retains each event envelope for 24 hours, including the trigger message, safe attachment metadata, and its Agent configuration snapshot. Retries reuse that snapshot; a new mention captures its own configuration. The Relay does not fetch channel or thread history. Agents read context under their existing prompts and Skills.
 
-Before publishing to QStash, the Relay projects every Slack file object to `id`, `name`, `mime`, `size`, and `contentStatus`, plus a fingerprint derived from the complete safe fields. Downloaded content, private URLs, thumbnails, shares, and credentials never enter the queue payload. Transient or unknown-result failures return 503 for bounded QStash retry. An invalid queued payload, corrupt persisted state, scope violation, unresolvable mapping ambiguity, or deterministic size overflow returns `rejected` with `retryable: false`. Access failures and bounded-read omissions are represented by the context contract.
+Before publishing to QStash, the Relay projects every Slack file object to `id`, `name`, `mime`, `size`, and `contentStatus`. Downloaded content, private URLs, thumbnails, shares, and credentials never enter the queue payload. Transient or unknown-result failures return 503 for bounded QStash retry. An invalid queued payload, corrupt persisted state, scope violation, unresolvable mapping ambiguity, or deterministic size overflow returns `rejected` with `retryable: false`. The event envelope is limited to 48 KiB and its presentation to 64 KiB; the visible source quote is at most 4 KiB.
 
 ## Cancellation and reaction identity
 
-A target mention followed by the complete `cancel` or `取消` keyword in the original task thread stops the associated runs. A non-empty `SLACK_CANCEL_KEYWORDS` list replaces those defaults. Only senders listed in `SLACK_TARGET_USER_IDS` may cancel; user-group mentions do not grant that permission. Admission is checked before enqueueing and again during consumption. Cancellation creates no Agent task and reads no context tree.
+A target mention followed by the complete `cancel` or `取消` keyword in the original task thread stops the associated runs. A non-empty `SLACK_CANCEL_KEYWORDS` list replaces those defaults. Only senders listed in `SLACK_TARGET_USER_IDS` may cancel; user-group mentions do not grant that permission. Admission is checked before enqueueing and again during consumption. Cancellation creates no Agent task.
 
 Redis persists cancellation intent, the fixed run-ID set, and remaining reaction cleanup with the thread mapping. Retries keep the original targets. Ordinary messages received during cancellation are ignored; later mentions can continue the same Issue. Terminal-state readback precedes cleanup of only the selected identity's own reactions. Multica's cancelled state and interruption request do not independently confirm daemon termination or undo completed external writes.
 
-Reaction add/read/remove consistently select a non-empty `SLACK_BOT_TOKEN`, otherwise `SLACK_USER_TOKEN`. The chosen identity needs `reactions:read`, `reactions:write`, and channel access; API failure never switches identity. Context uses `SLACK_CONTEXT_TOKEN`, while the Agent reply uses its separate Runtime user token.
+Reaction add/read/remove consistently select a non-empty `SLACK_BOT_TOKEN`, otherwise `SLACK_USER_TOKEN`. The chosen identity needs `reactions:read`, `reactions:write`, and channel access; API failure never switches identity. The Agent reply uses its separate Runtime user token.
 
 The old `SLACK_REACTION_TOKEN` and `SLACK_REACTION_READ_TOKEN` are no longer read. Configure the new variable for the existing identity before switching code; retain old variables for rollback if needed. Switching from User to Bot leaves historical User reactions intact. Drain or isolate queued `operation=cancel` events before rolling back, because an old consumer would dispatch them as ordinary tasks. Exhausted retries remain in QStash's DLQ; do not delete Redis state to force a resend.
 
@@ -101,7 +100,7 @@ An HTTP 200, acknowledgement reaction, created Issue, or ready deployment proves
 
 ## Optional model footer
 
-During preparation, the consumer uses the existing Multica PAT to read the selected Agent once, with a two-second deadline and identity validation. No new credential is required. An unavailable, inherited, or empty model becomes `null`, omitting only the model portion of the footer. The reply adapter always appends the configured automation identity. The footer is a configuration snapshot, not evidence of the model or billing tier used by the run, and it never changes Agent model settings. See [Slack Context Assembly](CONTEXT-ASSEMBLY-DESIGN_EN.md) for the frozen-snapshot and rendering contract.
+During preparation, the consumer uses the existing Multica PAT to read the selected Agent once, with a two-second deadline and identity validation. No new credential is required. An unavailable, inherited, or empty model becomes `null`, omitting only the model portion of the footer. The reply adapter always appends the configured automation identity. The footer is a configuration snapshot, not evidence of the model or billing tier used by the run, and it never changes Agent model settings. Event freezing is described above; reply rendering is described below.
 
 ## Local reply adapter
 
@@ -158,4 +157,4 @@ Wrangler development and tests support Node.js 22.12+; Node.js 24 LTS is recomme
 5. Run `pnpm test`, `pnpm lint`, and `pnpm build:cf`. The last command builds and validates the deployment bundle without publishing.
 6. After configuration, run `pnpm deploy:cf`. Configure the public Slack Events URL and perform the staged deployment verification above. Domain changes require updating the consumer URL.
 
-Cloudflare retains QStash and Upstash Redis; it does not replace them with Cloudflare Queues, KV, or D1. The Python reply adapter and durable ledger stay on the private Multica Runtime. Account CPU and subrequest limits must accommodate context reads and recovery paths. Local tests and dry-run builds do not prove a live end-to-end deployment.
+Cloudflare retains QStash and Upstash Redis; it does not replace them with Cloudflare Queues, KV, or D1. The Python reply adapter and durable ledger stay on the private Multica Runtime. Account CPU and subrequest limits must accommodate event persistence and recovery paths. Local tests and dry-run builds do not prove a live end-to-end deployment.

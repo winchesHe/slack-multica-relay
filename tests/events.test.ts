@@ -1,8 +1,6 @@
 import { createHmac } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { acceptSlack, consumeQueue, consumerFailure } from "../src/http.js";
-import { readContext } from "../src/slack-context.js";
-import { messageFingerprint } from "../src/context-envelope.js";
 vi.mock("@upstash/qstash", () => ({
   Receiver: class {
     verify = vi.fn().mockResolvedValue(true);
@@ -19,7 +17,6 @@ const env = {
   MULTICA_PROJECT_ID: "project",
   MULTICA_AGENT_ID: "agent",
   SLACK_USER_TOKEN: "test",
-  SLACK_CONTEXT_TOKEN: "test",
   SLACK_REACTION_NAME: "eyes",
   KV_REST_API_URL: "https://kv.test",
   KV_REST_API_TOKEN: "test",
@@ -57,8 +54,8 @@ const event = {
 };
 afterEach(() => vi.restoreAllMocks());
 describe("durable admission", () => {
-  it.each(["invalid_event","invalid_thread_state","ambiguous_issue_mapping","invalid_issue_scope","invalid_context_scope",
-    "context_request_too_large","task_presentation_too_large","comment_lookup_limit"])("acknowledges permanent consumer rejection %s",async(code)=>{
+  it.each(["invalid_event","invalid_thread_state","ambiguous_issue_mapping","invalid_issue_scope",
+    "relay_payload_too_large","task_presentation_too_large","comment_lookup_limit"])("acknowledges permanent consumer rejection %s",async(code)=>{
     const response=consumerFailure(code);
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({action:"rejected",error:code,retryable:false});
@@ -96,17 +93,8 @@ describe("durable admission", () => {
     const queued=JSON.parse(String(fetcher.mock.calls[0]![1]?.body));
     expect(queued.files).toHaveLength(5);expect(queued.files[0]).toEqual({id:"F1",name:"photo.png",mime:"image/png",size:12,contentStatus:"not_loaded"});
     expect(queued.filesTruncated).toBe(true);
-    expect(queued.sourceFingerprint).toMatch(/^[a-f0-9]{64}$/u);
     expect(JSON.stringify(queued)).not.toContain("private.test");
-    const initial=await readContext(queued,"test",async()=>Response.json({ok:true,messages:[]}));
-    const followup={...queued,messageTs:"101.000001",text:"<@U1> next",files:undefined,filesTruncated:undefined,sourceFingerprint:undefined};
-    const refreshed=await readContext(followup,"test",async input=>String(input).includes("history")
-      ? Response.json({ok:true,messages:[]})
-      : Response.json({ok:true,messages:[{...event,files},{...event,ts:"101.000001",thread_ts:event.ts,text:"<@U1> next"}]}));
-    expect(messageFingerprint(initial.timeline.messages[0]!)).toBe(messageFingerprint(refreshed.timeline.messages[0]!));
-    const logged=JSON.stringify(info.mock.calls);
-    expect(logged).not.toContain("T1:C1:100.000001");
-    expect(logged).toContain("eventId");
+    expect(JSON.stringify(info.mock.calls)).not.toContain(event.text);
   });
   it.each([
     { channel: "C2" },
