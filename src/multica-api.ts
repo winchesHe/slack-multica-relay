@@ -16,12 +16,42 @@ export interface ApiConfig {
   multicaApiToken: string;
   multicaWorkspaceId: string;
   multicaProjectId: string;
-  multicaAgentId: string;
+  multicaAgentId?: string;
+  multicaAssigneeType?: "agent" | "squad";
+  multicaAssigneeId?: string;
+  multicaThreadScopeId?: string;
+  multicaLegacyAgentId?: string;
+}
+export function assignee(config: ApiConfig): { type: "agent" | "squad"; id: string } {
+  const type = config.multicaAssigneeType ?? "agent";
+  const id = config.multicaAssigneeId ?? (type === "agent" ? config.multicaAgentId : undefined);
+  if (!id) throw new Error("relay_not_configured");
+  return { type, id };
+}
+export function threadScopeId(config: ApiConfig): string {
+  const target = assignee(config);
+  return config.multicaThreadScopeId ?? (target.type === "agent" ? target.id : `squad:${target.id}`);
+}
+function ownsIssue(config: ApiConfig, candidate: MulticaIssue): boolean {
+  const target = assignee(config);
+  return candidate.project_id === config.multicaProjectId && (
+    (candidate.assignee_type === target.type && candidate.assignee_id === target.id) ||
+    (target.type === "squad" && !!config.multicaLegacyAgentId &&
+      config.multicaThreadScopeId === config.multicaLegacyAgentId &&
+      candidate.assignee_type === "agent" && candidate.assignee_id === config.multicaLegacyAgentId)
+  );
+}
+export async function validateMappedIssue(config: ApiConfig, id: string, marker: string, fetchImpl: typeof fetch): Promise<void> {
+  const response = await api(config, `/api/issues/${encodeURIComponent(id)}`, {}, fetchImpl);
+  if (!response.ok) throw new ApiError(response.status);
+  const candidate = issue(await response.json());
+  if (candidate.id !== id || !ownsIssue(config, candidate) || !candidate.description?.startsWith(marker + "\n"))
+    throw new Error("invalid_issue_scope");
 }
 export interface SlackReplyContext {
   type: "slack_reply_context";
   source: "agent_config";
-  agentId: string;
+  agentId: string | null;
   capturedAt: string;
   status: "available" | "unavailable";
   model: string | null;
@@ -65,13 +95,21 @@ export async function getSlackReplyContext(
   config: ApiConfig,
   fetchImpl: typeof fetch = fetch,
 ): Promise<SlackReplyContext> {
+  const target = assignee(config);
+  // A Team may delegate to multiple agents; a legacy Agent snapshot is misleading.
+  if (target.type === "squad") return {
+    type: "slack_reply_context", source: "agent_config", agentId: null,
+    capturedAt: new Date().toISOString(), status: "unavailable",
+    model: null, serviceTier: null,
+  };
+  const agentId = target.id;
   let model: string | null = null;
   let serviceTier: SlackReplyContext["serviceTier"] = null;
   let status: SlackReplyContext["status"] = "unavailable";
   try {
     const response = await api(
       config,
-      `/api/agents/${encodeURIComponent(config.multicaAgentId)}`,
+      `/api/agents/${encodeURIComponent(agentId)}`,
       { signal: AbortSignal.timeout(2000), redirect: "error" },
       fetchImpl,
     );
@@ -79,7 +117,7 @@ export async function getSlackReplyContext(
     const body: unknown = await response.json();
     if (
       !object(body) ||
-      body.id !== config.multicaAgentId ||
+      body.id !== agentId ||
       body.workspace_id !== config.multicaWorkspaceId
     )
       throw new Error("invalid_multica_response");
@@ -97,7 +135,7 @@ export async function getSlackReplyContext(
   return {
     type: "slack_reply_context",
     source: "agent_config",
-    agentId: config.multicaAgentId,
+    agentId,
     capturedAt: new Date().toISOString(),
     status,
     model,
@@ -122,9 +160,7 @@ export async function findIssue(
   const candidate = matches[0];
   if (!candidate) return;
   if (
-    candidate.project_id !== config.multicaProjectId ||
-    candidate.assignee_type !== "agent" ||
-    candidate.assignee_id !== config.multicaAgentId
+    !ownsIssue(config, candidate)
   )
     throw new Error("invalid_issue_scope");
   return candidate;
@@ -144,8 +180,8 @@ export async function createIssue(
         title,
         description,
         project_id: config.multicaProjectId,
-        assignee_type: "agent",
-        assignee_id: config.multicaAgentId,
+        assignee_type: assignee(config).type,
+        assignee_id: assignee(config).id,
         status: "todo",
       }),
     },
@@ -161,9 +197,7 @@ export async function createIssue(
       const existing = issue(body.issue),
         marker = description.split("\n")[0]!;
       if (
-        existing.project_id === config.multicaProjectId &&
-        existing.assignee_type === "agent" &&
-        existing.assignee_id === config.multicaAgentId &&
+        ownsIssue(config, existing) &&
         existing.description?.startsWith(marker + "\n")
       )
         return existing;
@@ -280,9 +314,7 @@ export async function getIssue(
   const result = issue(await response.json());
   if (
     result.id !== issueId ||
-    result.project_id !== config.multicaProjectId ||
-    result.assignee_type !== "agent" ||
-    result.assignee_id !== config.multicaAgentId
+    !ownsIssue(config, result)
   )
     throw new Error("invalid_issue_scope");
   return result;

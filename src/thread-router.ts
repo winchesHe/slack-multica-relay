@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   ApiError,
+  threadScopeId,
+  validateMappedIssue,
   createIssue,
   findIssue,
   createComment,
@@ -10,7 +12,7 @@ import {
   type SlackReplyContext,
 } from "./multica-api.js";
 import type { MentionMatch } from "./mentions.js";
-import { addSlackReaction } from "./reaction.js";
+import { addSlackReaction, reactionErrorDetails } from "./reaction.js";
 import {
   cancelThread,
   compareTimestamp,
@@ -87,7 +89,7 @@ export async function routeSlackThreadEvent(
       ":" +
       config.multicaProjectId +
       ":" +
-      config.multicaAgentId,
+      threadScopeId(config),
   );
   const key = `relay:${scope}:thread:${digest(threadKey(event))}`;
   const msgKey = `relay:${scope}:message:${digest(messageKey(event))}`;
@@ -130,6 +132,7 @@ export async function routeSlackThreadEvent(
       compareTimestamp(event.messageTs, state.ignoredThrough) <= 0
     )
       return { action: "ignored", issueId: state.issueId };
+    if (state.issueId) await validateMappedIssue(config, state.issueId, marker, fetchImpl);
     state.lastMessageTs = maxTimestamp(state.lastMessageTs, event.messageTs);
     // 保存触发消息，再尝试外部写入，取消恢复才能找到响应丢失的消息。
     state.reactionMessages ??= raw
@@ -151,10 +154,11 @@ export async function routeSlackThreadEvent(
             config.slackReactionName,
             fetchImpl,
           );
-        } catch {
+        } catch (error) {
           console.warn("relay_reaction", {
             eventId: digest(messageKey(event)),
             reason: "reaction_failed",
+            ...reactionErrorDetails(error),
           });
         }
       }

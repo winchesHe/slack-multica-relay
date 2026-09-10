@@ -92,7 +92,8 @@ export async function cancelThread(
       if (!runs.length) throw new Error("cancellation_pending");
       const active = runs.filter(isActiveRun);
       if (!active.length) return finish("no_active_run");
-      if (active.some((run) => run.agent_id !== config.multicaAgentId))
+      // Team 的运行已按 issue 和 workspace 校验；Agent 归属还需核对具体执行者。
+      if (issue.assignee_type === "agent" && active.some((run) => run.agent_id !== issue.assignee_id))
         throw new Error("invalid_issue_scope");
       cancellation.runIds = active.map((run) => run.id);
       await save();

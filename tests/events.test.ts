@@ -277,3 +277,20 @@ describe("取消指令的事件路由", () => {
     expect(calls.every((url) => url === env.KV_REST_API_URL || url.includes("/api/issues/search?"))).toBe(true);
   });
 });
+
+describe("Team configuration admission", () => {
+  it("accepts a Team without the legacy agent variable", async () => {
+    const { MULTICA_AGENT_ID: _legacy, ...base } = env;
+    const f = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ messageId: "m" }));
+    expect((await acceptSlack(request(event), { ...base, MULTICA_ASSIGNEE_TYPE: "squad", MULTICA_ASSIGNEE_ID: "team" }, f)).status).toBe(200);
+  });
+  it.each([
+    { MULTICA_ASSIGNEE_TYPE: "unknown", MULTICA_ASSIGNEE_ID: "team" },
+    { MULTICA_ASSIGNEE_TYPE: "squad" },
+    { MULTICA_ASSIGNEE_TYPE: "squad", MULTICA_ASSIGNEE_ID: "team", MULTICA_LEGACY_AGENT_ID: "agent", MULTICA_THREAD_SCOPE_ID: "wrong" },
+  ])("rejects invalid Team configuration %j", async (extra) => {
+    const f = vi.fn<typeof fetch>();
+    expect((await acceptSlack(request(event), { ...env, ...extra }, f)).status).toBe(500);
+    expect(f).not.toHaveBeenCalled();
+  });
+});

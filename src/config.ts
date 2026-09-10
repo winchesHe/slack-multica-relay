@@ -1,4 +1,5 @@
-export interface RelayConfig {
+import type { ApiConfig } from "./multica-api.js";
+export interface RelayConfig extends ApiConfig {
   signingSecret: string;
   teamId: string;
   targetUserIds: Set<string>;
@@ -10,11 +11,6 @@ export interface RelayConfig {
   allowedSenderIds: Set<string>;
   allowAllSenders: boolean;
   blockedSenderIds: Set<string>;
-  multicaApiBaseUrl: string;
-  multicaApiToken: string;
-  multicaWorkspaceId: string;
-  multicaProjectId: string;
-  multicaAgentId: string;
   slackReactionToken: string;
   slackReactionName: string;
   kvRestApiUrl: string;
@@ -36,6 +32,13 @@ export function loadRelayConfig(
   const targetSubteamIds = ids(env.SLACK_TARGET_SUBTEAM_IDS);
   if (!targetUserIds.size && !targetSubteamIds.size)
     throw new Error("missing_mention_target");
+  const type = env.MULTICA_ASSIGNEE_TYPE?.trim() || "agent";
+  if (type !== "agent" && type !== "squad") throw new Error("invalid_assignee_type");
+  const targetId = env.MULTICA_ASSIGNEE_ID?.trim() || (type === "agent" ? env.MULTICA_AGENT_ID?.trim() : undefined);
+  if (!targetId) throw new Error("relay_not_configured");
+  const legacy = env.MULTICA_LEGACY_AGENT_ID?.trim() || undefined;
+  const scope = env.MULTICA_THREAD_SCOPE_ID?.trim() || undefined;
+  if (legacy && (type !== "squad" || scope !== legacy)) throw new Error("invalid_migration_scope");
   return {
     signingSecret: required(env, "SLACK_SIGNING_SECRET"),
     teamId: required(env, "SLACK_TEAM_ID"),
@@ -52,7 +55,10 @@ export function loadRelayConfig(
     multicaApiToken: required(env, "MULTICA_API_TOKEN"),
     multicaWorkspaceId: required(env, "MULTICA_WORKSPACE_ID"),
     multicaProjectId: required(env, "MULTICA_PROJECT_ID"),
-    multicaAgentId: required(env, "MULTICA_AGENT_ID"),
+    multicaAssigneeType: type,
+    multicaAssigneeId: targetId,
+    multicaThreadScopeId: scope,
+    multicaLegacyAgentId: legacy,
     slackReactionToken:
       env.SLACK_BOT_TOKEN?.trim() || required(env, "SLACK_USER_TOKEN"),
     slackReactionName: required(env, "SLACK_REACTION_NAME").replace(

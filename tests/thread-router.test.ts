@@ -49,8 +49,8 @@ function fixture() {
         title: data.title,
         description: data.description,
         project_id: "project",
-        assignee_type: "agent",
-        assignee_id: "agent",
+        assignee_type: data.assignee_type,
+        assignee_id: data.assignee_id,
       };
       issues.push(row);
       if (failIssue) throw new DOMException("lost response", "TimeoutError");
@@ -70,6 +70,8 @@ function fixture() {
       }
       return Response.json(comments);
     }
+    const mapped = issues.find((row) => url.endsWith("/api/issues/" + row.id));
+    if (mapped) return Response.json(mapped);
     throw new Error("unexpected endpoint");
   };
   const config: ThreadRouterConfig = {
@@ -336,5 +338,68 @@ describe("direct Issue routing", () => {
       routeSlackThreadEvent(root, f.config, f.fetcher),
     ).rejects.toThrow("invalid_issue_scope");
     expect(f.issuePosts).toBe(1);
+  });
+});
+
+describe("Team migration", () => {
+  const team = { multicaAssigneeType: "squad" as const, multicaAssigneeId: "team", multicaThreadScopeId: "agent" };
+  it("keeps root and followup deduplication after reassignment", async () => {
+    const f = fixture();
+    await routeSlackThreadEvent(root, f.config, f.fetcher);
+    f.issues[0]!.assignee_type = "squad";
+    f.issues[0]!.assignee_id = "team";
+    const config = { ...f.config, ...team };
+    expect((await routeSlackThreadEvent(root, config, f.fetcher)).action).toBe("duplicate");
+    const next = { ...root, messageTs: "102.000001" };
+    await routeSlackThreadEvent(next, config, f.fetcher);
+    await routeSlackThreadEvent(next, config, f.fetcher);
+    expect(f.issuePosts).toBe(1);
+    expect(f.commentPosts).toBe(1);
+    config.store = new MemoryThreadStore();
+    await routeSlackThreadEvent(next, config, f.fetcher);
+    expect(f.issuePosts).toBe(1);
+    expect(f.commentPosts).toBe(1);
+  });
+  it("accepts only explicitly configured legacy ownership during migration", async () => {
+    const f = fixture();
+    await routeSlackThreadEvent(root, f.config, f.fetcher);
+    const config = { ...f.config, ...team };
+    await expect(routeSlackThreadEvent(root, config, f.fetcher)).rejects.toThrow("invalid_issue_scope");
+    await routeSlackThreadEvent(root, { ...config, multicaLegacyAgentId: "agent" }, f.fetcher);
+    expect(f.issuePosts).toBe(1);
+  });
+  it("preserves ambiguous create intent across target changes", async () => {
+    const f = fixture();
+    f.loseIssueResponse();
+    await expect(routeSlackThreadEvent(root, f.config, f.fetcher)).rejects.toThrow();
+    f.issues.splice(0);
+    await expect(routeSlackThreadEvent(root, { ...f.config, ...team }, f.fetcher)).rejects.toThrow("ambiguous_issue_create");
+    expect(f.issuePosts).toBe(1);
+  });
+  it("creates new tasks for the Team and isolates fresh Team scopes", async () => {
+    const f = fixture();
+    const config = { ...f.config, multicaAssigneeType: "squad" as const, multicaAssigneeId: "team" };
+    await routeSlackThreadEvent(root, config, f.fetcher);
+    expect(f.issues[0]).toMatchObject({ assignee_type: "squad", assignee_id: "team" });
+    await routeSlackThreadEvent(root, { ...config, multicaAssigneeId: "another" }, f.fetcher);
+    expect(f.issuePosts).toBe(2);
+  });
+});
+
+
+describe("投递成功后的 reaction 诊断", () => {
+  it("表情失败不影响建卡，并只记录允许的诊断字段", async () => {
+    const f = fixture();
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    f.config.slackReactionToken = "test-token";
+    f.config.slackReactionName = "eyes";
+    const fetcher: typeof fetch = (input, init) => String(input).endsWith("/reactions.add")
+      ? Promise.resolve(Response.json({ ok: false, error: "missing_scope", detail: "private-response" }))
+      : f.fetcher(input, init);
+    expect((await routeSlackThreadEvent(root, f.config, fetcher)).action).toBe("created");
+    expect(warning).toHaveBeenCalledWith("relay_reaction", {
+      eventId: expect.any(String), reason: "reaction_failed", errorCode: "missing_scope", httpStatus: 200,
+    });
+    expect(JSON.stringify(warning.mock.calls)).not.toContain("private-response");
   });
 });

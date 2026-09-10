@@ -386,3 +386,89 @@ describe("取消和恢复", () => {
     expect(f.reactions.get(root.messageTs)![0]!.users).toContain("U1");
   });
 });
+
+
+describe("Agent 与 Team 归属的取消兼容", () => {
+  it("使用新 Agent 配置取消，不依赖旧 multicaAgentId", async () => {
+    const f = fixture();
+    f.config.multicaAssigneeType = "agent";
+    f.config.multicaAssigneeId = "new-agent";
+    delete f.config.multicaAgentId;
+    await f.route();
+    f.runs[0]!.agent_id = "new-agent";
+    expect(f.issues[0]!.assignee_id).toBe("new-agent");
+    expect((await f.route(cancel)).action).toBe("cancelled");
+    expect(f.cancelPosts()).toHaveLength(1);
+  });
+
+  it("Agent 模式仍拒绝同一卡片中其他执行者的活动运行", async () => {
+    const f = fixture();
+    await f.route();
+    f.runs[0]!.agent_id = "another-agent";
+    await expect(f.route(cancel)).rejects.toThrow("invalid_issue_scope");
+    expect(f.cancelPosts()).toHaveLength(0);
+  });
+
+  it("Team 取消绑定同一 Issue 的多个 Agent 运行，并保留后续新增运行", async () => {
+    const f = fixture();
+    f.config.multicaAssigneeType = "squad";
+    f.config.multicaAssigneeId = "team";
+    delete f.config.multicaAgentId;
+    await f.route();
+    f.runs[0]!.agent_id = "leader";
+    f.newRun("member-run").agent_id = "member";
+    f.loseCancel();
+    await expect(f.route(cancel)).rejects.toThrow("lost cancel");
+    f.newRun("later-run").agent_id = "later-member";
+    await expect(f.route(cancel)).rejects.toThrow("lost cancel");
+    await expect(f.route(cancel)).rejects.toThrow("cancellation_new_run");
+    expect(f.cancelPosts()).toHaveLength(2);
+    expect(f.runs.map((run) => run.status)).toEqual(["cancelled", "cancelled", "running"]);
+    expect(f.reactions.get(root.messageTs)![0]!.users).toContain("U1");
+  });
+
+  it("Team 正常取消后清理标记，重复取消不重复发送", async () => {
+    const f = fixture();
+    f.config.multicaAssigneeType = "squad";
+    f.config.multicaAssigneeId = "team";
+    delete f.config.multicaAgentId;
+    await f.route();
+    f.runs[0]!.agent_id = "leader";
+    f.newRun("member-run").agent_id = "member";
+    expect((await f.route(cancel)).action).toBe("cancelled");
+    expect(f.cancelPosts()).toHaveLength(2);
+    expect(f.reactions.get(root.messageTs)![0]!.users).not.toContain("U1");
+    const count = f.calls.length;
+    expect((await f.route(cancel)).action).toBe("cancelled");
+    expect(f.calls).toHaveLength(count);
+  });
+
+  it.each([
+    { issue_id: "another-issue" },
+    { workspace_id: "another-workspace" },
+  ])("Team 也拒绝越界运行：%j", async (change) => {
+    const f = fixture();
+    f.config.multicaAssigneeType = "squad";
+    f.config.multicaAssigneeId = "team";
+    await f.route();
+    Object.assign(f.runs[0]!, change);
+    await expect(f.route(cancel)).rejects.toThrow("invalid_multica_response");
+    expect(f.cancelPosts()).toHaveLength(0);
+  });
+
+  it.each([true, false])("迁移期旧 Agent 的取消仅在显式兼容时放行：%s", async (allowLegacy) => {
+    const f = fixture();
+    await f.route();
+    f.config.multicaAssigneeType = "squad";
+    f.config.multicaAssigneeId = "team";
+    f.config.multicaThreadScopeId = "agent";
+    if (allowLegacy) f.config.multicaLegacyAgentId = "agent";
+    if (allowLegacy) {
+      expect((await f.route(cancel)).action).toBe("cancelled");
+      expect(f.cancelPosts()).toHaveLength(1);
+    } else {
+      await expect(f.route(cancel)).rejects.toThrow("invalid_issue_scope");
+      expect(f.cancelPosts()).toHaveLength(0);
+    }
+  });
+});
