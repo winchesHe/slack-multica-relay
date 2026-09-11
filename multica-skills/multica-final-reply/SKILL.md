@@ -13,7 +13,7 @@ description: 在 Multica 的 Slack Task Router 需要向原线程发送已获授
 2. 执行 `rtk proxy python3 <本 Skill 路径>/scripts/run_context.py --issue <当前 Issue UUID> --output <任务私有目录/context.json>`。脚本按真实 `MULTICA_TASK_ID` 采集当前 run、Agent 配置和日志，输出统计、成果证据与任务链接。任务编号缺失时自动查询；工作区 slug 和网页地址优先读取运行环境的 `FINAL_REPLY_WORKSPACE_SLUG`、`FINAL_REPLY_APP_URL`，缺失时再查工作区和 CLI 配置。已有值可通过 `--issue-identifier`、`--workspace-slug`、`--app-url` 传入，优先使用。信息仍不完整时省略链接，继续返回统计。脚本不选择其他 run，不轮询等日志补齐。
 3. 采集成功时读取输出，根据业务任务从 `code_evidence` 的调用与结果中提取实际处理的 PR、仓库和分支。证据是候选，不等于已完成的成果；排除仅讨论、示例及失败操作。缺失或截断的输出不能当完整证据，必要时按 github-workflow 只读补查。没有 PR 的分支也可展示，但必须有明确的仓库归属和实际分支证据。采集失败或输出不可用时，跳过该输出，依据本轮已有业务证据继续后续组装与发送；省略无法核验的统计和成果字段，不伪造数据、不读取其他 run 或遗留输出补值，不为补齐 Footer 反复重试。辅助采集失败不阻断已获授权的最终答复；原线程、User 身份和发送预检仍须满足下述要求。
 4. 读取 [Footer 展示](references/footer-display.md)，按其规则组装最终正文、Footer context blocks 和包含同样信息的 fallback。
-5. 按 slack Skill 的发送流程，以 User actor 向原 `channelId` 和根 `threadTs` 一次发送完整消息。直接使用它的 `send --as user --channel ... --thread-ts ... --text-file ... --blocks-file ...`，预检与确认参数以该 Skill 当前版本为准。发送成功后结束，不再追加或更新 Footer。结果不明时先回读原线程，遵守 Slack Skill 的失败处理规则，不自动重发。
+5. 按 slack Skill 的发送流程，以 User actor 向 `eventPayload.channelId` 和根线程时间戳 `eventPayload.threadTs` 指定的原 thread 一次发送完整消息。直接使用它的 `send --as user --channel ... --thread-ts ... --text-file ... --blocks-file ...`，预检与确认参数以该 Skill 当前版本为准。发送成功后结束，不再追加或更新 Footer。结果不明时先回读原线程，遵守 Slack Skill 的失败处理规则，不自动重发。
 
 发送身份固定为 User，不因 Bot 未安装或发送失败改用 Bot。当前任务已获授权的普通最终答复无需再次确认发送；本 Skill 不决定是否介入、不扩大业务操作权限，静默条件及外部写入授权遵循 Agent Prompt。
 
