@@ -25,11 +25,11 @@ def write_new(path, value):
 
 def query(command, *, text=False):
     try:
-        result = subprocess.run(["rtk", "proxy", *command], capture_output=True,
+        result = subprocess.run(command, capture_output=True,
                                 text=True, timeout=30, check=True)
         return result.stdout if text else json.loads(result.stdout)
-    except (subprocess.SubprocessError, ValueError):
-        raise RunContextError("只读查询失败；请检查 CLI 认证和目标") from None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        raise RunContextError("只读查询失败；请检查 CLI 安装、认证和目标") from None
 
 
 def scope(env):
@@ -98,8 +98,6 @@ def words(message):
             parsed = shlex.split(command)
         if any(char in command for char in (";", "|", "&", "`", "$", "\n", ">", "<")):
             return []
-        if parsed and parsed[0] == "rtk":
-            parsed = parsed[2:] if len(parsed) > 1 and parsed[1] == "proxy" else parsed[1:]
         return parsed
     except (ValueError, TypeError):
         return []

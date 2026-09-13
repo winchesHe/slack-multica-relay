@@ -1,19 +1,25 @@
 # Slack → Multica Relay 协作规则
 
+## 项目规则与智能体规则的适用范围
+
+- 本文件约束本仓库维护与 Multica 操作，不是所有智能体共用的运行 Prompt。Relay 负责事件准入、投递、任务映射与恢复；具体业务流程由目标智能体自己的 instructions 和 Skills 决定。
+- `AGENT-PROMPT.md` 及 `multica-skills/multica-final-reply/` 仅属于 `Slack Task Router (Codex)`。该 Router 的 Slack 意图判断、静默条件、原 thread 回复、个人表达、owner 例外及发布/部署限制，不自动适用于本项目中讨论、创建或管理的其他智能体/小队。
+- 新智能体/小队按用户目标独立确定任务入口、Skill 路由、结果接收位置和写入边界，单独维护其 Prompt；不默认复制 Router 的 Prompt 或绑定其专属 Skills。任务材料包含 Slack 链接、使用同一 Relay、工作区或 Runtime，都不构成继承 Router 规则的依据；独立配置也不自动授予写入权限。
+
 ## Multica 操作入口
 
 - Multica 的工作区、智能体、项目、任务、运行记录、Skills 和配置管理必须使用 `multica` CLI；不要用浏览器点击或填表代替 CLI。
-- 先执行 `rtk proxy multica --help` 和具体子命令的 `--help`，以当前安装版本为准。CLI 缺失、认证失败或能力不足时先定位原因并报告；只有用户明确要求浏览器操作时才切换。
-- 命令统一经 `rtk` 执行；Multica 使用 `rtk proxy multica` 保留原始 JSON。结构化读取显式加 `--output json`，不要解析表格中的截断 ID。
+- 先执行 `multica --help` 和具体子命令的 `--help`，以当前安装版本为准。CLI 缺失、认证失败或能力不足时先定位原因并报告；只有用户明确要求浏览器操作时才切换。
+- 直接执行原生命令。Multica 结构化读取显式加 `--output json`，不要解析表格中的截断 ID。
 - 此处命令是操作说明，不授权线上修改。按当前用户请求限定写入对象与字段，写前读取现状、写后按同一 ID 回读；结果不明时先查现状，不盲目重复写入。
 
 ## 发现当前服务与工作区
 
 ```bash
-rtk proxy multica version
-rtk proxy multica config show
-rtk proxy multica workspace get --output json
-rtk proxy multica workspace list --output json
+multica version
+multica config show
+multica workspace get --output json
+multica workspace list --output json
 ```
 
 - `config show` 查看当前配置的服务地址和默认工作区；`workspace get` 不带参数时读取当前默认工作区。核对返回的 `id`、`name`、`slug`，不要从当前目录推断工作区。
@@ -24,7 +30,7 @@ rtk proxy multica workspace list --output json
 ```bash
 mc_server='https://multica.devops.moego.dev'
 mc_workspace='<workspace-id>'
-mc() { rtk proxy multica --server-url "$mc_server" --workspace-id "$mc_workspace" "$@"; }
+mc() { multica --server-url "$mc_server" --workspace-id "$mc_workspace" "$@"; }
 mc workspace get "$mc_workspace" --output json
 ```
 
@@ -32,7 +38,7 @@ mc workspace get "$mc_workspace" --output json
 
 ## 发现对象与读取上下文
 
-先 list，再 get；按名称匹配后核对完整 ID、工作区和关联对象。Agent 名称字段是 `name`，Project 名称字段是 `title`。本项目常用 Agent 为 `Slack Task Router (Codex)`，Project 为 `Slack Task Router 任务看板`；不要把旧会话里的 ID 当作当前配置。
+先 list，再 get；按名称匹配后核对完整 ID、工作区和关联对象。Agent 名称字段是 `name`，Project 名称字段是 `title`。维护现有 Slack Router 时，常用 Agent 为 `Slack Task Router (Codex)`，Project 为 `Slack Task Router 任务看板`；其他智能体按当前请求另行定位，不默认选中 Router。不要把旧会话里的 ID 当作当前配置。
 
 | 目的 | 命令（使用上面的 `mc`） |
 | --- | --- |
@@ -75,7 +81,7 @@ mc workspace get "$mc_workspace" --output json
 - 当前 CLI 的 Prompt 参数是 `--instructions`，没有 `--instructions-file`。多行候选先写入仓库外的 UTF-8 文件，用参数数组传入 CLI，禁止将正文拼成 shell 命令。以下示例仅在修改已获授权且候选已核对后执行；文件不得包含凭据：
 
 ```bash
-rtk proxy python3 - "$mc_server" "$mc_workspace" '<agent-id>' '<候选文件绝对路径>' <<'PY'
+python3 - "$mc_server" "$mc_workspace" '<agent-id>' '<候选文件绝对路径>' <<'PY'
 import json, subprocess, sys
 from pathlib import Path
 server, workspace, agent, file = sys.argv[1:]
@@ -94,5 +100,5 @@ PY
 ## 本项目资料与验证
 
 - 链路和验证命令读 `README.md`；配置及部署读 `SETUP-GUIDE.zh-CN.md`；恢复与幂等边界读 `REVIEW.md`。
-- `AGENT-PROMPT.md` 是仓库的 Prompt 真源。调整 Prompt 时先对照线上 `instructions`，保留线上新增且仍有效的规则；文件变更不会自动同步到 Multica，发布必须显式使用 CLI 并回读。
-- 安装依赖：`rtk proxy pnpm install --frozen-lockfile`；业务代码变更：`rtk proxy pnpm test`、`rtk proxy pnpm lint`。仅修改操作文档时核对 CLI 帮助、相关只读命令和 `rtk git diff --check`，不为文档验证执行线上写入。
+- `AGENT-PROMPT.md` 仅是 `Slack Task Router (Codex)` 的 Prompt 真源。调整任一智能体 Prompt 时，对照该目标的线上 `instructions` 与其独立维护的源文件，保留线上新增且仍有效的规则；文件变更不会自动同步到 Multica，发布必须显式使用 CLI 并回读。
+- 安装依赖：`pnpm install --frozen-lockfile`；业务代码变更：`pnpm test`、`pnpm lint`。仅修改操作文档时核对 CLI 帮助、相关只读命令和 `git diff --check`，不为文档验证执行线上写入。

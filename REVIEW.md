@@ -26,7 +26,7 @@ Relay 的频道和发送者准入同时支持白名单与黑名单。白名单�
 
 daemon将Agent instructions写入工作目录AGENTS.md。Skills由本地配置及Workspace指派合入任务环境；不是复制桌面聊天。
 
-[Codex审批处理](https://github.com/multica-ai/multica/blob/v0.4.36/server/pkg/agent/codex.go#L2558)会自动接受命令/文件请求。当前Prompt决定业务操作与写回边界，但不构成强制工具审批。Project不要未经核对就绑定整个个人代码目录为local_directory。
+[Codex审批处理](https://github.com/multica-ai/multica/blob/v0.4.36/server/pkg/agent/codex.go#L2558)会自动接受命令/文件请求。各智能体自己的 Prompt 决定业务操作与写回边界，但不构成强制工具审批；本仓库 `AGENT-PROMPT.md` 仅属于 Slack Task Router。Project不要未经核对就绑定整个个人代码目录为local_directory。
 
 ## 本地验证与剩余验收
 

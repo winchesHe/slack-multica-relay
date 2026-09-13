@@ -10,8 +10,10 @@
 
 ## 2. Multica
 
+以下 Prompt、回复 Skill 和回复身份配置针对 `Slack Task Router (Codex)`。配置其他智能体或小队时，单独确定其任务入口、instructions、Skills、结果接收位置与操作权限，不因使用 Relay 或 Slack 链接而继承 Router 的意图判断、静默、原 thread 回复及发布/部署限制。
+
 - 在目标 Workspace 创建专用 Project 和 Agent，绑定需要使用的 Runtime。
-- 将 [AGENT-PROMPT.md](AGENT-PROMPT.md) 同步为 Agent instructions。
+- 将 [AGENT-PROMPT.md](AGENT-PROMPT.md) 仅同步为 Slack Task Router 的 instructions。
 - 发布并绑定 [multica-final-reply](multica-skills/multica-final-reply/SKILL.md) 及业务所需 Skills。工具认证与权限按实际绑定 Skill 配置；频道和发送者准入由 Relay 统一校验。
 - 默认回复由 `multica-final-reply` 调用已绑定的 Slack Skill，以 User actor 发送到原 thread；凭据与身份预检遵循该 Slack Skill。启用下文可选 adapter 时，由 adapter 使用 `SLACK_USER_TOKEN` 发送。
 - 回读 Agent 的 Runtime、权限和并发。初期并发2即可；Mac 休眠/断网会影响执行。
@@ -20,9 +22,9 @@
 
 Agent instructions 写入任务工作目录 AGENTS.md。Multica daemon 为 Codex 准备任务环境；桌面聊天上下文不会自动复制。现有 Codex 适配器会自动批准工具请求，Prompt/Skills 只能构成行为合同；不可绕过的写审批需要执行端或工具端支持。
 
-### 最终回复与模型来源
+### Slack Task Router 最终回复与模型来源
 
-[AGENT-PROMPT.md](AGENT-PROMPT.md) 指向已绑定的 `multica-final-reply`。默认由该 Skill 的 `scripts/run_context.py` 读取当前 run、所属 Agent 配置和运行日志，再按 [Footer 展示](multica-skills/multica-final-reply/references/footer-display.md) 通过 Slack Skill 发送；风格与表情沿用该 Skill 的 references。本 PR 不会自动替换这些指令或线上绑定。
+[AGENT-PROMPT.md](AGENT-PROMPT.md) 指向 Router 已绑定的 `multica-final-reply`。默认由该 Skill 的 `scripts/run_context.py` 读取当前 run、所属 Agent 配置和运行日志，再按 [Footer 展示](multica-skills/multica-final-reply/references/footer-display.md) 通过 Slack Skill 发送；风格与表情沿用该 Skill 的 references。本地文件变更不会自动替换这些指令或线上绑定。
 
 采集器在隔离运行中使用 `MULTICA_SERVER_URL`、`MULTICA_WORKSPACE_ID` 和 `MULTICA_TASK_ID`。任务链接使用 Agent 环境中的 `FINAL_REPLY_APP_URL`（HTTPS 网页根地址）和 `FINAL_REPLY_WORKSPACE_SLUG`；可用已有详情通过 `--issue-identifier`、`--workspace-slug`、`--app-url` 显式传入。缺少链接信息时省略链接，继续回复。
 

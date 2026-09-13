@@ -2,6 +2,12 @@
 
 在获准频道中 @真人或 User Group，把请求交给 Multica 的专用 Agent，执行环境可以是本地 Codex。适配 Vercel Functions、EdgeOne Cloud Functions 与 Cloudflare Workers，共用同一套处理逻辑。
 
+## 适用范围
+
+Relay 的事件准入、投递、任务映射与恢复是通用能力。本文配套的 [AGENT-PROMPT.md](AGENT-PROMPT.md) 和 [multica-final-reply](multica-skills/multica-final-reply/SKILL.md) 是 `Slack Task Router (Codex)` 的专属配置；其中的意图判断、静默、原 thread 回复及发布/部署限制不自动适用于其他智能体或小队。
+
+新智能体按自己的任务目标配置独立 instructions、Skills、结果接收位置与操作权限。即使输入是 Slack thread 链接，或复用同一 Relay、工作区、Runtime，也不默认采用 Router 的配置。维护时先按 [AGENTS.md](AGENTS.md) 确认当前目标。
+
 ## 链路
 
 `Slack → 签名与准入校验 → QStash 持久化 → HTTP 200 → 消费函数 → Multica Issue → Agent/Runtime → Slack 回复`
@@ -15,7 +21,7 @@
 - 描述首行的 `relay-thread` 标记和 `relay-payload:v1` 数据区块用于 KV 映射过期后的恢复，请勿删除或修改。读取兼容历史裸 JSON；损坏的数据会停止恢复，不自动重新建卡。
 - 写请求结果不明时先查回读；查不到则保留 ambiguous 错误，不盲目再次 POST。需要人工核对/重放，不承诺 exactly-once。
 - `comment_persisted` 只表示评论保存，实际执行和原 thread 回复要分别验收。
-- Prompt 真源为 [AGENT-PROMPT.md](AGENT-PROMPT.md)，需要明确同步到 Multica Agent instructions。Relay 不调用 Codex 或修改 Multica 源码。
+- Slack Task Router 的 Prompt 真源为 [AGENT-PROMPT.md](AGENT-PROMPT.md)，需要明确同步到该 Agent 的 instructions；其他智能体维护自己的 Prompt。Relay 不调用 Codex 或修改 Multica 源码。
 
 ## 本地验证
 

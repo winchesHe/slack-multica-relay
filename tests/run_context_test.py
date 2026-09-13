@@ -1,6 +1,7 @@
 """验证运行资料整理的归属、统计和代码证据。"""
 import importlib.util
 from pathlib import Path
+import sys
 import unittest
 import tempfile
 from unittest.mock import patch
@@ -18,6 +19,25 @@ class FinalReplyTests(unittest.TestCase):
 
     def message(self, kind, **fields):
         self.data["messages"].append({"seq": len(self.data["messages"]) + 1, "type": kind, "task_id": "run", "issue_id": "issue", **fields})
+
+    def test_query_runs_without_a_command_wrapper(self):
+        with patch.dict(final.os.environ, {"PATH": ""}):
+            self.assertEqual(final.query([sys.executable, "-c", 'print(\'{"status": "ok"}\')']),
+                             {"status": "ok"})
+            self.assertEqual(final.query([sys.executable, "-c", 'print("server_url: https://example.test")'], text=True),
+                             "server_url: https://example.test\n")
+
+    def test_query_reports_cli_failures_without_exposing_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            commands = [
+                [str(Path(directory) / "missing-cli")],
+                [sys.executable, "-c", 'raise SystemExit("private CLI error")'],
+                [sys.executable, "-c", 'print("private invalid JSON")'],
+            ]
+            for command in commands:
+                with self.subTest(command=command), self.assertRaises(final.RunContextError) as error:
+                    final.query(command)
+                self.assertNotIn("private", str(error.exception))
 
     def test_snapshot_selects_current_not_latest_and_omits_private_metadata(self):
         self.run["attribution"] = {"email": "private@example"}
@@ -238,7 +258,7 @@ class FinalReplyTests(unittest.TestCase):
     def test_skill_names_deduplicate_and_tokens_never_render(self):
         self.run.update(model="gpt-6-astra", usage=[{"input_tokens": 999}])
         for _ in range(2):
-            self.message("tool_use", tool="exec_command", input={"command": "/bin/zsh -lc 'rtk proxy cat /skills/slack/SKILL.md'"})
+            self.message("tool_use", tool="exec_command", input={"command": "/bin/zsh -lc 'cat /skills/slack/SKILL.md'"})
             self.message("tool_result", tool="exec_command", output="---\nname: slack\ndescription: test\n---\n正文")
         stats = final.statistics(self.data)
         self.assertEqual(stats["tools"], 2)
