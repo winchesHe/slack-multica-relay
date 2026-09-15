@@ -9,23 +9,12 @@
 - 模型来自当前 run 所属 Agent 的 `model` 配置，`model_source=agent_config`；展示的是配置模型。不能使用模型自我介绍、历史快照或示例补值。
 - 运行记录只供组织回复，不将原始日志、凭据或私有路径发到 Slack。脚本返回的缺失字段不需要在面向用户的 Footer 中解释或占位。
 
-## 完整消息示例
+## Footer 示例
 
-以下为可解析的 `--blocks-file` 数组，展示正文、统计与 Multica 入口、PR 行的布局。正文按 slack Skill 选择组件，Footer 按主流程使用 `mrkdwn` 文本对象。所有内容、编号、链接和统计均为虚构示例，实际发送时替换为本轮证据；缺失字段仍按上文省略。
+以下两个 context blocks 追加到正文 blocks 后。内容均为虚构示例，实际值与缺失字段按上文处理。
 
 ```json
 [
-  {
-    "type": "rich_text",
-    "elements": [
-      {
-        "type": "rich_text_section",
-        "elements": [
-          {"type": "text", "text": "示例：已整理本轮结果。"}
-        ]
-      }
-    ]
-  },
   {
     "type": "context",
     "elements": [
@@ -47,12 +36,11 @@
 ]
 ```
 
-对应的 `--text-file` fallback 独立保留相同结论、统计、编号、分支及真实 URL，供通知与无障碍读取；其文本不直接作为 Footer 的展示内容：
+对应的 fallback 片段（追加到正文 fallback 后）：
 
 ```text
-示例：已整理本轮结果。
 耗时 2分10秒 · 模型：示例模型 · 8 tools · 2 skills · GRM-87 https://multica.example/grm/issues/00000000-0000-4000-8000-000000000001
 app · feature/example · PR #123 https://github.com/example/app/pull/123
 ```
 
-发送前按主流程核对实际 payload：Multica 入口仍在统计行末尾，PR 行在其下方；Footer 中链接使用 `<URL|标题>`，只对普通文本转义，不把链接定界符整体转成 `&lt;` / `&gt;`。验收期望是编号本身可点击、旁边不重复展示裸 URL，分支显示为行内代码；fallback 保留对应目标。仅检查发送成功或正文包含 URL，不能证明 Footer 展示正确。
+只对普通文本转义，不把链接定界符整体转成 `&lt;` / `&gt;`。
