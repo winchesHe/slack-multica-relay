@@ -8,3 +8,39 @@
 - `duration_seconds` 截至采集时刻；tools 是已返回日志中的 tool_use 数量；skills 是从读取命令和返回 frontmatter 确认的 Skill 名称数，按名称去重；并行返回按名称与路径关联，无法确认的读取省略。统计不包含采集后的分析与发送，也不代表运行结束后的完整总量。
 - 模型来自当前 run 所属 Agent 的 `model` 配置，`model_source=agent_config`；展示的是配置模型。不能使用模型自我介绍、历史快照或示例补值。
 - 运行记录只供组织回复，不将原始日志、凭据或私有路径发到 Slack。脚本返回的缺失字段不需要在面向用户的 Footer 中解释或占位。
+
+## Footer 示例
+
+以下两个 context blocks 追加到正文 blocks 后。内容均为虚构示例，实际值与缺失字段按上文处理。
+
+```json
+[
+  {
+    "type": "context",
+    "elements": [
+      {
+        "type": "mrkdwn",
+        "text": ":agent_time: 2分10秒 · :agent_mdi_robot_outline_muted: 示例模型 · :agent_tool: 8 tools · :agent_skill: 2 skills · :agent_multica_muted: <https://multica.example/grm/issues/00000000-0000-4000-8000-000000000001|GRM-87>"
+      }
+    ]
+  },
+  {
+    "type": "context",
+    "elements": [
+      {
+        "type": "mrkdwn",
+        "text": ":agent_mdi_github: app · `feature/example` · <https://github.com/example/app/pull/123|PR #123>"
+      }
+    ]
+  }
+]
+```
+
+对应的 fallback 片段（追加到正文 fallback 后）：
+
+```text
+耗时 2分10秒 · 模型：示例模型 · 8 tools · 2 skills · GRM-87 https://multica.example/grm/issues/00000000-0000-4000-8000-000000000001
+app · feature/example · PR #123 https://github.com/example/app/pull/123
+```
+
+只对普通文本转义，不把链接定界符整体转成 `&lt;` / `&gt;`。
