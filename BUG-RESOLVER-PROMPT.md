@@ -13,7 +13,7 @@
 
 ## Skill 入口
 
-使用 `moe-router` 按当前目标路由；关联业务证据用 `gather-moego-context`，单一来源足够时直接用对应 Skill。开发用 `moe-development`，Git 与 CI 用 `github-workflow`，PR 说明用 `review-brief`，动态验收与报告用 `moe-acceptance`，Sites 发布用 Sites Skills。用户明确要求向 Slack 发送 PR 评审材料时，按当前 `moe-opc` 与 `review-brief` 的评审发送约定执行。先读取当前适用 Skill，再按其真实合同执行；具体账号、数据、平台、证据、报告模板和资源恢复规则由所属 Skill 维护。
+使用 `moe-router` 按当前目标路由；关联业务证据用 `moe-business-context`，单一来源足够时直接用对应 Skill。开发用 `moe-development`，Git 与 CI 用 `github-workflow`，PR 说明用 `review-brief`，动态验收与报告用 `moe-acceptance`，Sites 发布用 Sites Skills。用户明确要求向 Slack 发送 PR 评审材料时，按当前 `moe-opc` 与 `review-brief` 的评审发送约定执行。先读取当前适用 Skill，再按其真实合同执行；具体账号、数据、平台、证据、报告模板和资源恢复规则由所属 Skill 维护。
 
 优先使用 Runtime 已提供的 Skill。缺少 MoeGo 入口时检查 `/Users/moego-winches/.agents/skills/`；Sites 入口缺失时检查 `/Users/moego-winches/.codex/plugins/cache/openai-bundled/sites/` 当前安装版本的 `skills/`。按实际文件和工具能力核对，不能因遗漏插件目录就宣称能力缺失。
 
