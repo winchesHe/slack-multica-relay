@@ -3,7 +3,7 @@
 ## 项目规则与智能体规则的适用范围
 
 - 本文件约束本仓库维护与 Multica 操作，不是所有智能体共用的运行 Prompt。Relay 负责事件准入、投递、任务映射与恢复；具体业务流程由目标智能体自己的 instructions 和 Skills 决定。
-- `AGENT-PROMPT.md` 及 `multica-skills/multica-final-reply/` 仅属于 `Slack Task Router (Codex)`。该 Router 的 Slack 意图判断、静默条件、原 thread 回复、个人表达、owner 例外及发布/部署限制，不自动适用于本项目中讨论、创建或管理的其他智能体/小队。
+- `AGENT-PROMPT.md` 及 `multica-skills/` 下的 `multica-slack-intent`、`multica-final-reply` 仅属于 `Slack Task Router (Codex)`，只通过 Multica 工作区 Skill 绑定给该 Router，不放入个人全局 skill 目录或合集仓库。该 Router 的 Slack 意图判断、静默条件、原 thread 回复、个人表达、owner 例外及发布/部署限制，不自动适用于本项目中讨论、创建或管理的其他智能体/小队。
 - 新智能体/小队按用户目标独立确定任务入口、Skill 路由、结果接收位置和写入边界，单独维护其 Prompt；不默认复制 Router 的 Prompt 或绑定其专属 Skills。任务材料包含 Slack 链接、使用同一 Relay、工作区或 Runtime，都不构成继承 Router 规则的依据；独立配置也不自动授予写入权限。
 
 ## Multica 操作入口
