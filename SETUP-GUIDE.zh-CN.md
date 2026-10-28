@@ -14,7 +14,7 @@
 
 - 在目标 Workspace 创建专用 Project 和 Agent，绑定需要使用的 Runtime。
 - 将 [AGENT-PROMPT.md](AGENT-PROMPT.md) 仅同步为 Slack Task Router 的 instructions。
-- 发布并绑定 [multica-final-reply](multica-skills/multica-final-reply/SKILL.md) 及业务所需 Skills。工具认证与权限按实际绑定 Skill 配置；频道和发送者准入由 Relay 统一校验。
+- 发布并绑定 [multica-slack-intent](multica-skills/multica-slack-intent/SKILL.md)、[multica-final-reply](multica-skills/multica-final-reply/SKILL.md) 及业务所需 Skills。工具认证与权限按实际绑定 Skill 配置；频道和发送者准入由 Relay 统一校验。
 - 默认回复由 `multica-final-reply` 调用已绑定的 Slack Skill，以 User actor 发送到原 thread；凭据与身份预检遵循该 Slack Skill。启用下文可选 adapter 时，由 adapter 使用 `SLACK_USER_TOKEN` 发送。
 - 回读 Agent 的 Runtime、权限和并发。初期并发2即可；Mac 休眠/断网会影响执行。
 - 读取本地 Skills 和 Workspace 指派 Skills 的实际加载结果。数据库 Skill 数量不能单独说明任务可用能力。

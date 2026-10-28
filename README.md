@@ -4,7 +4,7 @@
 
 ## 适用范围
 
-Relay 的事件准入、投递、任务映射与恢复是通用能力。本文配套的 [AGENT-PROMPT.md](AGENT-PROMPT.md) 和 [multica-final-reply](multica-skills/multica-final-reply/SKILL.md) 是 `Slack Task Router (Codex)` 的专属配置；其中的意图判断、静默、原 thread 回复及发布/部署限制不自动适用于其他智能体或小队。
+Relay 的事件准入、投递、任务映射与恢复是通用能力。本文配套的 [AGENT-PROMPT.md](AGENT-PROMPT.md)、[multica-slack-intent](multica-skills/multica-slack-intent/SKILL.md) 和 [multica-final-reply](multica-skills/multica-final-reply/SKILL.md) 是 `Slack Task Router (Codex)` 的专属配置；其中的意图判断、静默、原 thread 回复及发布/部署限制不自动适用于其他智能体或小队。
 
 新智能体按自己的任务目标配置独立 instructions、Skills、结果接收位置与操作权限。即使输入是 Slack thread 链接，或复用同一 Relay、工作区、Runtime，也不默认采用 Router 的配置。维护时先按 [AGENTS.md](AGENTS.md) 确认当前目标。
 
