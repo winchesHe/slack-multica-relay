@@ -22,6 +22,16 @@
 
 Agent instructions 写入任务工作目录 AGENTS.md。Multica daemon 为 Codex 准备任务环境；桌面聊天上下文不会自动复制。现有 Codex 适配器会自动批准工具请求，Prompt/Skills 只能构成行为合同；不可绕过的写审批需要执行端或工具端支持。
 
+### Winches 名下智能体访问权限
+
+`https://multica.devops.moego.dev` 上，Winches He 在 MoeGo、Winches Lab、GRM 三个工作区名下的智能体统一使用 `permission_mode=private`，调用白名单 `invocation_targets=[]`；范围包括已归档的智能体。
+
+同步前先用 `multica user profile get --output json` 核对当前账号，逐个工作区执行 `agent list --include-archived --output json`，仅选择 `owner_id` 等于该账号 ID 的对象。每个对象写前执行 `agent get` 重新核对归属与权限；目标值已满足时跳过，否则只执行 `agent update '<agent-id>' --permission-mode private --output json`，再按同一 ID 回读权限及空白名单。按本仓库规则先提 PR，再使用显式服务地址和工作区 ID 同步。
+
+`private` 对普通成员隐藏智能体，并将调用权限限制为所有者；工作区 owner/admin 仍可查看和管理配置，智能体进程也仍可查看，不能据此承诺只有本人可见。既有共享任务、项目和 Slack 消息的读取权限由各自系统决定。若需要管理员也不可见，应使用仅本人加入的独立工作区，并单独处理历史内容。
+
+收紧权限后，其他人发起的智能体协作链会受到调用权限限制；定时或系统触发链需要保留可归因到所有者的身份。权限保存与回读只确认配置，不代表定时任务或 Slack 链路已执行成功。
+
 ### Slack Task Router 最终回复与模型来源
 
 [AGENT-PROMPT.md](AGENT-PROMPT.md) 指向 Router 已绑定的 `multica-final-reply`。默认由该 Skill 的 `scripts/run_context.py` 读取当前 run、所属 Agent 配置和运行日志，再按 [Footer 展示](multica-skills/multica-final-reply/references/footer-display.md) 通过 Slack Skill 发送；风格与表情沿用该 Skill 的 references。本地文件变更不会自动替换这些指令或线上绑定。
