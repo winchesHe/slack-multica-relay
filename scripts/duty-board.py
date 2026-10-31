@@ -497,12 +497,6 @@ def render_slack(board, now, board_link=None):
     total = board['total']
     lines += ['', f"**累计（{board['start'][5:]} 起{total['scopeNote']}）**：{intake(total)} · 已上线 {total['released']} 个"
               f" · 已回告 {total['notified']} 个 · 客户回应 {total['responded']} 个"]
-    unrejectable = items['unrejectable']
-    notes = [f'- {warning}' for warning in board['warnings']]
-    if unrejectable:
-        notes.append(f"- {ATTENTION_TITLES['unrejectable']}：" + '、'.join(bug['identifier'] for bug, _ in unrejectable))
-    if notes:
-        lines += ['', '**⚠️ 数据提醒**'] + notes
     if board_link:
         lines += ['', f'完整看板：[Multica 常驻任务]({board_link})']
     return '\n'.join(lines) + '\n'

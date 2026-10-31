@@ -317,8 +317,10 @@ class SlackReadResilienceTests(unittest.TestCase):
                 self.assertEqual((board['total']['confirmed'], board['total']['rejected']), (2, 0))
                 self.assertEqual(threads.call_count, 2)
                 self.assertEqual(len(board['warnings']), 1)
-                for render in (board_module.render_markdown, board_module.render_slack):
-                    self.assertIn('B1 Slack 交付 thread 读取失败', render(board, NOW))
+                self.assertIn('B1 Slack 交付 thread 读取失败', board_module.render_markdown(board, NOW))
+                slack = board_module.render_slack(board, NOW)
+                self.assertNotIn(board['warnings'][0], slack)
+                self.assertIn('⚪ 待审查 2：', slack)
                 payload = board_module.html_payload(board, NOW, None, '无索引')
                 self.assertIn('B1 Slack 交付 thread 读取失败，审查标记未核对', board_module.render_html(payload))
 
@@ -410,6 +412,11 @@ class BoardTests(unittest.TestCase):
         self.assertEqual([entry[0]['identifier'] for entry in items['notify']], ['B1'])
         self.assertEqual(items['review'][0][1], '2 天')
         self.assertEqual([entry[0]['identifier'] for entry in items['unrejectable']], ['B2'])
+        slack = board_module.render_slack(board, NOW, 'https://m/board')
+        self.assertNotIn('数据提醒', slack)
+        self.assertNotIn(board_module.ATTENTION_TITLES['unrejectable'], slack)
+        self.assertIn('- 已上线待回告 1：[B1](https://m/B1)', slack)
+        self.assertIn('完整看板：[Multica 常驻任务](https://m/board)', slack)
 
     def test_missing_delivery_link_is_reported_only_after_pr_or_delivery(self):
         queued = {**bug('Q1', '2026-10-13', 'fixing', []), 'deliveryPermalink': None}
