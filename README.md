@@ -82,7 +82,7 @@ Cloudflare 使用 `pnpm dev:cf`、`pnpm build:cf` 和 `pnpm deploy:cf`，共享�
 
 ## 每日值守调查闭环
 
-每日流程保留两个 Agent：「GRM 每日 Bug 值守」和独立的「GRM 每日值守看板」。值守 Agent 每天北京时间 03:00 按固定阶段执行：三源采集 → 固定本轮清单 → 两张调查工位卡并行调查与留档 → 汇总结论 → 固定修复队列（全局一次一项） → 逐条完整交付。看板 Agent 的规则、脚本和 10:00 定时保持原样。
+每日流程保留两个 Agent：「GRM 每日 Bug 值守」和独立的「GRM 每日值守看板」。值守 Agent 每天北京时间 02:00 按固定阶段执行：三源采集 → 固定本轮清单 → 两张调查工位卡并行调查与留档 → 汇总结论 → 固定修复队列（全局一次一项） → 逐条完整交付。看板 Agent 的规则、脚本和 10:00 定时保持原样。
 
 值守规则在 [DAILY-BUG-DUTY-PROMPT.md](DAILY-BUG-DUTY-PROMPT.md)，扫描 Autopilot 的任务正文在 [DAILY-BUG-SCAN-PROMPT.md](DAILY-BUG-SCAN-PROMPT.md)。采集按每来源最后成功日期补到昨天，已成功窗口复用。调查只补读指定原帖、会话或 thread，不调用日采集，Facebook、Intercom 不重复采集。
 
@@ -106,7 +106,7 @@ python3 scripts/duty-queue.py \
 
 隔离验证可传 `--snapshot <脱敏 JSON>`，输入为 `{"issues": [...], "runs": [...]}`，不访问服务。定向检查为 `python3 -m unittest tests/duty_queue_test.py`。
 
-线上同步先创建流程 PR，再按 AGENTS.md 核对线上 instructions 和 Autopilot description，仅更新对应字段及扫描的 03:00 Asia/Shanghai 定时。Prompt 中的 `<调度器提交 SHA>` 绑定本 PR 已推送并回读的完整提交 SHA，运行时精确 fetch/show 此版本，避免 PR 尚未合入时误用旧 origin/main 调度器；后续改动同步时重新绑定版本。发布时保留值守并发 1、Runtime、模型与环境；新轮仅由调查调度器在调查阶段切换为 2，汇总前恢复为 1。看板仍为 10:00 阶段快照。配置回读不等同于真实每日周期完成，不为验证配置擅自触发新采集。
+线上同步先创建流程 PR，再按 AGENTS.md 核对线上 instructions 和 Autopilot description，仅更新对应字段及扫描的 02:00 Asia/Shanghai 定时（cron 为 `0 2 * * *`）。Prompt 中的 `<调度器提交 SHA>` 绑定本 PR 已推送并回读的完整提交 SHA，运行时精确 fetch/show 此版本，避免 PR 尚未合入时误用旧 origin/main 调度器；后续改动同步时重新绑定版本。发布时保留值守并发 1、Runtime、模型与环境；新轮仅由调查调度器在调查阶段切换为 2，汇总前恢复为 1。看板仍为 10:00 阶段快照。配置回读不等同于真实每日周期完成，不为验证配置擅自触发新采集。
 
 ## 每日值守看板
 
