@@ -36,6 +36,8 @@ Relay 仍在准备单条事件时，用现有 PAT 读取一次配置并冻结到
 
 配置 Request URL 为 `https://<当前部署>/api/slack/events`，对应 Signing Secret 填入部署环境。新增 scopes 后重新安装。只修改已授权用于 Relay 的 App。
 
+作者过滤使用 `users.info(event.user)` 返回的 `is_bot`，不按消息的 `bot_id`、`app_id` 或 `bot_message` 来源标记过滤。真人通过 User Token 发送的 App 消息可以继续触发，真正的 Bot 作者被忽略；编辑和删除仍不处理。作者查询沿用上述 Bot 优先、User 兜底的配置选择规则，选中的 Token 还需要 `users:read`，调用失败不切换身份。响应必须包含匹配的作者 ID 和布尔值 `is_bot`；查询失败或身份无法确认时返回可重试 503，不入队。查询最多700毫秒，队列发布最多2秒，并受2750毫秒入站剩余总预算限制。
+
 `SLACK_TEAM_ID` 必填，`SLACK_TARGET_USER_IDS` 和 `SLACK_TARGET_SUBTEAM_IDS` 至少一个必填；`SLACK_ALLOWED_CHANNEL_IDS` 必须显式填写逗号分隔的频道 ID 或 `all`，缺失或空值拒绝启动。`SLACK_BLOCKED_CHANNEL_IDS`、`SLACK_ALLOWED_SENDER_IDS` 和 `SLACK_BLOCKED_SENDER_IDS` 可选，黑名单优先于白名单。后续问答仍需再次 mention。
 
 ## 4. Vercel

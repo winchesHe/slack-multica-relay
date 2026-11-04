@@ -12,8 +12,9 @@ Relay 的事件准入、投递、任务映射与恢复是通用能力。本文�
 
 `Slack → 签名与准入校验 → QStash 持久化 → HTTP 200 → 消费函数 → Multica Issue → Agent/Runtime → Slack 回复`
 
-- 只处理当前消息明确 mention 的事件。Team 必填；频道和发送者支持白名单（可设为 `all`）及黑名单，黑名单优先。Bot、编辑/删除、普通讨论不触发。
-- 入站只等待 QStash 接收；队列负责后台投递及3次重试，耗尽后在其失败队列查看/重放。
+- 只处理当前消息明确 mention 的 message 事件。Team 必填；频道和发送者支持白名单（可设为 `all`）及黑名单，黑名单优先。签名、消息结构和权限检查后，通过 `users.info(event.user)` 判断作者，仅 `user.is_bot=true` 的作者被当作 Bot 忽略；真人使用 User Token 发送时，即使带有 `bot_id`、`app_id` 或 `bot_message` 标记也继续处理。编辑/删除、普通讨论不触发。
+- 作者查询失败、超时、ID 不匹配或缺少布尔值 `is_bot` 时返回可重试 503，不入队。查询使用现有 reaction Token 的选择规则（Bot 优先，未配置时 User），需要 `users:read`，失败不切换身份。
+- 入站等待有界的作者查询和 QStash 接收；队列负责后台投递及3次重试，耗尽后在其失败队列查看/重放。
 - 每个 Slack thread 通过普通 Issue API 创建独立任务卡，不经过 Autopilot 同标题60秒去重。
 - thread scope 包含 Workspace、Project、稳定的路由标识；默认不同 Agent/Team 不采用彼此的映射。
 - 同 thread 后续消息追加评论。QStash 按 thread 限并发，Redis 锁与消息状态处理重投。
@@ -48,7 +49,7 @@ pnpm lint
 | 消费 rejected / HTTP200 | 无效输入或确定性失败，retryable=false，不继续队列重试                      |
 | 消费503                 | 保留队列重试/DLQ责任，原因包括 timeout、thread*lock_busy、ambiguous*\* |
 
-`GET /api/health` 仅证明函数可响应。消费有45秒整体预算，部署函数上限60秒；入站发布请求超时2秒。平台冷启动、网络延迟与配额仍须实测。
+`GET /api/health` 仅证明函数可响应。消费有45秒整体预算，部署函数上限60秒；作者查询最多700毫秒，入站发布最多2秒，且受从入站开始计时的2750毫秒剩余预算限制。平台冷启动、网络延迟与配额仍须实测。
 
 ## 迁移到 Multica Team
 
