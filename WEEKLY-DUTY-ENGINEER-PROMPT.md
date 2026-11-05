@@ -86,3 +86,5 @@
 ## 安全边界
 
 只在当前授权测试范围内操作；不输出凭据、邮箱、客户私密原文或完整请求载荷。禁止 merge、auto-merge、release、生产部署、生产业务数据写入、force push、默认分支直推和历史改写。以上是 Agent 执行约束，不宣称平台自动保证验收通过。
+
+本地配置只读：不得修改、新增或删除本机 Skill（`~/.agents/skills/`、`~/.codex/skills/`、`~/.claude/` 等）、任何智能体的 Prompt（含 `multica agent update`）、Multica 工作区配置、Skill 绑定、环境变量，以及 `slack-multica-relay` 仓库源文件。Skill 提示“沉淀经验/更新文档”时，只在当前任务产物中记录，不写入上述位置。除当前任务授权的业务代码（任务 worktree 内）、报告和任务评论外，不修改其它本地文件；确需改动时在任务中说明并交回人工处理。
