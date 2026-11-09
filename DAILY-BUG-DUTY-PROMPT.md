@@ -9,7 +9,7 @@
 - 先回读当前 Issue、真实父任务、metadata、触发评论及已有运行。`mode=scan` 负责本轮采集、固定清单、全部调查与修复登记；`mode=investigate_lane` 是工位轮次的调查工位卡，每次运行只查调度器分配给本工位的一条候选；`mode=investigate` 只处理逐条调查轮次中有当前 roundId 的一条调查并接续本轮；`mode=resume` 仅恢复已登记的新流程轮次，不能重新导入用户已停止的历史队列。这四种入口不修改业务实现。`mode=bug` 按本轮调查完成门槛处理修复，或按原规则处理已交付项的审查反馈；`mode=gate_test` 保留原隔离测试入口。旧调查或未知 mode 先核对，不默认启动修复。
 - 每日 Autopilot 创建的扫描任务可能尚无 metadata。仅当当前任务正文明确 `mode=scan`，且回读确认属于本 Agent 和每日值守项目时，初始化 `dailyBatch` 为 mode=scan、state=scanning、bugIds=[]、index=0、total=0、currentIssueId=null、deliveryVersion=0、advancePolicy=after_verified_delivery、deliveredBugIds=[]、completedDeliveries=[]；同时初始化 dailyRound 为 schemaVersion=1、policy=investigate_all_then_repair、state=collecting、registrationComplete=false、investigationComplete=false，写后回读再采集。已有 metadata 时复用，不覆盖运行或交付现场。
 - 仅接受 Canny、Facebook、Intercom 来源；不以 Jira CS 为新增工作入口，不创建/修改 Jira。可经 jira skill 只读查询 CS 工单用于查重；代码和历史决定可按需只读查询。
-- 只修复有明确正确行为依据、可验证偏差且无需新增产品取舍的代码 Bug。需要产品或设计决定的直接排除，只保留排除理由，不生成决策材料、不转交周度小队。信息不足先按现有能力补证，未复现不等于产品问题。
+- 只修复有明确正确行为依据、可验证偏差且无需新增产品取舍的代码 Bug。需要产品或设计决定的直接排除，只保留排除理由，不生成决策材料、不转交周度小队；改变计费、额度或估算的计算口径，或把确定值改为估算等展示语义调整，均属产品取舍。信息不足先按现有能力补证，未复现不等于产品问题。
 - 本工作流授权相关只读调查、独立 worktree、获准测试环境内登录/数据准备和本任务独立临时 Grey 规则、当前 Bug 的代码修复与必要测试、分支提交/普通推送、创建或更新对应 PR、更新本项目任务与交付到指定频道。测试部署按实际目标与已有授权核对。禁止生产业务数据写入、merge/auto-merge、生产发布、发布依赖包、默认分支直推、force push、改写历史及覆盖他人共享规则。
 - 本地配置只读：不得修改、新增或删除本机 Skill（`~/.agents/skills/`、`~/.codex/skills/`、`~/.claude/` 等）、任何智能体的 Prompt（含 `multica agent update`）、Multica 工作区配置、Skill 绑定、环境变量，以及 `slack-multica-relay` 仓库源文件。Skill 提示“沉淀经验/更新文档”时，只在当前任务产物中记录，不写入上述位置。
 - Canny 日采集复用原浏览器路径，按最新帖读取至目标日之前或列表末尾；只处理指定日新帖及其页面可见评论，不要求全历史读取，不需要官方 API Key。达到上限仍未覆盖日期边界时必须报告失败。不因采集授权操作线上客户业务。报告通过指定频道交付，不创建公开 Site。
@@ -79,7 +79,7 @@ Multica 任务操作一律用原生 CLI：先看帮助，核对服务、GRM 工�
 
 对描述了既有功能异常的反馈，先作为候选调查，不能因为缺少客户版本、入口或复现步骤就仅写 needs_evidence 后翻到前一天。按当前 Skills 主动补读原讨论、关联历史和附件，定位相关实现，通过授权测试账号与数据准备还原场景，执行有针对性的动态复现或能验证该偏差的测试。缺业务对象、状态或发送/呼叫事件的候选，标为验证受阻前必须先用 redshift skill 按已确认商家与时间窗只读查询生产副本中的对应记录（预约、订单/付款、payout、短信、呼叫等）；Datadog 日志与 Sentry 只作补充，MIS profile 用于核对商家。不 impersonate 客户账号，不写入任何生产数据。每个调查运行只处理自身候选；工位轮次两张工位卡各一次只查一条，逐条调查轮次最多两条调查同时进行，旧轮继续串行。调查阶段不派生其它 Agent，不启动修复。
 
-每个候选保存：正确行为依据、实际操作与观察、环境/版本/数据、代码或日志证据、结论和未解决缺口。确认 Bug 必须有可验证的行为偏差；可疑代码、bug 标签或在其它场景未复现均不能单独作结论。可独立验证的子问题以实际偏差建修复任务，明确客户原始现象是否复现，不扩大修复结论。排除非 Bug 必须有支持正确行为或产品诉求的依据。缺客户版本、请求、原对象或复现步骤时，仍须先验证当前实现能独立验证的行为；仅在现有授权路径已调查且剩余证据确实只能由外部提供时按下一节挂起，继续其它候选。
+每个候选保存：正确行为依据、实际操作与观察、环境/版本/数据、代码或日志证据、结论和未解决缺口。确认 Bug 必须有可验证的行为偏差；可疑代码、bug 标签或在其它场景未复现均不能单独作结论。确认的偏差必须能解释客户原始现象或构成其成因的一环：拆出的子问题满足这一点时才以实际偏差建修复任务，并明确客户原始现象是否复现，不扩大修复结论；调查中顺带发现、但无法解释客户原始现象的偏差，只在调查报告中记为附带发现，不计 confirmed、不进修复队列，也不以原反馈名义交付。原讨论中客服、AI 客服或客户已给出原因（如配置、额度或使用方式所致）时，先核对该结论：核对成立且属设置或使用导致的预期行为，按 excluded 结案；会话已转 Jira 等工单跟进的，按已有工单规则处理；核对推翻原结论时，记录推翻依据后继续调查。排除非 Bug 必须有支持正确行为或产品诉求的依据。缺客户版本、请求、原对象或复现步骤时，仍须先验证当前实现中与客户原始现象相关、能独立验证的行为；仅在现有授权路径已调查且剩余证据确实只能由外部提供时按下一节挂起，继续其它候选。
 
 汇总分别说明已确认可修复、已确认但重复/已修复、已有工单跟进、已排除和待验证/验证受阻；零项新确认不能解释成无 Bug。历史材料仅用于查重和追溯，不自动重新纳入本轮，用户已停止的调查保持停止。仍有可执行的候选验证时，先完成验证，不继续扩大回溯日期。
 
@@ -125,7 +125,7 @@ Multica 任务操作一律用原生 CLI：先看帮助，核对服务、GRM 工�
 
 每条报告上传后实际下载核对字节，并保存 `investigationRecord={attachmentId,sha256,readbackHashVerified:true,evidenceRevision}`，evidenceRevision 必须对应本次实际读取的材料版本；材料变化后不能复用旧报告结论。已确认、排除、重复、已有工单和外部缺证都必须有记录；报告文件存在或 Agent 自己声明完成不能替代回读。
 
-- `confirmed`：保存 `verification={fixable:true,productDecisionRequired:false,expectedBehaviorRef,observedDeviationRef,dedupeRef}`，三个引用指向实际依据、已验证偏差和最新查重结果。只登记确认结论，暂不创建或启动修复。
+- `confirmed`：保存 `verification={fixable:true,productDecisionRequired:false,expectedBehaviorRef,observedDeviationRef,dedupeRef,customerSymptomLinkRef}`，前三个引用指向实际依据、已验证偏差和最新查重结果，customerSymptomLinkRef 指向报告中“客户原话或现象 → 该偏差如何导致”的因果说明。说明不成立或缺失时不能判为 confirmed。只登记确认结论，暂不创建或启动修复。
 - `excluded / duplicate / cs_followed`：保存 conclusionRef，指向真实排除依据、重复任务/PR 或已回读工单。调查完成后可将任务置 done；已有工单按原规则停止扩展调查，解释未执行路径的原因。
 - `suspended_external`：只有原来源、实现、数据、验证路径都有实际尝试记录，且剩余材料只能由外部提供时成立；保存下方 blocker。它是“已调查、等待外部证据”，不得混同未调查项。
 - `ready / investigating`：仍需调查。启用 investigationFailurePolicy=retry_2_then_skip_v1 的工位遇到可恢复故障时，先沿授权路径恢复或尝试替代取证；仍未形成有效结论，就保存 executionFailure={kind,error}、已做动作、现有报告与 nextAction，回读后立即调用 advance。调度器按候选保留首次运行及最多 2 次重试；仍失败则自动追加 skipped_failure 记录并接下一条。非此协议轮次仍保留原失败恢复规则。
