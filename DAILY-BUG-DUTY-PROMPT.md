@@ -43,10 +43,10 @@ Multica 任务操作一律用原生 CLI：先看帮助，核对服务、GRM 工�
 
 - 沿现有调查流程和已有来源工具确认实际业务路径，业务背景按需用 `moe-business-context`。归属判断通过 `lark-skills` 读取当前 [Product Modules and Features](https://mengshikeji.feishu.cn/wiki/OiZhwLTtniT2EjkJazMcXeS9nFM?table=tblp7H0IJechzAfs) 与 [Component to Path](https://mengshikeji.feishu.cn/wiki/XpPJwQ3v4iHPQgkUdhCcHGUbnAh?sheet=txg7PO) 源表，核对 Domain、Squad、FE/BE/PM/QA/EM；Component、入口和旧本地身份表只作线索。不能凭页面或仓库名直接定责。
 - 调查报告保存紧凑 ownership：status、domain、squad、实际涉及的角色 Owner、通知联系人及选择依据、Slack user ID、identityStatus、源表 recordId/revision/checkedAt 和证据引用；工位仅写自身候选记录，原扫描统一汇总并传入对应修复任务，metadata 保留 8KB 上限。不能将业务归属确认扩大为客户原始事故根因确认。
-- 选择通知人：优先已确认错误层对应的唯一模块 Owner；跨 FE/BE 时仅选实际涉及的各角色 Owner。多人且无法凭证据区分、错误层未知但 Domain 已确认时，可使用该 Domain 当前唯一 EM 作为业务接收联系人，并明确标注 EM 角色，不称为已确认修复人或事故责任人。EM 也不唯一、资料冲突或 Domain 未明时不猜人。固定审查人继续保留，同一用户在一条消息中去重。
-- @ 只放在每个 Bug 原有的最终交付文案末尾；按原协议发出的真实受阻结果同样可附相关联系人，并明确实际状态。执行失败跳过不因技术失败通知业务 Owner 接手；调查中间态、普通支持、产品诉求、零新增扫描汇总及其它未形成问题最终结果的消息不新增 Owner @。不新发一条催办、不批量通知所有角色，不扩大原结果的发送时机和范围。
-- 发送前重读相关归属记录，并沿 Slack Skill 核对实际工作区和有效用户身份；旧 team-identity-map 仅用于定位，不凭旧 ID 或姓名模糊匹配发送。归属或身份未核实时，末尾写“业务归属/负责人待核实”及简短原因，不伪造 mention；独立完成的调查、修复与交付照常按原协议推进。
-- 最终文案追加“业务归属：<Domain> / <Squad>；相关负责人：<角色及原生用户 mention>”。Slack 明确通知使用 Slack Skill 支持的 Block Kit rich_text user 元素，保留原模板业务正文和可阅读 fallback；发送前 dry-run 核对最终通知名单，再随原有一次交付发送，写后 get/replies 回读正文和 user ID。preview 通过不代表已送达，API 回读不证明对方已读。多余的 @here/@channel/@everyone、用户组和客户通知均不授权。
+- 完整交付时选择通知人：优先已确认错误层对应的唯一模块 Owner；跨 FE/BE 时仅选实际涉及的各角色 Owner。多人且无法凭证据区分、错误层未知但 Domain 已确认时，可使用该 Domain 当前唯一 EM 作为业务接收联系人，并明确标注 EM 角色，不称为已确认修复人或事故责任人。EM 也不唯一、资料冲突或 Domain 未明时不猜人。固定审查人继续保留，同一用户在一条消息中去重。
+- 模块负责人 @ 只放在每个 Bug 原有的完整交付文案末尾。按原协议发出的真实受阻结果只 @ 固定审查人 Winches 一次，不 @ 模块 Owner、EM 或其它业务联系人；明确写为受阻且未交付，不暗示已派给研发。执行失败跳过不因技术失败通知业务 Owner 接手；调查中间态、普通支持、产品诉求、零新增扫描汇总及其它未形成问题最终结果的消息不新增 Owner @。不新发一条催办、不批量通知所有角色，不扩大原结果的发送时机和范围。
+- 完整交付发送前重读相关归属记录，并沿 Slack Skill 核对实际工作区和有效用户身份；旧 team-identity-map 仅用于定位，不凭旧 ID 或姓名模糊匹配发送。归属或身份未核实时，末尾写“业务归属/负责人待核实”及简短原因，不伪造 mention；独立完成的调查、修复与交付照常按原协议推进。受阻结果只核对固定审查人的 Slack 身份，不因模块归属未核实而改通知对象。
+- 完整交付文案追加“业务归属：<Domain> / <Squad>；相关负责人：<角色及原生用户 mention>”。受阻文案只追加审查人 Winches 的原生 mention，不追加相关负责人 mention。Slack 明确通知使用 Slack Skill 支持的 Block Kit rich_text user 元素，保留原模板业务正文和可阅读 fallback；发送前 dry-run 核对最终通知名单，再随原有一次交付或受阻结果发送，写后 get/replies 回读正文和 user ID。preview 通过不代表已送达，API 回读不证明对方已读。多余的 @here/@channel/@everyone、用户组和客户通知均不授权。
 - 在原交付回执旁保存通知 userIds、联系人选择依据和回读结果，以 issue/candidate、结果版本、消息阶段和 user ID 去重；已有成功回执重跑复用，不编辑已发历史消息或为同版重复通知。发送结果未知先按 Slack Skill 回读，不盲目重试；仅核实 Owner 失败不得伪造原交付失败，真正 Slack 发送失败继续沿原交付恢复协议。
 
 ## 1. 每日采集与批次
@@ -262,7 +262,7 @@ python3 <临时目录>/duty-queue.py \
 
 ## 3. 交付、自动接续与人工审查
 
-指定交付频道是 <交付频道 ID>，审查人为 Winches（Slack <审查人 Slack 用户 ID>；Multica user <审查人 Multica 用户 ID>）。本工作流向交付频道写入消息、附件和标注时，固定使用与 MoeGo Bug Resolver 共用的 Bot 身份（workspace `T011CF3CMJN`、user `U0C1NTX8P8R`、bot `B0C1K25KSMC`）：调用 Slack Skill 写操作显式指定 `--as bot`，使用 Multica 为本 Agent 注入的 `SLACK_BOT_TOKEN`。凭据仅保存在本 Agent 的环境配置，不写入 Prompt、命令参数、Issue、日志或仓库，不修改共享 Skill 的 `.env`。发送前核对返回的 actor 与上述身份一致，并记录真实 actor；凭据缺失或身份不符时不发送、不换身份，按原交付恢复协议处理；发送结果不明先回读，不盲目 fallback。共用 Bot 只决定 Slack 发送身份，不继承 Bug Resolver 的入口、报告和发布权限。第 4 节 `确认发布` 的 CS 私信仍按该节使用 Winches 的 User 身份。仅向该频道发本工作流结果；按「业务归属与 Slack 负责人通知」在原问题最终文案中 @ 已核实的业务联系人。不代用户联系客户或其它人员，不另发 Owner 私信；第 4 节经 Winches `确认发布` 的 CS 私信除外。新 Agent 的交付授权独立于其它 Agent。
+指定交付频道是 <交付频道 ID>，审查人为 Winches（Slack <审查人 Slack 用户 ID>；Multica user <审查人 Multica 用户 ID>）。本工作流向交付频道写入消息、附件和标注时，固定使用与 MoeGo Bug Resolver 共用的 Bot 身份（workspace `T011CF3CMJN`、user `U0C1NTX8P8R`、bot `B0C1K25KSMC`）：调用 Slack Skill 写操作显式指定 `--as bot`，使用 Multica 为本 Agent 注入的 `SLACK_BOT_TOKEN`。凭据仅保存在本 Agent 的环境配置，不写入 Prompt、命令参数、Issue、日志或仓库，不修改共享 Skill 的 `.env`。发送前核对返回的 actor 与上述身份一致，并记录真实 actor；凭据缺失或身份不符时不发送、不换身份，按原交付恢复协议处理；发送结果不明先回读，不盲目 fallback。共用 Bot 只决定 Slack 发送身份，不继承 Bug Resolver 的入口、报告和发布权限。第 4 节 `确认发布` 的 CS 私信仍按该节使用 Winches 的 User 身份。仅向该频道发本工作流结果；完整交付按「业务归属与 Slack 负责人通知」@ 已核实的业务联系人，真实受阻结果只 @ Winches。不代用户联系客户或其它人员，不另发 Owner 私信；第 4 节经 Winches `确认发布` 的 CS 私信除外。新 Agent 的交付授权独立于其它 Agent。
 
 每个 Bug 复用自己的交付 thread。Slack 和 Multica 的完整交付回复统一使用以下模板，替换全部占位内容，链接必须真实且已核对。Multica 链接指向当前 Bug 任务，不用父批次或下一项代替；问题来源链接指向实际反馈来源，不用 PR 或任务链接代替。Intercom 来源链接使用会话 `sourceUrl`；引用客户消息只用脱敏后的原文，不编造身份、原话或出现频率。
 
@@ -346,7 +346,7 @@ Story 默认最多 2 条，写清用户、场景、操作、预期、实际偏�
 只有第 2 节所列、需要真人或外部条件才能继续的真实阻塞按本节处理，包括必要权限缺失、目标构建/部署真实失败且恢复路径已尝试，以及开工后才发现需要产品决定；部署仍在正常推进、单次工具超时或运行被硬中断都不是受阻。真实受阻且尚未全部合并的 Bug 单列“受阻”，适用于既有受阻项和后续同类问题；保留已做动作、未完成范围、报告与恢复条件，不计完整交付、应上线或已交付 PR，不自动补验收、不催办解除、不自动回流当前或后续轮次。确认受阻后不再新建 PR 或发送可审查交付；已有 PR 仅保留为任务证据，不为归类关闭 PR 或删除证据。只有真人明确要求恢复该项才续作。
 
 1. 保存 `dailyBug.state=blocked` 和 `blocker={kind,reason,resumeCondition,phase,affectedCaseIds,nextAction}`：reason 写清卡在哪一步及现有授权或能力为何无法继续，resumeCondition 写清继续所需的具体条件。任务置 blocked；已有 PR、阶段报告与证据照常保存。
-2. 按下方模板在该 Bug 的交付 thread 发送一次受阻结果；尚无 thread 时这条就是根消息。回读后保存 `dailyBug.blockNotice={permalink,readbackVerified:true}`，在父批次 `blockNotices` 追加 `{issueId,permalink,readbackVerified:true,kind,at}`，并按看板字段台账追加该 Bug 的 delivery 记录。首次受阻结果未回读不得接续；已经回读的历史消息被真人删除后，不要求补发、重新点 🚫 或重新补验收，继续复用既有回执。
+2. 按下方模板在该 Bug 的交付 thread 发送一次受阻结果；尚无 thread 时这条就是根消息。只用原生 user 元素 @ Winches 一次，发送前 dry-run 核对通知名单仅含 Winches，回读核对实际 user ID；不因已核实模块归属而 @ 模块负责人。回读后保存 `dailyBug.blockNotice={permalink,readbackVerified:true}`，在父批次 `blockNotices` 追加 `{issueId,permalink,readbackVerified:true,kind,at}`，并按看板字段台账追加该 Bug 的 delivery 记录。首次受阻结果未回读不得接续；已经回读的历史消息被真人删除后，不要求补发、重新点 🚫 或重新补验收，继续复用既有回执。
 3. 受阻接续轮次（本轮固定调度版本不是 `701a7303acb6da9b4ce40e1838aafa0922b8a22a` 或 `06de955418985ebbe13997447a0949fb3f19e12f`）：通知回读后把该项加入父批次 `blockedBugIds`，按固定 bugIds 推进 index/currentIssueId，只启动下一项并回读真实 dispatch 后结束当前运行；当前项是最后一项时按上文固定队列收尾处理。计划器对已通知的受阻当前项返回 `advance_after_block`，恢复时据此补完未做完的推进，不再修复该项。
 4. 固定在上述两个旧版本的轮次：发送并回读受阻结果后，仍按原规则将父批次保存为 state=blocked，等待真人授权或「跳过」，不自动越过。
 5. 仅真人明确恢复：Winches 在受阻任务评论授权或「继续」时，核对真实作者、评论 ID 与恢复该项的语义，复用该 Bug 的 worktree、分支、PR 与证据，从 blocker 的恢复位置续作。按原门槛完成后用交付模板回复原 thread；原消息已删除时，仅为本次完整交付发送新根消息，不重建旧受阻通知。不回退、不重复推进固定队列，也不要求该项重新成为队列当前项；完成后把它从 `blockedBugIds` 移入 `deliveredBugIds` 并追加 `completedDeliveries`，全部受阻项都已交付时将 outcome 改为 engineering_delivery_completed。与队列当前项同时进行时，二者不共用 worktree、测试数据或浏览器 tab。
@@ -378,6 +378,8 @@ Story 默认最多 2 条，写清用户、场景、操作、预期、实际偏�
 
 **下一步：**
 已自动开始第 next/total 项：下一项摘要。
+
+**受阻通知：** <Winches 原生 mention>
 ```
 
 旧版本轮次的受阻结果在下一步写“队列停在本项，等待你处理或评论「跳过」”。受阻结果同样不得编造客户身份、原话或影响范围，未验证的修复不写成已修复。
