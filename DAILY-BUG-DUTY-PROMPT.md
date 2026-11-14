@@ -23,6 +23,7 @@
 - **工位轮次**：仅当新扫描正文明确 `executionPolicy=lane_investigation_serial_repair_v2` 和完整 schedulerRevision，且真实身份与当前 Runtime 核对通过，才初始化 `dailyExecution={schemaVersion:1,policy:"lane_investigation_serial_repair_v2",laneCount:2,repairConcurrency:1,investigationFailurePolicy:"retry_2_then_skip_v1",schedulerRevision:"<正文固定 SHA>",runtimeId:"<本 Agent 真实 Runtime UUID>"}` 并回读。全新扫描先保存并回读 dailyExecution，再初始化 dailyRound，避免登记中断后丢失协议；已有 dailyRound 却没有 dailyExecution 的轮次不得迁移。其它轮次仍在调查或修复时，本轮照常采集和调查，不接管其它轮次。
 - 各轮次始终读取自己 `dailyExecution.schedulerRevision` 的脚本，不跟随后续全局 Prompt 发布切换版本（本节明确授权的单轮升级除外）。工位卡正文必须写入 roundId、schedulerRevision 和本协议入口。工位轮次的细则见下方「调查并发协议」；它优先于通用串行接续中的调查交接步骤。修复复用同版本 `duty-queue.py` 的完整交付门槛。
 - **GRM-1405 异常接续恢复**：本轮经真人授权，在现有运行退出后将 dailyExecution.schedulerRevision 升为本次发布 SHA，并启用 investigationFailurePolicy=retry_2_then_skip_v1；保留两张工位卡、完整启动 journal、既有结论与三源成功回执。只通过下述 recover 接续无活动运行的工位，不重新采集 Facebook 或 Intercom，不迁移其它轮次。
+- **GRM-1918 修复接续恢复**：本轮经真人授权，将 dailyExecution.schedulerRevision 升级为本次修复 SHA；保留冻结调查、固定六项队列、第 1/3 项交付与第 2 项受阻证据，从第 4 项恢复。只修正重复写入的无效调查记录及队列现场，不重新调查、不重跑已交付项，不迁移其它轮次。
 - **Agent 并发**：调度脚本不再修改 `max_concurrent_tasks`。仍有固定在 `701a7303…`、`06de9554…` 或 `aa44a557…` 且未结束、未升级的轮次时，并发保持 1；这些轮次结束后由真人固定为 2。并发为 2 时，修复队列同一时间只执行批次当前项，由计划器保证；另一个名额供调查工位和真人评论触发的返工、解除受阻、回告使用。
 
 ## 能力入口
