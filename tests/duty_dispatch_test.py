@@ -85,6 +85,136 @@ class FakeNative:
             raise dispatch.Error('模拟超时，不能从退出码推断启动失败')
 
 
+class RepairAdvanceTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.journal = dispatch.Journal(Path(self.temp.name) / 'repair.json')
+        from duty_queue_test import add_repair, block, receipt
+        self.rows = [candidate(key, 'confirmed') for key in ('first', 'second', 'third')]
+        self.data = snapshot(self.rows)
+        self.scan = self.data['issues'][0]
+        freeze(self.scan, self.rows, complete=True)
+        self.bugs = add_repair(self.scan, self.rows)
+        for bug in self.bugs:
+            bug.update(workspace_id='workspace')
+        self.bugs[0]['assignee_id'] = 'agent'
+        self.data['issues'] += self.bugs
+        self.data['runs'] = [run(self.bugs[0]['id'])]
+        self.scope = {**SCOPE, 'current_issue': self.bugs[0]['id'],
+                      'current_run': self.data['runs'][0]['id']}
+        self.native = FakeNative(self.data)
+        self.block, self.receipt = block, receipt
+
+    def advance(self):
+        return dispatch.repair_advance(self.native, self.journal, self.scope)
+
+    def test_blocked_current_keeps_result_and_starts_next_once(self):
+        self.block(self.scan, self.bugs[0])
+        before = copy.deepcopy(self.bugs[0])
+        result = self.advance()
+        self.assertEqual((result['action'], result['issueId']), ('dispatch_repair', self.bugs[1]['id']))
+        batch = dispatch.queue.meta(self.scan, 'dailyBatch')
+        self.assertEqual(batch['blockedBugIds'], [self.bugs[0]['id']])
+        self.assertNotIn(self.bugs[0]['id'], batch.get('deliveredBugIds', []))
+        self.assertEqual(self.bugs[0], before)
+        self.advance()
+        self.assertEqual(self.native.starts, [self.bugs[1]['id']])
+
+    def test_missing_notice_and_manual_pause_never_advance(self):
+        self.block(self.scan, self.bugs[0], notified=False)
+        self.assertEqual(self.advance()['action'], 'resume_repair')
+        self.assertEqual(self.native.starts, [])
+        batch = dispatch.queue.meta(self.scan, 'dailyBatch')
+        batch['blockNotices'][0]['readbackVerified'] = True
+        for state in ('paused', 'cancelled'):
+            batch['state'] = state
+            self.assertEqual(self.advance()['action'], 'attention')
+        self.assertEqual(batch['index'], 1)
+
+    def test_new_round_can_advance_a_parent_left_blocked_by_its_current_item(self):
+        self.block(self.scan, self.bugs[0])
+        dispatch.queue.meta(self.scan, 'dailyBatch')['state'] = 'blocked'
+        self.assertEqual(self.advance()['issueId'], self.bugs[1]['id'])
+        self.assertEqual(dispatch.queue.meta(self.scan, 'dailyBatch')['state'], 'running')
+
+    def test_old_revision_keeps_blocked_parent_unchanged(self):
+        self.block(self.scan, self.bugs[0])
+        old = '701a7303acb6da9b4ce40e1838aafa0922b8a22a'
+        dispatch.queue.meta(self.scan, 'dailyExecution')['schedulerRevision'] = old
+        self.scope['revision'] = old
+        dispatch.queue.meta(self.scan, 'dailyBatch')['state'] = 'blocked'
+        self.assertEqual(self.advance()['action'], 'attention')
+        self.assertEqual(self.native.starts, [])
+
+    def test_timeout_after_successful_launch_is_reconciled_without_duplicate(self):
+        self.block(self.scan, self.bugs[0])
+        self.native.failure = 'after'
+        self.assertEqual(self.advance()['action'], 'dispatch_repair')
+        self.advance()
+        self.assertEqual(self.native.starts, [self.bugs[1]['id']])
+
+    def test_skip_delivered_successor_preserves_investigations(self):
+        self.block(self.scan, self.bugs[0])
+        batch = dispatch.queue.meta(self.scan, 'dailyBatch')
+        batch['completedDeliveries'] = [self.receipt(self.bugs[1])]
+        investigations = copy.deepcopy(self.rows)
+        self.assertEqual(self.advance()['issueId'], self.bugs[2]['id'])
+        self.assertEqual(dispatch.queue.meta(self.scan, 'dailyBatch')['index'], 3)
+        self.assertEqual(self.rows, investigations)
+        self.assertEqual(self.native.starts, [self.bugs[2]['id']])
+
+    def test_final_block_closes_batch_without_creating_a_run(self):
+        for bug in self.bugs:
+            self.block(self.scan, bug)
+        result = self.advance()
+        self.assertEqual(result['action'], 'complete_round')
+        batch = dispatch.queue.meta(self.scan, 'dailyBatch')
+        self.assertEqual(batch['outcome'], 'finished_with_blocked')
+        self.assertEqual(batch['blockedBugIds'], [bug['id'] for bug in self.bugs])
+        self.assertIsNone(batch['currentIssueId'])
+        self.assertEqual(self.native.starts, [])
+
+    def test_resume_after_cursor_saved_before_launch(self):
+        self.block(self.scan, self.bugs[0])
+        original = self.native.metadata
+        def interrupted(key, name, value):
+            original(key, name, value)
+            raise dispatch.Error('保存游标后中断')
+        self.native.metadata = interrupted
+        with self.assertRaises(dispatch.Error):
+            self.advance()
+        self.native.metadata = original
+        self.assertEqual(self.advance()['issueId'], self.bugs[1]['id'])
+        self.assertEqual(self.native.starts, [self.bugs[1]['id']])
+
+    def test_pause_after_cursor_write_prevents_launch(self):
+        self.block(self.scan, self.bugs[0])
+        original = self.native.metadata
+        def paused(key, name, value):
+            original(key, name, copy.deepcopy(value))
+            dispatch.queue.meta(self.scan, 'dailyBatch')['state'] = 'paused'
+        self.native.metadata = paused
+        with self.assertRaises(dispatch.Error):
+            self.advance()
+        self.assertEqual(self.native.starts, [])
+
+    def test_unknown_launch_result_does_not_repeat_rerun(self):
+        self.block(self.scan, self.bugs[0])
+        self.native.failure = 'before'
+        with self.assertRaises(dispatch.Error):
+            self.advance()
+        with self.assertRaises(dispatch.Error):
+            self.advance()
+        self.assertEqual(self.native.starts, [self.bugs[1]['id']])
+
+    def test_other_repair_run_prevents_overlap(self):
+        self.block(self.scan, self.bugs[0])
+        self.data['runs'].append(run(self.bugs[2]['id']))
+        self.assertEqual(self.advance()['action'], 'wait')
+        self.assertEqual(self.native.starts, [])
+
+
 class PlanTests(unittest.TestCase):
     def test_available_slots_are_filled_without_exceeding_two(self):
         data = snapshot([candidate(str(i)) for i in range(4)])

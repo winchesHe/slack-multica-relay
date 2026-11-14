@@ -405,7 +405,13 @@ def batch_plan(batch_issue, issues, by_id, agent_id):
     bug = meta(current, 'dailyBug')
     if bug.get('batchId') != batch_issue['id'] or bug.get('index') != index or bug.get('total') != len(bug_ids):
         raise QueueError('当前 Bug 与固定批次位置不符')
-    if batch.get('state') in ('blocked', 'paused', 'cancelled') or current.get('status') in STOPPED:
+    revision = meta(scan, 'dailyExecution').get('schedulerRevision') if scan else None
+    block_can_advance = (text(revision) and revision not in {
+        '701a7303acb6da9b4ce40e1838aafa0922b8a22a', '06de955418985ebbe13997447a0949fb3f19e12f'}
+        and verified_block(batch, current))
+    # 新轮次的单项受阻不等于人工暂停整轮；旧轮次仍保持原授权边界。
+    if (batch.get('state') in ('paused', 'cancelled') or current.get('status') in STOPPED
+            or batch.get('state') == 'blocked' and not block_can_advance):
         return {'action': 'attention', 'issueId': current['id'], 'reason': '按原修复流程恢复阻塞，不绕过交付门槛或真人暂停'}
     if verified_delivery(batch, current):
         return {'action': 'advance_after_delivery', 'issueId': current['id'], 'batchId': batch_issue['id'],
