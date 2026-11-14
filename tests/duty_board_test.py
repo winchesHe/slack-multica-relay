@@ -395,6 +395,43 @@ class BoardTests(unittest.TestCase):
         self.assertIn('W1', lines[1])
         self.assertIn('（2 天）', lines[1])
 
+    def test_slack_status_lists_limit_all_states_at_five(self):
+        for state in board_module.STATUS_ORDER:
+            for count in (0, 5, 6):
+                with self.subTest(state=state, count=count):
+                    bugs = [bug(f'B{index}', '2026-10-13', state) for index in range(count)]
+                    board = {'bugs': bugs}
+                    lines = board_module.status_lines(board, NOW)
+                    self.assertEqual(len(lines), bool(count))
+                    if not count:
+                        continue
+                    line = lines[0]
+                    self.assertEqual(line.count('](https://m/'), min(count, 5))
+                    self.assertEqual('等 ' in line, count > 5)
+                    self.assertIn(f'{count}：', line)
+                    if count > 5:
+                        self.assertNotIn('[B0]', line)
+                        self.assertTrue(line.endswith(f'等 {count} 个'))
+
+    def test_slack_followup_lists_truncate_but_full_attention_keeps_details(self):
+        for key in ('notify', 'responded'):
+            for count in (5, 6):
+                with self.subTest(key=key, count=count):
+                    entries = [(bug(f'B{index}', '2026-10-13', 'released'), '附注')
+                               for index in range(count)]
+                    board = board_module.build_board([], [], dt.date(2026, 10, 13), dt.date(2026, 10, 14))
+                    items = {name: [] for name in board_module.ATTENTION_TITLES}
+                    items[key] = entries
+                    with patch.object(board_module, 'attention', return_value=items):
+                        slack = board_module.render_slack(board, NOW)
+                        full = '\n'.join(board_module.attention_notes(board, NOW))
+                    self.assertEqual(slack.count('](https://m/'), min(count, 5))
+                    self.assertEqual('等 ' in slack, count > 5)
+                    self.assertEqual(full.count('](https://m/'), count)
+                    self.assertIn('（附注）', slack)
+                    if count > 5:
+                        self.assertIn(f'等 {count} 个', slack)
+
     def test_estimated_suspected_marks_its_row_and_total(self):
         scans = [{'identifier': 'S1', 'feedbackDate': '2026-10-12', 'createdAt': 'a', 'collected': {'canny': 9},
                   'suspected': 4, 'suspectedEstimated': True},
