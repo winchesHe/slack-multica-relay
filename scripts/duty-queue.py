@@ -254,8 +254,7 @@ def lane_round_candidates(scan, issues, agent_id):
         item, lane = latest.get(entry['candidateId'], (default, None))
         if (item.get('schemaVersion') != 1 or item.get('mode') != 'investigate'
                 or item.get('sourceScanId') != scan['id'] or item.get('state') not in STATES):
-            raise QueueError(f"工位调查记录协议或状态无效：{entry['candidateId']}，"
-                             f"工位={(lane or {}).get('id')}，mode={item.get('mode')}，state={item.get('state')}")
+            raise QueueError('工位调查记录协议或状态无效')
         if (item['state'] == 'skipped_failure'
                 and meta(scan, 'dailyExecution').get('investigationFailurePolicy') != FAILURE_POLICY):
             raise QueueError('本轮未启用有限重试与失败跳过协议')
@@ -502,13 +501,13 @@ def query(cli, args):
         raise QueueError('Multica 只读查询失败，请检查 CLI 身份与目标') from error
 
 
-def attach_comments(issues, fetch, include_finished=False):
+def attach_comments(issues, fetch, include_finished=False, round_id=None):
     """为工位轮次的原扫描与工位卡附上评论（`_comments`），供清单与逐条结论读取；其它任务不读评论。"""
     rounds = set()
     for issue in issues:
         info, batch = meta(issue, 'dailyRound'), meta(issue, 'dailyBatch')
         unfinished = info.get('state') != 'completed' or (batch.get('bugIds') and batch.get('state') not in FINISHED_BATCHES)
-        if lane_store(issue) and (include_finished or unfinished):
+        if lane_store(issue) and (include_finished or unfinished or issue['id'] == round_id):
             rounds.add(issue['id'])
     for issue in issues:
         if issue['id'] in rounds or meta(issue, 'dailyLane').get('roundId') in rounds:

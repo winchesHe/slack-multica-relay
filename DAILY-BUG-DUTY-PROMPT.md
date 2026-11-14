@@ -123,7 +123,7 @@ Multica 任务操作一律用原生 CLI：先看帮助，核对服务、GRM 工�
 
 补读原讨论、关联历史与附件，核对正确行为依据，定位实现，按需确认商家和窗口后查询副本、日志，并在授权测试环境做针对性验证。保存每个动作、结果、实际环境/版本/数据、截图或请求证据、未覆盖范围和下一动作；客户附件逐项记录序号、类型、SHA-256 与观察结论，未能查看的附件写明原因。实现、数据或验证路径确实不适用时，要记录原因，不能用一句“未复现”代替调查。
 
-工位轮次的每条结论不写在工位卡 metadata，而是在工位卡追加一条记录评论：首行 `<!-- daily-investigation:v3 round=<扫描 UUID> candidate=<candidateId> -->`，再写一句说明和一个 ```json 代码块，内容与逐条调查的 `dailyInvestigation` 字段相同，另加 laneIssueId；写后用 `issue comment list` 回读并确认 JSON 可解析。同一候选以最新的本 Agent 记录为准，之后的 waiting_repair、delivered 和 repairIssueId 也追加完整新记录，不修改或删除旧评论；真人写的同格式评论不算结论。
+工位轮次的每条结论不写在工位卡 metadata，而是在工位卡追加一条记录评论：首行 `<!-- daily-investigation:v3 round=<扫描 UUID> candidate=<candidateId> -->`，再写一句说明和一个 ```json 代码块，内容与逐条调查的 `dailyInvestigation` 字段相同，另加 laneIssueId；写后用 `issue comment list` 回读并确认 JSON 可解析。调查阶段同一候选以最新的本 Agent 记录为准，不修改或删除旧评论；修复队列建立后冻结工位调查结论，修复和交付只写 dailyBug/dailyBatch。真人写的同格式评论不算结论。
 
 每条报告上传后实际下载核对字节，并保存 `investigationRecord={attachmentId,sha256,readbackHashVerified:true,evidenceRevision}`，evidenceRevision 必须对应本次实际读取的材料版本；材料变化后不能复用旧报告结论。已确认、排除、重复、已有工单和外部缺证都必须有记录；报告文件存在或 Agent 自己声明完成不能替代回读。
 
@@ -216,8 +216,8 @@ python3 <临时目录>/duty-queue.py \
 - `finalize_round`：核对全部固定身份与报告，汇总并回读调查索引、分类台账和扫描结果，保存 investigationComplete，再生成计划。
 - `prepare_round_repair`：按上方规则在原扫描登记唯一固定修复队列；存在部分登记先按稳定标记找回。每个 Bug 正文保留目标分支 CI、真实部署版本、动态验收、完整 HTML 与交付回读要求。
 - `resume_repair / reconcile_repair`：只按原修复流程恢复已登记队列，不插入其它候选或回退 index。新流程批次每次恢复也必须核对全轮调查与固定修复清单。
-- `advance_after_block`：当前项的受阻结果已回读，按第 3 节「受阻通知与接续」推进到 nextIssueId 或结束批次，不再修复当前项。
-- `complete_round`：无可修项时结束本轮；有修复时逐项核对真实完整交付及对应版本，或已回读的受阻通知，再将完整交付项的调查标为 delivered、受阻项的调查保持 waiting_repair，并设置 dailyRound.state=completed；返回 outcome=finished_with_blocked 时保留 blockedIssueIds 的现场。真人跳过按第 3 节保留父批次的完成状态、跳过结果与授权，跳过项和受阻项都不能记为完整交付。
+- `advance_after_delivery / advance_after_block`：当前项的完整交付或受阻通知已回读，按第 3 节的版本适配接续入口处理，不再修复当前项。
+- `complete_round`：无可修项时结束本轮；有修复时逐项核对真实完整交付及对应版本，或已回读的受阻通知，工位调查保持冻结，旧逐条调查按原协议记录结果；设置 dailyRound.state=completed；返回 outcome=finished_with_blocked 时保留 blockedIssueIds 的现场。真人跳过按第 3 节保留父批次的完成状态、跳过结果与授权，跳过项和受阻项都不能记为完整交付。
 - `wait_repair_slot`：本轮调查已全部留档，但其它轮次的修复队列未结束；保留 ready_repair 和已发出的扫描结果，结束运行，等待 release-repair 唤起，不另起第二条修复队列。
 - `wait`：已有其它真实排队或运行项（限定轮次时只看本批次当前项），记录回执并结束本次运行释放名额，不重复启动。
 - `idle`：没有未完成新轮次，等待下次现有 02:00 扫描；不从历史积压找新任务。
@@ -229,7 +229,7 @@ python3 <临时目录>/duty-queue.py \
 
 ## 2. 单个 Bug 调查、修复与验收
 
-固定在 `701a7303…`、`06de9554…` 或 `aa44a557…` 的轮次首次修复和恢复须先确认并发为 1；本次及之后版本的轮次不要求并发为 1。随后执行本轮固定版本的只读计划器，确认本轮固定身份、全部调查报告、完整索引和来源覆盖均已核对，返回 resume_repair 且目标为当前任务；不能只凭 investigationComplete 布尔值开工。返回 advance_after_block 时不再修复当前项，按第 3 节完成受阻接续。已交付项返工和受阻项解除后续作仍按第 3 节处理。
+固定在 `701a7303…`、`06de9554…` 或 `aa44a557…` 的轮次首次修复和恢复须先确认并发为 1；本次及之后版本的轮次不要求并发为 1。随后执行本轮固定版本的只读计划器，确认本轮固定身份、全部调查报告、完整索引和来源覆盖均已核对，返回 resume_repair 且目标为当前任务；不能只凭 investigationComplete 布尔值开工。返回 advance_after_delivery 或 advance_after_block 时不再修复当前项，按第 3 节接续。已交付项返工和受阻项解除后续作仍按第 3 节处理。
 
 队列内首次修复须回读批次，只有 `currentIssueId`、index、total 与当前 Issue 一致且批次可执行时才开工。发现另一任务仍在运行时不旁路执行。已交付项被真人要求返工时，按第 3 节处理原任务，不要求它再次成为队列当前项，也不回退或重复推进队列。保留同一任务的 worktree、分支、PR、版本与证据；一次只处理一个 Bug。
 
@@ -306,7 +306,7 @@ Story 默认最多 2 条，写清用户、场景、操作、预期、实际偏�
 
 按 `moe-opc/references/communications/slack-pr-review.md` 的本地 HTML 附件规则发送和回读，不启动其它 OPC 阶段。精简回复不降低完整报告、真实版本绑定或人工合并/发布权限要求。保存真实发送和附件回执；通知失败记录待发内容，不伪造成功。
 
-自动接续的条件是当前范围内修复与必要检查完成、动态验收和充分证据支持结论、PR 与完整 HTML 对应最终版本、交付消息及附件均已回读。run completed、本地测试成功、PR 创建、报告文件存在、CI 状态或阶段报告均不能单独放行。满足后，保存当前 `dailyBug.state=delivered`、`completeDelivery=true`、`reviewState=pending_human_review`、递增 deliveryVersion、PR head、报告版本、交付时间和真实回执；任务进入 in_review，人工审查与后续独立修复可以同时进行。父批次记录 deliveredBugIds 与每项实际交付版本；新流程 Bug 按 investigationIssueId 核对对应调查。工位轮次的调查结论在修复阶段保持冻结，不追加或改写 daily-investigation:v3 评论，修复与交付结果只写 dailyBug 和 dailyBatch；investigate_lane 仅用于工位任务入口，调查结论记录的 mode 必须始终为 investigate。旧逐条调查轮次更新原调查为 delivered 时，完整保留原验证与报告；完成工程交付不伪造真人确认、Approve、合并或上线记录。
+自动接续的条件是当前范围内修复与必要检查完成、动态验收和充分证据支持结论、PR 与完整 HTML 对应最终版本、交付消息及附件均已回读。run completed、本地测试成功、PR 创建、报告文件存在、CI 状态或阶段报告均不能单独放行。满足后，保存当前 `dailyBug.state=delivered`、`completeDelivery=true`、`reviewState=pending_human_review`、递增 deliveryVersion、PR head、报告版本、交付时间和真实回执；任务进入 in_review，人工审查与后续独立修复可以同时进行。父批次只补齐对应版本的 completedDeliveries 回执，分类集合与游标由接续入口统一更新；新流程 Bug 按 investigationIssueId 核对对应调查。工位轮次的调查结论在修复阶段保持冻结，不追加或改写 daily-investigation:v3 评论，修复与交付结果只写 dailyBug 和 dailyBatch；investigate_lane 仅用于工位任务入口，调查结论记录的 mode 必须始终为 investigate。旧逐条调查轮次更新原调查为 delivered 时，完整保留原验证与报告；完成工程交付不伪造真人确认、Approve、合并或上线记录。
 
 `dailyBug.deliveryVersion` 为正整数。父批次 `completedDeliveries` 每条记录使用以下结构，与 `duty-queue.py` 的交付恢复校验一致；示例中的占位符必须替换为实际值，两个 readback 标记仅在对应真实回读完成后才能为 true：
 
@@ -331,9 +331,11 @@ Story 默认最多 2 条，写清用户、场景、操作、预期、实际偏�
 
 跨仓时 `pr/prHead` 记录主 PR，另用 `prs` 保存全部 `{url,head}`；完整 HTML 必须绑定全部 PR 的实际版本，所有仓库都满足原交付门槛后才设置 completeDelivery。已有回执若采用其它字段，先根据原产物与真实回读核验并补齐上述字段，不能只为满足格式而补写成功标记。
 
-交付或受阻通知回读并保存回执后，执行同一固定版本 `duty-dispatch.py repair-advance`（参数与调查调度相同）。调度代码负责核验回执、推进父队列、跳过已有交付或受阻项、唯一启动下一项并回读；不要手工改 index/currentIssueId 或指派后继。返回 dispatch_repair 后结束当前运行，wait 时释放名额，attention 时保留具体错误，不绕过。
+交付或受阻通知回读并保存回执后，查看本轮固定版本 `duty-dispatch.py --help`：支持 `repair-advance` 时，以调查调度相同的作用域参数调用它，由代码核验回执、更新分类与游标、启动下一项并回读；不手工改队列。返回 dispatch_repair 后结束当前运行，wait 时释放名额，attention 时保留具体错误。父扫描自动复核同样通过此入口接续，不回退队列。
 
-最后一项交付或受阻结果回读后，同样调用 repair-advance；代码核对整队回执并保存 completed、outcome 和 dailyRound 完成状态，父任务保持 in_review。批次结束不代表人工验收、合并或上线；最后一项消息承担汇总，不另发批次汇总、不追加历史候选。真人明确跳过且固定队列已结束时，父批次保存 `state=completed`、`outcome=finished_with_skips`、`currentIssueId=null` 和授权评论，逐项说明缺口，不能宣称全部修复已交付或将跳过调查标为 delivered。读取时兼容旧 `state=finished_with_skips` 写法，后续写入使用上述 state/outcome 组合。
+不支持该命令的既有轮次继续该固定版本的原接续流程：按有效交付或受阻通知更新分类，保存下一项 index/currentIssueId 后唯一指派并回读；只有该版本允许越过受阻项时才推进。不因新 Prompt 切换旧轮脚本或调用不存在的命令。
+
+最后一项仍通过上述版本适配入口收尾：核对整队回执后保存 completed、outcome 和 dailyRound 完成状态，父任务保持 in_review。批次结束不代表人工验收、合并或上线；最后一项消息承担汇总，不另发批次汇总、不追加历史候选。真人明确跳过且固定队列已结束时，父批次保存 `state=completed`、`outcome=finished_with_skips`、`currentIssueId=null` 和授权评论，逐项说明缺口，不能宣称全部修复已交付或将跳过调查标为 delivered。读取时兼容旧 `state=finished_with_skips` 写法，后续写入使用上述 state/outcome 组合。
 
 人工修改、暂停、取消或跳过仍通过对应 Multica 任务评论提出，核对真实作者、评论 ID、所属任务、交付版本和语义。要求返工时复用该 Bug 的分支、PR 和证据，串行修订、局部复验并更新报告与 deliveryVersion；更新父任务的该项交付记录，不把旧任务再放行一次或打乱已启动的队列。普通讨论不当作改动指令，首行为 `回告`、`确认发布`、`已回告`、`不回告` 的评论按第 4 节处理，确认通过仅记录该版本人工审查结果，不再作为下一项启动条件。旧版本轮次中明确跳过真实受阻项时保存授权评论与未完成范围，按固定顺序推进；跳过不计为完整交付。受阻接续轮次的受阻项按「受阻通知与接续」处理。
 
@@ -347,7 +349,7 @@ Story 默认最多 2 条，写清用户、场景、操作、预期、实际偏�
 
 1. 保存 `dailyBug.state=blocked` 和 `blocker={kind,reason,resumeCondition,phase,affectedCaseIds,nextAction}`：reason 写清卡在哪一步及现有授权或能力为何无法继续，resumeCondition 写清继续所需的具体条件。任务置 blocked；已有 PR、阶段报告与证据照常保存。
 2. 按下方模板在该 Bug 的交付 thread 发送一次受阻结果；尚无 thread 时这条就是根消息。只用原生 user 元素 @ Winches 一次，发送前 dry-run 核对通知名单仅含 Winches，回读核对实际 user ID；不因已核实模块归属而 @ 模块负责人。回读后保存 `dailyBug.blockNotice={permalink,readbackVerified:true}`，在父批次 `blockNotices` 追加 `{issueId,permalink,readbackVerified:true,kind,at}`，并按看板字段台账追加该 Bug 的 delivery 记录。首次受阻结果未回读不得接续；已经回读的历史消息被真人删除后，不要求补发、重新点 🚫 或重新补验收，继续复用既有回执。
-3. 受阻接续轮次（本轮固定调度版本不是 `701a7303acb6da9b4ce40e1838aafa0922b8a22a` 或 `06de955418985ebbe13997447a0949fb3f19e12f`）：通知回读后调用上述 repair-advance，由代码保存 blockedBugIds 并接续下一项；受阻项保持 blocked，不等待解除或人工「跳过」。
+3. 受阻接续轮次（本轮固定调度版本不是 `701a7303acb6da9b4ce40e1838aafa0922b8a22a` 或 `06de955418985ebbe13997447a0949fb3f19e12f`）：通知回读后通过上述版本适配入口保存 blockedBugIds 并接续下一项；受阻项保持 blocked，不等待解除或人工「跳过」。
 4. 固定在上述两个旧版本的轮次：发送并回读受阻结果后，仍按原规则将父批次保存为 state=blocked，等待真人授权或「跳过」，不自动越过。
 5. 仅真人明确恢复：Winches 在受阻任务评论授权或「继续」时，核对真实作者、评论 ID 与恢复该项的语义，复用该 Bug 的 worktree、分支、PR 与证据，从 blocker 的恢复位置续作。按原门槛完成后用交付模板回复原 thread；原消息已删除时，仅为本次完整交付发送新根消息，不重建旧受阻通知。不回退、不重复推进固定队列，也不要求该项重新成为队列当前项；完成后把它从 `blockedBugIds` 移入 `deliveredBugIds` 并追加 `completedDeliveries`，全部受阻项都已交付时将 outcome 改为 engineering_delivery_completed。与队列当前项同时进行时，二者不共用 worktree、测试数据或浏览器 tab。
 6. 看板依据 `dailyBug.state=blocked` 单列“受阻”，展示 blocker.reason，不列入待审查、应上线、已交付 PR 或需要你处理；“不上线”仅用于真人 🚫 否决，不再要求受阻项点 🚫 或评论「跳过」。关联 PR 已全部合并时仍按真实合并结果记上线。

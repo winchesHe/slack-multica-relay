@@ -179,7 +179,19 @@ def plan(snapshot, *, round_id, current_issue, current_run, agent_id, project_id
         batch = queue.meta(scan, 'dailyBatch')
         if current_issue not in [round_id, *(batch.get('bugIds') or [])]:
             raise Error('当前任务不属于本轮修复队列')
-        bug_ids = {row['id'] for row in issues if queue.meta(row, 'dailyBug')}
+        # 只豁免已越过且有结算记录的返工；未来未交付项的异常运行仍须挡住重复派发。
+        bug_ids = set()
+        for row in issues:
+            bug = queue.meta(row, 'dailyBug')
+            if not bug:
+                continue
+            owner = queue.meta(by_id.get(bug.get('batchId')) or {}, 'dailyBatch')
+            settled = row['id'] in (owner.get('deliveredBugIds') or []) + (owner.get('blockedBugIds') or [])
+            passed = (owner.get('state') in queue.FINISHED_BATCHES
+                      or type(bug.get('index')) is int and type(owner.get('index')) is int
+                      and bug['index'] < owner['index'])
+            if not (settled and passed):
+                bug_ids.add(row['id'])
         check_runs(active, bug_ids | {round_id}, agent_id, runtime_id, workspace_id)
         if any(run['issue_id'] in bug_ids and run['id'] != current_run for run in active):
             return {'action': 'wait', 'reason': '已有修复运行，不能重叠派发'}
@@ -254,7 +266,7 @@ class Native:
             raise Error('运行历史响应不完整')
         return result
 
-    def snapshot(self):
+    def snapshot(self, round_id=None):
         project = self.call(['project', 'get', self.project_id])
         if project.get('id') != self.project_id:
             raise Error('项目身份不符')
@@ -279,7 +291,7 @@ class Native:
         if len(issues) != total:
             raise Error('任务分页总数不闭合')
         queue.attach_comments(issues, lambda issue_id: self.call(['issue', 'comment', 'list', issue_id,
-                                                                    '--full', '--compact']))
+                                                                    '--full', '--compact']), round_id=round_id)
         runs = self.call(['agent', 'tasks', self.agent_id])
         if not isinstance(runs, list):
             raise Error('Agent 运行响应不完整')
@@ -541,47 +553,53 @@ def advance(native, journal, scope, now=None, *, recovering=False):
 
 def repair_advance(native, journal, scope):
     """修复串行接续由代码持久化：交付或受阻通知齐全即越过，未知启动结果复用 journal。"""
-    snapshot = native.snapshot()
+    snapshot = native.snapshot(round_id=scope['round_id'])
     step = plan(snapshot, repairing=True, **scope)
     scan = next(row for row in snapshot['issues'] if row['id'] == scope['round_id'])
     batch = queue.meta(scan, 'dailyBatch')
     ids = batch.get('bugIds') or []
     for _ in range(len(ids) + 1):
-        if step['action'] in {'advance_after_block', 'advance_after_delivery'}:
-            # 即时回读父队列再计算；外部改动不能被旧 snapshot 覆盖。
+        if step['action'] in {'advance_after_block', 'advance_after_delivery', 'resume_repair', 'complete_round'}:
+            # 各次写入共用同一守卫，收尾同样不得覆盖真人取消或转交。
             fresh = native.issue(scan['id'])
-            if queue.meta(fresh, 'dailyBatch') != batch:
-                raise Error('父队列在接续期间变化，停止写入并重新规划')
-            field = 'blockedBugIds' if step['action'] == 'advance_after_block' else 'deliveredBugIds'
-            other = 'deliveredBugIds' if field == 'blockedBugIds' else 'blockedBugIds'
+            if (queue.meta(fresh, 'dailyBatch') != batch or fresh.get('status') in queue.STOPPED
+                    or fresh.get('assignee_id') != scope['agent_id']):
+                raise Error('父队列已变化、关闭或转交，停止接续')
+        if step['action'] in {'advance_after_block', 'advance_after_delivery'}:
+            current = native.issue(step['issueId'])
+            blocked = step['action'] == 'advance_after_block'
+            verified = queue.verified_block if blocked else queue.verified_delivery
+            if current.get('status') in queue.STOPPED or not verified(batch, current):
+                raise Error('当前项回执已变化，停止接续并重新规划')
+            field = 'blockedBugIds' if blocked else 'deliveredBugIds'
+            other = 'deliveredBugIds' if blocked else 'blockedBugIds'
             settled = step['issueId']
-            batch = {**batch, field: list(dict.fromkeys([*(batch.get(field) or []), settled])),
-                     other: [key for key in batch.get(other, []) if key != settled]}
+            updated = {**batch, field: list(dict.fromkeys([*(batch.get(field) or []), settled])),
+                       other: [key for key in batch.get(other, []) if key != settled]}
             if step['nextIssueId']:
-                batch.update(index=batch['index'] + 1, currentIssueId=step['nextIssueId'], state='running')
+                updated.update(index=batch['index'] + 1, currentIssueId=step['nextIssueId'], state='running')
             else:
-                batch.update(state='completed', currentIssueId=None,
-                             outcome='finished_with_blocked' if batch.get('blockedBugIds')
-                             else 'engineering_delivery_completed')
-            native.metadata(scan['id'], 'dailyBatch', batch)
-            scan['metadata']['dailyBatch'] = batch
-            step = queue.next_action(snapshot['issues'], snapshot['runs'], project_id=scope['project_id'],
-                                     agent_id=scope['agent_id'], current_issue_id=scope['current_issue'],
-                                     round_id=scope['round_id'])
+                updated.update(state='completed', currentIssueId=None,
+                               outcome='finished_with_blocked' if updated.get('blockedBugIds')
+                               else 'engineering_delivery_completed')
+            scan['metadata']['dailyBatch'] = updated
+            # 先在候选快照核验整队回执，再发布 completed，失败时线上仍保留原游标。
+            following = queue.next_action(snapshot['issues'], snapshot['runs'], project_id=scope['project_id'],
+                                          agent_id=scope['agent_id'], current_issue_id=scope['current_issue'],
+                                          round_id=scope['round_id'])
+            native.metadata(scan['id'], 'dailyBatch', updated)
+            batch, step = updated, following
             continue
         if step['action'] == 'resume_repair':
             target = step['issueId']
             if target == scope['current_issue']:
                 return step
-            fresh = native.issue(scan['id'])
-            if queue.meta(fresh, 'dailyBatch') != batch or fresh.get('status') in queue.STOPPED:
-                raise Error('启动前父队列已变化或关闭，停止派发')
             receipt = launch(native, journal, target, scope['agent_id'], scope['runtime_id'],
                              key=f"{scan['id']}:repair:{target}")
             return {'action': 'dispatch_repair', 'issueId': target, 'receipts': [receipt]}
         if step['action'] == 'complete_round':
-            native.metadata(scan['id'], 'dailyRound', {**queue.meta(scan, 'dailyRound'), 'state': 'completed'})
             native.status(scan['id'], 'in_review')
+            native.metadata(scan['id'], 'dailyRound', {**queue.meta(scan, 'dailyRound'), 'state': 'completed'})
         return step
     raise Error('修复队列接续超过固定清单长度')
 

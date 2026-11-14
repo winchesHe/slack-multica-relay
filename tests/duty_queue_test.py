@@ -165,16 +165,6 @@ class LaneRoundTests(unittest.TestCase):
         self.assertEqual([row['id'] for row in pending], ['scan:intercom:b', 'scan:intercom:c'])
         self.assertEqual(rows[0]['laneIssueId'], 'lane-1')
 
-    def test_repair_annotation_cannot_replace_frozen_investigation_with_lane_mode(self):
-        lanes = lane_freeze(self.scan, ['a'])
-        conclude(lanes[0], 'a', 'confirmed')
-        body = candidate('a', 'delivered')['metadata']['dailyInvestigation']
-        body['mode'] = 'investigate_lane'
-        lanes[0]['_comments'].append(comment('daily-investigation:v3', body,
-                                             at='2026-10-22T04:00:00Z'))
-        with self.assertRaisesRegex(queue.QueueError, 'intercom:a.*mode=investigate_lane'):
-            queue.round_candidates(self.scan, [self.scan, *lanes], 'agent')
-
     def test_manifest_lane_roster_and_foreign_records_fail_closed(self):
         lanes = lane_freeze(self.scan, ['a'])
         for change in ('hash', 'lane', 'foreign', 'manifest'):

@@ -105,7 +105,7 @@ python3 scripts/duty-queue.py \
   --project <值守项目 UUID> --agent <值守 Agent UUID> --current-issue <当前 Issue UUID>
 ```
 
-修复项完成交付或受阻通知回读后，调用同版本 `duty-dispatch.py repair-advance`，沿用 `advance` 的作用域参数。该命令在项目锁内核验真实运行与回执、持久化队列游标，并通过启动 journal 唯一派发下一项；调用方不再手工推进或指派。
+支持 `repair-advance` 的轮次在修复项完成交付或受阻通知回读后，调用同版本 `duty-dispatch.py repair-advance`，沿用 `advance` 的作用域参数。该命令在项目锁内核验真实运行与回执、持久化队列游标，并通过启动 journal 唯一派发下一项；调用方不再手工推进或指派。不支持该命令的旧固定版本继续原接续流程，不随 Prompt 自动切换脚本。
 
 隔离验证可传 `--snapshot <脱敏 JSON>`，输入为 `{"issues": [...], "runs": [...]}`，不访问服务。定向检查为 `python3 -m unittest tests/duty_queue_test.py`。
 
