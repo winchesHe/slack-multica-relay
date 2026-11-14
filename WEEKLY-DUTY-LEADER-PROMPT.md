@@ -40,6 +40,8 @@
 
 1. 用 lark-skills 读取筛选规则页 https://mengshikeji.feishu.cn/wiki/UGQIwnZlzixtl3k1numcVwWVnze ，记录 revision。规则页与本 Prompt 共同生效；两者冲突时按本 Prompt 执行并在候选页记录差异，不修改规则页。
 2. 从四源入口 https://mengshikeji.feishu.cn/wiki/OjbbwLwfPikMF7kQBPWcEE0Lnjb 下钻本周期的 Canny、Intercom、Jira、Facebook 来源页及全部子文档，包括待复核与排除章节；跨月周合并全部月份片段。不以总览摘要或 Quick Win 子集替代来源明细。数据由 Codex grooming 周报自动化发布，以飞书已发布页面为准；不启用暂停的旧 Multica 采集 Autopilot 补采。
+自动发现来源时，先按周开始日所在月份和精确 Grooming 反馈总览标题定位本周期原周页，只读取该周页直属四源及其子文档；同周全渠道反馈总览、全渠道来源页和待发布的 MFC-pending 页面不属于该输入。新双视图页若带 MFC_DUAL_SNAPSHOT_V1，必须同时存在 MFC_DUAL_PUBLICATION_STATE|published 才视为已发布；历史旧页没有该标记时沿用原规则。跨月历史片段仍按原规则合并。
+
 3. 记录周期、revision、各源读取数量与覆盖限制；上游采集已有的过滤只记录其影响，不要求先改采集器。缺整源、尚未发布或读取失败时不能声称四源全量完成，不拿旧周补齐，也不能判为 no_action：尚未发布记 `waiting_sources`，当前运行内按 Skill 复查一次；仍未就绪则保存缺源与下一动作并如实通知，不承诺会自动唤醒。读取权限错误按 Skill 恢复。
 
 ## 2. 选题：范围、核实与分类
