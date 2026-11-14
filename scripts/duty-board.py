@@ -335,9 +335,11 @@ ATTENTION_TITLES = {
 }
 
 
-def attention_line(key, entries):
+def attention_line(key, entries, limit=None):
+    visible = entries[-limit:] if limit else entries
+    more = f' 等 {len(entries)} 个' if limit and len(entries) > limit else ''
     return f"- {ATTENTION_TITLES[key]} {len(entries)}：" + '、'.join(
-        f"[{bug['identifier']}]({bug['url']})" + (f'（{note}）' if note else '') for bug, note in entries)
+        f"[{bug['identifier']}]({bug['url']})" + (f'（{note}）' if note else '') for bug, note in visible) + more
 
 
 def attention_notes(board, now):
@@ -454,9 +456,9 @@ def render_markdown(board, now):
     return '\n'.join(lines) + '\n'
 
 
-# Slack 版按状态分组；已上线、不上线会持续累积，只列前几个编号。
+# Slack 精简版各列表最多展示 5 个编号，完整看板保留全部明细。
 STATUS_ORDER = ('released', 'review', 'pr_closed', 'fixing', 'blocked', 'rejected')
-STATUS_LIST_LIMIT = {'released': 5, 'rejected': 5}
+SLACK_LIST_LIMIT = 5
 
 
 def status_lines(board, now):
@@ -467,7 +469,7 @@ def status_lines(board, now):
         bugs = [bug for bug in board['bugs'] if bug['state'] == state]
         if not bugs:
             continue
-        limit = STATUS_LIST_LIMIT.get(state, len(bugs))
+        limit = SLACK_LIST_LIMIT
         names = [f"[{bug['identifier']}]({bug['url']})" + (f"（{ages[bug['identifier']]}）" if bug['identifier'] in ages else '')
                  for bug in bugs[-limit:]]
         more = f' 等 {len(bugs)} 个' if len(bugs) > limit else ''
@@ -493,7 +495,7 @@ def render_slack(board, now, board_link=None):
     items = attention(board, now)
     for key in ('notify', 'responded'):
         if items[key]:
-            lines.append(attention_line(key, items[key]))
+            lines.append(attention_line(key, items[key], limit=SLACK_LIST_LIMIT))
     total = board['total']
     lines += ['', f"**累计（{board['start'][5:]} 起{total['scopeNote']}）**：{intake(total)} · 已上线 {total['released']} 个"
               f" · 已回告 {total['notified']} 个 · 客户回应 {total['responded']} 个"]
