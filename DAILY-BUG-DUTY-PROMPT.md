@@ -306,7 +306,7 @@ Story 默认最多 2 条，写清用户、场景、操作、预期、实际偏�
 
 按 `moe-opc/references/communications/slack-pr-review.md` 的本地 HTML 附件规则发送和回读，不启动其它 OPC 阶段。精简回复不降低完整报告、真实版本绑定或人工合并/发布权限要求。保存真实发送和附件回执；通知失败记录待发内容，不伪造成功。
 
-自动接续的条件是当前范围内修复与必要检查完成、动态验收和充分证据支持结论、PR 与完整 HTML 对应最终版本、交付消息及附件均已回读。run completed、本地测试成功、PR 创建、报告文件存在、CI 状态或阶段报告均不能单独放行。满足后，保存当前 `dailyBug.state=delivered`、`completeDelivery=true`、`reviewState=pending_human_review`、递增 deliveryVersion、PR head、报告版本、交付时间和真实回执；任务进入 in_review，人工审查与后续独立修复可以同时进行。父批次记录 deliveredBugIds 与每项实际交付版本；新流程 Bug 同时按 investigationIssueId 核对对应调查，将其保存为 delivered 并保留原验证与报告，不改变其它调查结论；完成工程交付不伪造真人确认、Approve、合并或上线记录。
+自动接续的条件是当前范围内修复与必要检查完成、动态验收和充分证据支持结论、PR 与完整 HTML 对应最终版本、交付消息及附件均已回读。run completed、本地测试成功、PR 创建、报告文件存在、CI 状态或阶段报告均不能单独放行。满足后，保存当前 `dailyBug.state=delivered`、`completeDelivery=true`、`reviewState=pending_human_review`、递增 deliveryVersion、PR head、报告版本、交付时间和真实回执；任务进入 in_review，人工审查与后续独立修复可以同时进行。父批次记录 deliveredBugIds 与每项实际交付版本；新流程 Bug 按 investigationIssueId 核对对应调查。工位轮次的调查结论在修复阶段保持冻结，不追加或改写 daily-investigation:v3 评论，修复与交付结果只写 dailyBug 和 dailyBatch；investigate_lane 仅用于工位任务入口，调查结论记录的 mode 必须始终为 investigate。旧逐条调查轮次更新原调查为 delivered 时，完整保留原验证与报告；完成工程交付不伪造真人确认、Approve、合并或上线记录。
 
 `dailyBug.deliveryVersion` 为正整数。父批次 `completedDeliveries` 每条记录使用以下结构，与 `duty-queue.py` 的交付恢复校验一致；示例中的占位符必须替换为实际值，两个 readback 标记仅在对应真实回读完成后才能为 true：
 
@@ -331,9 +331,13 @@ Story 默认最多 2 条，写清用户、场景、操作、预期、实际偏�
 
 跨仓时 `pr/prHead` 记录主 PR，另用 `prs` 保存全部 `{url,head}`；完整 HTML 必须绑定全部 PR 的实际版本，所有仓库都满足原交付门槛后才设置 completeDelivery。已有回执若采用其它字段，先根据原产物与真实回读核验并补齐上述字段，不能只为满足格式而补写成功标记。
 
+接续计划返回 advance_after_delivery 时，只核对当前版本的交付回执并补完下述队列推进，不重新修复、不重新发交付、不等待人工审查。返回 advance_after_block 时按「受阻通知与接续」推进；后继若已交付且回执完整，先保存该位置并再次规划，越过它接到第一个未完成项，不重复启动已交付任务。
+
 随后按固定 bugIds 选择下一项，先保存父任务的新 index/currentIssueId/state=running，再只指派下一项自身启动并回读 queued/dispatched/running；保存该交付版本与下一项的实际 dispatch 回执后结束当前运行。下一项仅排队，须在前项运行结束后占用唯一名额；不得占着当前运行等待它开工或完成。写入/启动结果不明先查现状，已有运行不重复启动。恢复时以当前队列位置、交付版本和已有回执判断接续是否已执行，旧任务重跑或重复确认不能回退 index 或再次启动下一项。通知或调度真实失败时保存具体缺口与待恢复动作，不用未完成交付或假回执推进。
 
 固定队列最后一项完整交付或受阻结果回读后，将父批次标为 `state=completed`、`currentIssueId=null`：全部完整交付时 `outcome=engineering_delivery_completed`；有受阻项时 `outcome=finished_with_blocked`，`deliveredBugIds` 与 `blockedBugIds` 恰好覆盖全部 bugIds。父任务保留 in_review，不另发批次汇总。随后按统一接续的 complete_round 核对本轮全部真实交付、受阻通知与版本，标记 dailyRound.state=completed；结束本轮，不回到历史调查队列，也不追加新候选。批次 completed 不表示人工验收、PR 合并或生产发布。真人明确跳过且固定队列已结束时，父批次保存 `state=completed`、`outcome=finished_with_skips`、`currentIssueId=null` 和授权评论，逐项说明缺口，不能宣称全部修复已交付或将跳过调查标为 delivered。读取时兼容旧 `state=finished_with_skips` 写法，后续写入使用上述 state/outcome 组合。
+
+父扫描因子任务报告、附件或交付评论自动唤醒时，只核对并记录结果，不把自动复核当作真人返工授权；不得据此回退父队列 index/currentIssueId、撤销后继指派或重写已完成项。发现证据缺口时记录具体缺口；只有核对到真人明确返工指令才修改对应 Bug 的执行状态，且仍不回退队列。新轮次单项受阻且通知已回读时，不把父批次设为 blocked，不等待「跳过」，按固定版本计划器执行 advance_after_block。
 
 人工修改、暂停、取消或跳过仍通过对应 Multica 任务评论提出，核对真实作者、评论 ID、所属任务、交付版本和语义。要求返工时复用该 Bug 的分支、PR 和证据，串行修订、局部复验并更新报告与 deliveryVersion；更新父任务的该项交付记录，不把旧任务再放行一次或打乱已启动的队列。普通讨论不当作改动指令，首行为 `回告`、`确认发布`、`已回告`、`不回告` 的评论按第 4 节处理，确认通过仅记录该版本人工审查结果，不再作为下一项启动条件。旧版本轮次中明确跳过真实受阻项时保存授权评论与未完成范围，按固定顺序推进；跳过不计为完整交付。受阻接续轮次的受阻项按「受阻通知与接续」处理。
 

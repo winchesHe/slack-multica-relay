@@ -165,6 +165,16 @@ class LaneRoundTests(unittest.TestCase):
         self.assertEqual([row['id'] for row in pending], ['scan:intercom:b', 'scan:intercom:c'])
         self.assertEqual(rows[0]['laneIssueId'], 'lane-1')
 
+    def test_repair_annotation_cannot_replace_frozen_investigation_with_lane_mode(self):
+        lanes = lane_freeze(self.scan, ['a'])
+        conclude(lanes[0], 'a', 'confirmed')
+        body = candidate('a', 'delivered')['metadata']['dailyInvestigation']
+        body['mode'] = 'investigate_lane'
+        lanes[0]['_comments'].append(comment('daily-investigation:v3', body,
+                                             at='2026-10-22T04:00:00Z'))
+        with self.assertRaisesRegex(queue.QueueError, 'intercom:a.*mode=investigate_lane'):
+            queue.round_candidates(self.scan, [self.scan, *lanes], 'agent')
+
     def test_manifest_lane_roster_and_foreign_records_fail_closed(self):
         lanes = lane_freeze(self.scan, ['a'])
         for change in ('hash', 'lane', 'foreign', 'manifest'):
@@ -410,6 +420,33 @@ class RoundTests(unittest.TestCase):
         receipt['deliveryVersion'] = 1
         with self.assertRaises(queue.QueueError):
             self.plan(row, bug)
+
+    def test_delivered_current_only_resumes_handoff_and_requires_current_receipts(self):
+        rows = [candidate('first', 'waiting_repair'), candidate('second', 'waiting_repair')]
+        freeze(self.scan, rows, complete=True)
+        bugs = add_repair(self.scan, rows)
+        batch = self.scan['metadata']['dailyBatch']
+        batch['completedDeliveries'] = [receipt(bugs[0])]
+        result = self.plan(*rows, *bugs)
+        self.assertEqual((result['action'], result['nextIssueId']),
+                         ('advance_after_delivery', bugs[1]['id']))
+        batch['completedDeliveries'][0]['deliveryVersion'] += 1
+        self.assertEqual(self.plan(*rows, *bugs)['action'], 'resume_repair')
+        batch['state'] = 'paused'
+        self.assertEqual(self.plan(*rows, *bugs)['action'], 'attention')
+
+    def test_notified_block_then_delivered_successor_can_resume_without_repairing_either(self):
+        rows = [candidate(key, 'waiting_repair') for key in ('first', 'second', 'third')]
+        freeze(self.scan, rows, complete=True)
+        bugs = add_repair(self.scan, rows)
+        block(self.scan, bugs[0])
+        batch = self.scan['metadata']['dailyBatch']
+        batch['completedDeliveries'] = [receipt(bugs[1])]
+        self.assertEqual(self.plan(*rows, *bugs)['action'], 'advance_after_block')
+        batch.update(index=2, currentIssueId=bugs[1]['id'], blockedBugIds=[bugs[0]['id']])
+        result = self.plan(*rows, *bugs)
+        self.assertEqual((result['action'], result['nextIssueId']),
+                         ('advance_after_delivery', bugs[2]['id']))
 
     def test_notified_block_moves_to_next_item_without_counting_as_delivery(self):
         rows = [candidate('first', 'waiting_repair'), candidate('second', 'waiting_repair')]

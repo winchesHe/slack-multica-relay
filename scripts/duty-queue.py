@@ -254,7 +254,8 @@ def lane_round_candidates(scan, issues, agent_id):
         item, lane = latest.get(entry['candidateId'], (default, None))
         if (item.get('schemaVersion') != 1 or item.get('mode') != 'investigate'
                 or item.get('sourceScanId') != scan['id'] or item.get('state') not in STATES):
-            raise QueueError('工位调查记录协议或状态无效')
+            raise QueueError(f"工位调查记录协议或状态无效：{entry['candidateId']}，"
+                             f"工位={(lane or {}).get('id')}，mode={item.get('mode')}，state={item.get('state')}")
         if (item['state'] == 'skipped_failure'
                 and meta(scan, 'dailyExecution').get('investigationFailurePolicy') != FAILURE_POLICY):
             raise QueueError('本轮未启用有限重试与失败跳过协议')
@@ -406,6 +407,10 @@ def batch_plan(batch_issue, issues, by_id, agent_id):
         raise QueueError('当前 Bug 与固定批次位置不符')
     if batch.get('state') in ('blocked', 'paused', 'cancelled') or current.get('status') in STOPPED:
         return {'action': 'attention', 'issueId': current['id'], 'reason': '按原修复流程恢复阻塞，不绕过交付门槛或真人暂停'}
+    if verified_delivery(batch, current):
+        return {'action': 'advance_after_delivery', 'issueId': current['id'], 'batchId': batch_issue['id'],
+                'nextIssueId': bug_ids[index] if index < len(bug_ids) else None,
+                'reason': '当前版本完整交付已回读，只补队列接续，不重复修复或等待人工审查'}
     if verified_block(batch, current):
         return {'action': 'advance_after_block', 'issueId': current['id'], 'batchId': batch_issue['id'],
                 'nextIssueId': bug_ids[index] if index < len(bug_ids) else None,
