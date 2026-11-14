@@ -105,6 +105,8 @@ python3 scripts/duty-queue.py \
   --project <值守项目 UUID> --agent <值守 Agent UUID> --current-issue <当前 Issue UUID>
 ```
 
+支持 `repair-advance` 的轮次在修复项完成交付或受阻通知回读后，调用同版本 `duty-dispatch.py repair-advance`，沿用 `advance` 的作用域参数。该命令在项目锁内核验真实运行与回执、持久化队列游标，并通过启动 journal 唯一派发下一项；调用方不再手工推进或指派。不支持该命令的旧固定版本继续原接续流程，不随 Prompt 自动切换脚本。
+
 隔离验证可传 `--snapshot <脱敏 JSON>`，输入为 `{"issues": [...], "runs": [...]}`，不访问服务。定向检查为 `python3 -m unittest tests/duty_queue_test.py`。
 
 线上同步先创建流程 PR，再按 AGENTS.md 核对线上 instructions 和 Autopilot description，仅更新对应字段及扫描的 02:00 Asia/Shanghai 定时（cron 为 `0 2 * * *`）。Prompt 中的 `<调度器提交 SHA>` 绑定本 PR 已推送并回读的完整提交 SHA，运行时精确 fetch/show 此版本，避免 PR 尚未合入时误用旧 origin/main 调度器；后续改动同步时重新绑定版本。发布时保留值守并发 1、Runtime、模型与环境；新轮仅由调查调度器在调查阶段切换为 2，汇总前恢复为 1。看板仍为 10:00 阶段快照。配置回读不等同于真实每日周期完成，不为验证配置擅自触发新采集。

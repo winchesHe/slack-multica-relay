@@ -411,6 +411,33 @@ class RoundTests(unittest.TestCase):
         with self.assertRaises(queue.QueueError):
             self.plan(row, bug)
 
+    def test_delivered_current_only_resumes_handoff_and_requires_current_receipts(self):
+        rows = [candidate('first', 'waiting_repair'), candidate('second', 'waiting_repair')]
+        freeze(self.scan, rows, complete=True)
+        bugs = add_repair(self.scan, rows)
+        batch = self.scan['metadata']['dailyBatch']
+        batch['completedDeliveries'] = [receipt(bugs[0])]
+        result = self.plan(*rows, *bugs)
+        self.assertEqual((result['action'], result['nextIssueId']),
+                         ('advance_after_delivery', bugs[1]['id']))
+        batch['completedDeliveries'][0]['deliveryVersion'] += 1
+        self.assertEqual(self.plan(*rows, *bugs)['action'], 'resume_repair')
+        batch['state'] = 'paused'
+        self.assertEqual(self.plan(*rows, *bugs)['action'], 'attention')
+
+    def test_notified_block_then_delivered_successor_can_resume_without_repairing_either(self):
+        rows = [candidate(key, 'waiting_repair') for key in ('first', 'second', 'third')]
+        freeze(self.scan, rows, complete=True)
+        bugs = add_repair(self.scan, rows)
+        block(self.scan, bugs[0])
+        batch = self.scan['metadata']['dailyBatch']
+        batch['completedDeliveries'] = [receipt(bugs[1])]
+        self.assertEqual(self.plan(*rows, *bugs)['action'], 'advance_after_block')
+        batch.update(index=2, currentIssueId=bugs[1]['id'], blockedBugIds=[bugs[0]['id']])
+        result = self.plan(*rows, *bugs)
+        self.assertEqual((result['action'], result['nextIssueId']),
+                         ('advance_after_delivery', bugs[2]['id']))
+
     def test_notified_block_moves_to_next_item_without_counting_as_delivery(self):
         rows = [candidate('first', 'waiting_repair'), candidate('second', 'waiting_repair')]
         freeze(self.scan, rows, complete=True)

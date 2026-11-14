@@ -404,8 +404,18 @@ def batch_plan(batch_issue, issues, by_id, agent_id):
     bug = meta(current, 'dailyBug')
     if bug.get('batchId') != batch_issue['id'] or bug.get('index') != index or bug.get('total') != len(bug_ids):
         raise QueueError('当前 Bug 与固定批次位置不符')
-    if batch.get('state') in ('blocked', 'paused', 'cancelled') or current.get('status') in STOPPED:
+    revision = meta(scan, 'dailyExecution').get('schedulerRevision') if scan else None
+    block_can_advance = (text(revision) and revision not in {
+        '701a7303acb6da9b4ce40e1838aafa0922b8a22a', '06de955418985ebbe13997447a0949fb3f19e12f'}
+        and verified_block(batch, current))
+    # 新轮次的单项受阻不等于人工暂停整轮；旧轮次仍保持原授权边界。
+    if (batch.get('state') in ('paused', 'cancelled') or current.get('status') in STOPPED
+            or batch.get('state') == 'blocked' and not block_can_advance):
         return {'action': 'attention', 'issueId': current['id'], 'reason': '按原修复流程恢复阻塞，不绕过交付门槛或真人暂停'}
+    if verified_delivery(batch, current):
+        return {'action': 'advance_after_delivery', 'issueId': current['id'], 'batchId': batch_issue['id'],
+                'nextIssueId': bug_ids[index] if index < len(bug_ids) else None,
+                'reason': '当前版本完整交付已回读，只补队列接续，不重复修复或等待人工审查'}
     if verified_block(batch, current):
         return {'action': 'advance_after_block', 'issueId': current['id'], 'batchId': batch_issue['id'],
                 'nextIssueId': bug_ids[index] if index < len(bug_ids) else None,
@@ -491,13 +501,13 @@ def query(cli, args):
         raise QueueError('Multica 只读查询失败，请检查 CLI 身份与目标') from error
 
 
-def attach_comments(issues, fetch, include_finished=False):
+def attach_comments(issues, fetch, include_finished=False, round_id=None):
     """为工位轮次的原扫描与工位卡附上评论（`_comments`），供清单与逐条结论读取；其它任务不读评论。"""
     rounds = set()
     for issue in issues:
         info, batch = meta(issue, 'dailyRound'), meta(issue, 'dailyBatch')
         unfinished = info.get('state') != 'completed' or (batch.get('bugIds') and batch.get('state') not in FINISHED_BATCHES)
-        if lane_store(issue) and (include_finished or unfinished):
+        if lane_store(issue) and (include_finished or unfinished or issue['id'] == round_id):
             rounds.add(issue['id'])
     for issue in issues:
         if issue['id'] in rounds or meta(issue, 'dailyLane').get('roundId') in rounds:
