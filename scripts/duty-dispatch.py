@@ -161,17 +161,27 @@ def plan(snapshot, *, round_id, current_issue, current_run, agent_id, project_id
             raise Error('当前任务或扫描不属于指定项目与工作区')
     if scan.get('assignee_id') != agent_id or scan.get('status') in queue.STOPPED:
         raise Error('扫描归属不符或已结束，不能重新启动')
-    if by_id[current_issue].get('assignee_id') != agent_id:
-        raise Error('当前任务归属已改变')
     active = [run for run in runs if run.get('status') in queue.IN_FLIGHT]
     own = [run for run in active if run.get('id') == current_run]
+    batch_issues = [round_id, *(queue.meta(scan, 'dailyBatch').get('bugIds') or [])]
+    finished_mismatch = current_run is not None and any(
+        run.get('id') == current_run and (
+            run.get('issue_id') != current_issue or run.get('agent_id') != agent_id
+            or run.get('runtime_id') != runtime_id or run.get('workspace_id') != workspace_id)
+        for run in runs)
+    repair_reentry = (repairing and (current_run is None or not own)
+                      and not finished_mismatch and current_issue in batch_issues)
+    expected_assignees = (None, agent_id) if repair_reentry else (agent_id,)
+    if by_id[current_issue].get('assignee_id') not in expected_assignees:
+        raise Error('当前任务归属已改变')
     if recovering:
         if (not queue.lane_store(scan) or current_issue == round_id or current_run is not None
                 or queue.meta(by_id[current_issue], 'dailyLane').get('roundId') != round_id
                 or any(run.get('issue_id') == current_issue for run in active)
                 or queue.meta(scan, 'dailyExecution').get('investigationFailurePolicy') != queue.FAILURE_POLICY):
             raise Error('恢复只适用于已启用异常接续、且没有活动运行的本轮工位')
-    elif (len(own) != 1 or own[0].get('issue_id') != current_issue
+    elif not repair_reentry and (
+            len(own) != 1 or own[0].get('issue_id') != current_issue
             or own[0].get('agent_id') != agent_id or own[0].get('runtime_id') != runtime_id
             or own[0].get('workspace_id') != workspace_id or own[0].get('status') != 'running'):
         raise Error('调用者没有对应的真实执行中 run')
@@ -459,7 +469,7 @@ def lane_launch(native, journal, row, candidate, item, scope, *, failing=False, 
 
 
 def advance(native, journal, scope, now=None, *, recovering=False):
-    snapshot = native.snapshot()
+    snapshot = native.snapshot(round_id=scope['round_id'])
     result = plan(snapshot, handoff=True, recovering=recovering, **scope)
     if result['action'] in ('register_round', 'yield_to_finalizer'):
         return result
@@ -592,7 +602,9 @@ def repair_advance(native, journal, scope):
             continue
         if step['action'] == 'resume_repair':
             target = step['issueId']
-            if target == scope['current_issue']:
+            target_running = any(run.get('issue_id') == target and run.get('status') in queue.IN_FLIGHT
+                                 for run in snapshot['runs'])
+            if target == scope['current_issue'] and target_running:
                 return step
             receipt = launch(native, journal, target, scope['agent_id'], scope['runtime_id'],
                              key=f"{scan['id']}:repair:{target}")
@@ -646,7 +658,7 @@ def main():
         for value in ids:
             if re.fullmatch(r'[a-zA-Z0-9-]+', value) is None:
                 raise Error('作用域 ID 格式无效')
-        required = [key for key in scope if key != 'current_run' or args.command != 'recover']
+        required = [key for key in scope if key != 'current_run' or args.command not in {'recover', 'repair-advance'}]
         if args.command != 'release-repair' and not all(scope[key] for key in required):
             raise Error('必须提供轮次、当前任务与固定版本；plan/advance 还必须提供当前运行')
         root = Path.home() / '.config/moego/daily-bug-duty/dispatch' / args.workspace_id / args.agent_id
@@ -654,7 +666,7 @@ def main():
                         args.project_id, args.agent_id)
         with locked(root / (args.project_id + '.lock')):
             if args.command == 'plan':
-                result = plan(native.snapshot(), **scope)
+                result = plan(native.snapshot(round_id=scope['round_id']), **scope)
             elif args.command == 'repair-advance':
                 result = repair_advance(native, Journal(root / (args.round_id + '.json')), scope)
             elif args.command in {'advance', 'recover'}:

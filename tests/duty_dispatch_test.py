@@ -1,7 +1,10 @@
 """两个调查同时交接、真实启动回读、单一汇总与旧轮隔离的定向回归。"""
+import contextlib
 import copy
 from concurrent.futures import ThreadPoolExecutor
 import importlib.util
+import io
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -297,6 +300,88 @@ class RepairAdvanceTests(unittest.TestCase):
         self.data['runs'].append(run(self.bugs[2]['id']))
         self.assertEqual(self.advance()['action'], 'wait')
         self.assertEqual(self.native.starts, [])
+
+    def test_repair_reentry_resumes_unassigned_current_issue_without_active_run(self):
+        block(self.scan, self.bugs[0])
+        dispatch.queue.meta(self.scan, 'dailyBatch').update(
+            index=2, currentIssueId=self.bugs[1]['id'], blockedBugIds=[self.bugs[0]['id']])
+        self.data['runs'] = [run(self.bugs[0]['id'], status='completed')]
+
+        # 带已结束但错配的 current_run（属于 bugs[0] 却指向 bugs[1]）在任何归属状态下都被拒绝。
+        mismatch_scope = {**self.scope, 'current_issue': self.bugs[1]['id']}
+        with self.assertRaisesRegex(dispatch.Error, '归属已改变'):
+            dispatch.repair_advance(self.native, self.journal, mismatch_scope)
+        self.bugs[1]['assignee_id'] = 'agent'
+        with self.assertRaisesRegex(dispatch.Error, '真实执行中 run'):
+            dispatch.repair_advance(self.native, self.journal, mismatch_scope)
+        self.bugs[1]['assignee_id'] = None
+
+        # bugs[1] 自身上一条 run 已失败，或省略 current_run（None）重入时，都会幂等指派并启动 bugs[1]。
+        self.data['runs'].append(run(self.bugs[1]['id'], 'bug2-failed', status='failed'))
+        failed_scope = {**self.scope, 'current_issue': self.bugs[1]['id'], 'current_run': 'bug2-failed'}
+        first = dispatch.repair_advance(self.native, self.journal, failed_scope)
+        self.assertEqual((first['action'], first['issueId']), ('dispatch_repair', self.bugs[1]['id']))
+        self.assertEqual(self.native.issue(self.bugs[1]['id'])['assignee_id'], 'agent')
+        self.assertEqual(self.native.starts, [self.bugs[1]['id']])
+
+        # 已有活动 queued run 时，重入省略 current_run 返回 wait，不重复启动。
+        reentry_scope = {**self.scope, 'current_issue': self.bugs[1]['id'], 'current_run': None}
+        second = dispatch.repair_advance(self.native, self.journal, reentry_scope)
+        self.assertEqual(second['action'], 'wait')
+        self.assertEqual(self.native.starts, [self.bugs[1]['id']])
+
+        # 被转交其它 Agent 或存在另一条未结算 bug 的活动 run 时仍保护不强推。
+        self.data['runs'] = [run(self.bugs[2]['id'], status='running')]
+        blocked = dispatch.repair_advance(self.native, self.journal, reentry_scope)
+        self.assertEqual(blocked['action'], 'wait')
+        self.data['runs'] = []
+        self.bugs[1]['assignee_id'] = 'other-agent'
+        with self.assertRaisesRegex(dispatch.Error, '归属已改变'):
+            dispatch.repair_advance(self.native, self.journal, reentry_scope)
+
+    def test_cli_repair_advance_omits_current_run_and_plan_passes_round_id(self):
+        block(self.scan, self.bugs[0])
+        dispatch.queue.meta(self.scan, 'dailyBatch').update(
+            index=2, currentIssueId=self.bugs[1]['id'], blockedBugIds=[self.bugs[0]['id']])
+        self.data['runs'] = []
+        seen_rounds = []
+        orig_snapshot = self.native.snapshot
+        def spy_snapshot(round_id=None):
+            seen_rounds.append(round_id)
+            return orig_snapshot(round_id=round_id)
+        self.native.snapshot = spy_snapshot
+
+        common_argv = [
+            '--server-url', 'https://multica.example',
+            '--workspace-id', 'workspace', '--project-id', 'project',
+            '--agent-id', 'agent', '--runtime-id', 'runtime',
+            '--round-id', 'scan', '--revision', REVISION,
+        ]
+        repair_argv = ['duty-dispatch.py', 'repair-advance', *common_argv, '--current-issue', self.bugs[1]['id']]
+        plan_argv = ['duty-dispatch.py', 'plan', *common_argv, '--current-issue', 'scan', '--current-run', 'scan-run']
+
+        with (patch.object(dispatch, 'Native', return_value=self.native),
+              patch.object(Path, 'home', return_value=Path(self.temp.name))):
+            buf = io.StringIO()
+            with patch('sys.argv', repair_argv), contextlib.redirect_stdout(buf):
+                rc = dispatch.main()
+            self.assertEqual(rc, 0)
+            payload = json.loads(buf.getvalue())
+            self.assertEqual((payload['action'], payload['issueId']), ('dispatch_repair', self.bugs[1]['id']))
+
+            # 切换 snapshot 验证 plan 命令与 advance 都会传递 round_id。
+            self.data['runs'] = [run('scan')]
+            buf = io.StringIO()
+            with patch('sys.argv', plan_argv), contextlib.redirect_stdout(buf):
+                rc = dispatch.main()
+            self.assertEqual(rc, 0)
+            self.assertEqual(json.loads(buf.getvalue())['action'], 'finalize_round_here')
+            self.assertEqual(
+                dispatch.advance(self.native, self.journal, {**SCOPE, 'current_issue': 'scan', 'current_run': 'scan-run'})['action'],
+                'finalize_round_here',
+            )
+
+        self.assertEqual(seen_rounds, ['scan', 'scan', 'scan'])
 
 
 class PlanTests(unittest.TestCase):

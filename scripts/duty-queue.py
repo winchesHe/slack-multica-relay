@@ -60,6 +60,33 @@ def text(value):
     return isinstance(value, str) and bool(value.strip())
 
 
+def source_tokens(value):
+    """从来源链接或证据版本中提取可比对的来源标识（如 Intercom 会话 ID、Canny 帖标识）。"""
+    if not isinstance(value, str) or not value:
+        return set()
+    tokens = {f'intercom:{m}' for m in re.findall(r'(?:intercom:|/conversation/)(\d+)', value)}
+    tokens |= {f'canny:{m}' for m in re.findall(r'(?:canny\.io/[^/]+/p/|canny:)([^/?#\s;@]+)', value)}
+    return tokens
+
+
+def valid_source_anchor(item, entry=None):
+    """核对调查记录与候选清单的来源链接/标识是否一致；清单缺少 sourceUrl 时向后兼容。"""
+    if not isinstance(entry, dict) or not text(entry.get('sourceUrl')):
+        return True
+    expected_url = entry['sourceUrl'].strip()
+    if text(item.get('sourceUrl')) and item['sourceUrl'].strip() != expected_url:
+        return False
+    expected_tokens = source_tokens(expected_url)
+    has_evidence = (item.get('state') not in {None, 'ready', 'investigating', 'skipped_failure'}
+                    or (concluded(item) and item.get('state') != 'skipped_failure')
+                    or text(item.get('sourceUrl')) or text(item.get('evidenceRevision')))
+    if expected_tokens and has_evidence:
+        actual_tokens = source_tokens(item.get('sourceUrl')) | source_tokens(item.get('evidenceRevision'))
+        if not (expected_tokens & actual_tokens):
+            return False
+    return True
+
+
 def valid_external_block(item):
     block = item.get('blocker') or {}
     if not isinstance(block, dict):
@@ -248,6 +275,8 @@ def lane_round_candidates(scan, issues, agent_id):
             found.append((created, item, lane))
     latest = {item['candidateId']: (item, lane) for _, item, lane in sorted(found, key=lambda entry: entry[0])}
     rows, pending = [], []
+    seen_attachments, seen_hashes, seen_intercom = {}, {}, {}
+    enforce_unique = info.get('investigationComplete') is not True
     for entry in sorted(entries, key=lambda value: (value['feedbackDate'], value['candidateId'])):
         default = {'schemaVersion': 1, 'mode': 'investigate', 'roundId': scan['id'], 'sourceScanId': scan['id'],
                    'candidateId': entry['candidateId'], 'feedbackDate': entry['feedbackDate'], 'state': 'ready'}
@@ -260,6 +289,26 @@ def lane_round_candidates(scan, issues, agent_id):
             raise QueueError('本轮未启用有限重试与失败跳过协议')
         if item['state'] in {'paused', 'cancelled'}:
             raise QueueError('本轮包含人工暂停或取消项，须核对决定，不能当作调查完成')
+        if not valid_source_anchor(item, entry):
+            raise QueueError('工位调查记录的来源锚点与候选清单不一致')
+        if enforce_unique and concluded(item) and item['state'] != 'skipped_failure':
+            rec = item.get('investigationRecord') or {}
+            att_id, digest = rec.get('attachmentId'), rec.get('sha256')
+            if text(att_id):
+                if att_id in seen_attachments:
+                    raise QueueError('不同候选复用了同一份调查报告或来源会话证据')
+                seen_attachments[att_id] = entry['candidateId']
+            if text(digest):
+                if digest in seen_hashes:
+                    raise QueueError('不同候选复用了同一份调查报告或来源会话证据')
+                seen_hashes[digest] = entry['candidateId']
+            if item['state'] in FIXABLE:
+                intercom_tokens = [tok for tok in source_tokens(item.get('evidenceRevision'))
+                                   if tok.startswith('intercom:')]
+                if len(intercom_tokens) == 1:
+                    if intercom_tokens[0] in seen_intercom:
+                        raise QueueError('不同候选复用了同一份调查报告或来源会话证据')
+                    seen_intercom[intercom_tokens[0]] = entry['candidateId']
         row = {'id': record_id(scan['id'], entry['candidateId']), 'project_id': scan.get('project_id'),
                'workspace_id': scan.get('workspace_id'), 'parent_issue_id': scan['id'],
                'assignee_id': scan.get('assignee_id'), 'status': 'in_progress',
@@ -501,10 +550,19 @@ def query(cli, args):
         raise QueueError('Multica 只读查询失败，请检查 CLI 身份与目标') from error
 
 
+def belongs_to_round(issue, round_id):
+    return (issue.get('id') == round_id or issue.get('parent_issue_id') == round_id
+            or meta(issue, 'dailyInvestigation').get('roundId') == round_id
+            or meta(issue, 'dailyLane').get('roundId') == round_id
+            or meta(issue, 'dailyBug').get('batchId') == round_id)
+
+
 def attach_comments(issues, fetch, include_finished=False, round_id=None):
     """为工位轮次的原扫描与工位卡附上评论（`_comments`），供清单与逐条结论读取；其它任务不读评论。"""
     rounds = set()
     for issue in issues:
+        if round_id is not None and issue['id'] != round_id:
+            continue
         info, batch = meta(issue, 'dailyRound'), meta(issue, 'dailyBatch')
         unfinished = info.get('state') != 'completed' or (batch.get('bugIds') and batch.get('state') not in FINISHED_BATCHES)
         if lane_store(issue) and (include_finished or unfinished or issue['id'] == round_id):
@@ -518,7 +576,7 @@ def attach_comments(issues, fetch, include_finished=False, round_id=None):
     return issues
 
 
-def snapshot(cli, project_id, agent_id, current_issue_id):
+def snapshot(cli, project_id, agent_id, current_issue_id, round_id=None):
     project = query(cli, ['project', 'get', project_id])
     agent = query(cli, ['agent', 'get', agent_id])
     # 工位轮次起并发固定为 2；旧轮次脚本仍要求 1，切换由真人在旧轮次结束后执行。
@@ -543,10 +601,13 @@ def snapshot(cli, project_id, agent_id, current_issue_id):
         offset += len(rows)
     if len(issues) != total:
         raise QueueError('任务分页总数不闭合')
-    attach_comments(issues, lambda issue_id: query(cli, ['issue', 'comment', 'list', issue_id, '--full', '--compact']))
+    attach_comments(issues, lambda issue_id: query(cli, ['issue', 'comment', 'list', issue_id, '--full', '--compact']),
+                    round_id=round_id)
     # 只查询正在交接/执行的现场，启动前还须即时回读所选任务。
     run_ids = set()
     for issue in issues:
+        if round_id is not None and not belongs_to_round(issue, round_id):
+            continue
         item, batch = meta(issue, 'dailyInvestigation'), meta(issue, 'dailyBatch')
         if (issue.get('status') == 'in_progress' or item.get('state') == 'investigating'
                 or meta(issue, 'dailyLane').get('state') == 'investigating'):
@@ -578,7 +639,7 @@ def main():
             issues, runs = data['issues'], data['runs']
         else:
             cli = ['multica', '--server-url', args.server_url, '--workspace-id', args.workspace_id]
-            issues, runs = snapshot(cli, args.project, args.agent, args.current_issue)
+            issues, runs = snapshot(cli, args.project, args.agent, args.current_issue, round_id=args.round_id)
         plan = next_action(issues, runs, project_id=args.project, agent_id=args.agent,
                            current_issue_id=args.current_issue, round_id=args.round_id)
         print(json.dumps({'protocolVersion': PROTOCOL_VERSION, **plan}, ensure_ascii=False))
