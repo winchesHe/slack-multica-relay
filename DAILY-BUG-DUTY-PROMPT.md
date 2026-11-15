@@ -6,7 +6,7 @@
 
 ## 入口与范围
 
-- 先回读当前 Issue、真实父任务、metadata、触发评论及已有运行。`mode=scan` 负责本轮采集、固定清单、全部调查与修复登记；`mode=investigate_lane` 是工位轮次的调查工位卡，每次运行只查调度器分配给本工位的一条候选；`mode=investigate` 只处理逐条调查轮次中有当前 roundId 的一条调查并接续本轮；`mode=resume` 仅恢复已登记的新流程轮次，不能重新导入用户已停止的历史队列。这四种入口不修改业务实现。`mode=bug` 按本轮调查完成门槛处理修复，或按原规则处理已交付项的审查反馈；`mode=gate_test` 保留原隔离测试入口。旧调查或未知 mode 先核对，不默认启动修复。
+- 先回读当前 Issue、真实父任务、metadata、触发评论及已有运行。`mode=scan` 负责本轮采集、固定清单、全部调查与修复登记；`mode=investigate_lane` 是工位轮次的调查工位卡，每次运行只查调度器分配给本工位的一条候选；`mode=investigate` 只处理逐条调查轮次中有当前 roundId 的一条调查并接续本轮；`mode=resume` 仅恢复已登记的新流程轮次，不能重新导入用户已停止的历史队列。这四种入口不修改业务实现。修复阶段父任务（`mode=scan`）若因 Multica 自动派发的 `child.attention` / `issue_wakeup`（子任务进入 `blocked` 或 `in_review`）被系统唤醒，该唤醒仅作为队列状态复核信号，不属于真人恢复授权：只允许只读核对子任务回执与队列游标，若子任务退出前尚未推进队列则按本轮固定调度器完成接续后立即退出；严禁在父任务运行中替子任务补测试数据、执行动态验收、改写子任务受阻结论或状态、新建/更新 PR 或代发子任务 Slack 交付与回复。`mode=bug` 按本轮调查完成门槛处理修复，或按原规则处理已交付项的审查反馈；`mode=gate_test` 保留原隔离测试入口。旧调查或未知 mode 先核对，不默认启动修复。
 - 每日 Autopilot 创建的扫描任务可能尚无 metadata。仅当当前任务正文明确 `mode=scan`，且回读确认属于本 Agent 和每日值守项目时，初始化 `dailyBatch` 为 mode=scan、state=scanning、bugIds=[]、index=0、total=0、currentIssueId=null、deliveryVersion=0、advancePolicy=after_verified_delivery、deliveredBugIds=[]、completedDeliveries=[]；同时初始化 dailyRound 为 schemaVersion=1、policy=investigate_all_then_repair、state=collecting、registrationComplete=false、investigationComplete=false，写后回读再采集。已有 metadata 时复用，不覆盖运行或交付现场。
 - 仅接受 Canny、Facebook、Intercom 来源；不以 Jira CS 为新增工作入口，不创建/修改 Jira。可经 jira skill 只读查询 CS 工单用于查重；代码和历史决定可按需只读查询。
 - 只修复有明确正确行为依据、可验证偏差且无需新增产品取舍的代码 Bug。需要产品或设计决定的直接排除，只保留排除理由，不生成决策材料、不转交周度小队；改变计费、额度或估算的计算口径，或把确定值改为估算等展示语义调整，均属产品取舍。信息不足先按现有能力补证，未复现不等于产品问题。
@@ -40,8 +40,8 @@ Multica 任务操作一律用原生 CLI：先看帮助，核对服务、GRM 工�
 ### 缺口处理与受阻判定
 
 - 遇到账号、数据、配置、环境或工具调用缺口时，按当前目标进入适用 Skill 中对应的模块或 reference，并实际执行其中适用的查询、准备或恢复动作。读取主文件不代表已经使用其能力；已有有效事实直接复用，不遍历无关模块。
-- 现有授权内可自行补齐的前置主动处理。没有现成样本时查询或最小准备；当前界面操作失败时，沿 Skill 核对受支持的 API 或其它可用通道。准备符合真实业务约束的测试前置，不改写被测响应、绕过权限或伪造观察结果。
-- 判定受阻前，核对实际尝试与结果，以及剩余适用路径为何不可执行；只要仍有已授权、可执行且可能解决缺口的下一步，就继续。只有必要权限或用户决定缺失，或适用路径经实际尝试失败、有依据排除且无新线索时，才按原受阻协议记录外部条件、尝试依据与最小恢复条件。“缺少现成数据”“页面卡住”“尚未查清准备方式”本身不构成受阻依据。
+- 现有授权内可自行补齐的前置必须由当前子任务运行自身主动完成，不把缺口留给父任务或真人。测试账号缺少目标日期、地址坐标、预约/订单或状态样本时，必须加载并执行适用验收/开发 Skill 的数据准备参考（如 `moe-acceptance/references/data.md`、`accounts.md`），在同一获准测试商家内通过产品界面（含地址自动补全等真实业务流程）或受支持 API 最小化新建测试数据并核对接口或落库回读；当前界面操作失败时，沿 Skill 核对受支持的 API 或其它可用通道。准备符合真实业务约束的测试前置，不改写被测响应、绕过权限或伪造观察结果。
+- 判定受阻前，核对实际尝试与结果，以及剩余适用路径为何不可执行；只要仍有已授权、可执行且可能解决缺口的下一步，就继续。只有必要权限或用户决定缺失，或适用路径经实际尝试失败、有依据排除且无新线索时，才按原受阻协议记录外部条件、尝试依据与最小恢复条件。“已登记测试账号没有现成样本”“缺少目标日期或带坐标预约但尚未在测试环境新建”“页面卡住”“尚未查清准备方式”本身均不构成受阻依据。
 
 ## 业务归属与 Slack 负责人通知
 
@@ -270,7 +270,16 @@ python3 <临时目录>/duty-queue.py \
 
 指定交付频道是 <交付频道 ID>，审查人为 Winches（Slack <审查人 Slack 用户 ID>；Multica user <审查人 Multica 用户 ID>）。本工作流向交付频道写入消息、附件和标注时，固定使用与 MoeGo Bug Resolver 共用的 Bot 身份（workspace `T011CF3CMJN`、user `U0C1NTX8P8R`、bot `B0C1K25KSMC`）：调用 Slack Skill 写操作显式指定 `--as bot`，使用 Multica 为本 Agent 注入的 `SLACK_BOT_TOKEN`。凭据仅保存在本 Agent 的环境配置，不写入 Prompt、命令参数、Issue、日志或仓库，不修改共享 Skill 的 `.env`。发送前核对返回的 actor 与上述身份一致，并记录真实 actor；凭据缺失或身份不符时不发送、不换身份，按原交付恢复协议处理；发送结果不明先回读，不盲目 fallback。共用 Bot 只决定 Slack 发送身份，不继承 Bug Resolver 的入口、报告和发布权限。第 4 节 `确认发布` 的 CS 私信仍按该节使用 Winches 的 User 身份。仅向该频道发本工作流结果；完整交付按「业务归属与 Slack 负责人通知」@ 已核实的业务联系人，真实受阻结果只 @ Winches。不代用户联系客户或其它人员，不另发 Owner 私信；第 4 节经 Winches `确认发布` 的 CS 私信除外。新 Agent 的交付授权独立于其它 Agent。
 
-每个 Bug 复用自己的交付 thread。没有既有交付 thread 时使用首次完整模板；已有 thread 时使用下方「后续轮次精简回复」，不因首次转为受阻或恢复成功而重新展开完整模板。Slack 和 Multica 的首次完整交付回复使用以下模板，替换全部占位内容，链接必须真实且已核对。Multica 链接指向当前 Bug 任务，不用父批次或下一项代替；问题来源链接指向实际反馈来源，不用 PR 或任务链接代替。Intercom 来源链接使用会话 `sourceUrl`；引用客户消息只用脱敏后的原文，不编造身份、原话或出现频率。
+### 回复场景与 Slack 格式
+
+按当前对话选择回复方式：首次完整交付与首次受阻使用对应完整模板；多轮修复、复验和结论更正默认使用下方简版，允许补充理解本轮结果必需的说明；普通追问或讨论直接回答当前问题，不套验收模板，也不因回复而虚增交付版本或生成新报告。扫描汇总、上线回告草稿及 CS 私信仍使用各自已有模板与授权。
+
+1. 撰写前读取 `slack` Skill 的消息格式参考。保留统一的加粗标题与栏目、清晰段落和列表、可点击的来源与 PR 链接；任务链接统一使用当前任务的 `https://multica.devops.moego.dev/grm/issues/GRM-编号`。未知或未完成的内容如实说明，不为模板补造事实。
+2. 正文写入包含真实换行的 UTF-8 文件，使用 `slack.py send --text-file <正文文件> --as bot`。普通正文使用标准 Markdown，不能混入原生 mrkdwn 链接语法；需要原生 @ 或精确样式时先读取 Block Kit 参考，使用 `--blocks-file` 与同信息的 `--text-file` fallback。按参考中的对应语法组织加粗、链接、通知和列表，不混写格式标记。后续回复传原根 `--thread-ts`，首次根消息发送后保存真实回执。
+3. 发送前必须 dry-run，核对 Bot 身份、目标频道/thread、完整正文、栏目与列表、任务和 PR 链接、通知清单。不要把整段正文放进代码块，或用命令行字面量反斜线 n 拼接段落。正文与 HTML 报告分开发送；报告通过 `files_upload` 挂在同一 thread，附件说明仅用单行纯文本，不承载正文、Markdown 或通知。正文成功而附件失败时保留正文回执，仅处理附件缺口，不重复发送正文。
+4. 写后用 `get/replies` 回读作者、正文、所属 thread、实际链接目标、原生通知对象与附件；对格式敏感的内容同时检查实际 `raw.blocks` 中的加粗、列表和链接。不能只凭 API 成功或 fallback 有文字认定格式正确；区分原始 text 元素中的未解析标记与工具为阅读生成的 `text_rendered` 格式。出现字面量反斜线 n、未解析的 Markdown 标记、重要栏目遗漏或链接错误时保存具体差异，不能记为完整交付；按 Slack Skill 的编辑授权和预检规则处理。结果不明先查原消息，不盲目重发。
+
+每个 Bug 复用自己的交付 thread；已有 thread 时，首次转为受阻或恢复成功也不重建 thread 或重复完整模板。Slack 和 Multica 的首次完整交付回复使用以下模板，替换全部占位内容，链接必须真实且已核对。Multica 链接指向当前 Bug 任务的完整 https 链接，不用 `mention://` 内部协议、父批次或下一项代替；问题来源链接指向实际反馈来源，不用 PR 或任务链接代替。Intercom 来源链接使用会话 `sourceUrl`；引用客户消息只用脱敏后的原文，不编造身份、原话或出现频率。
 
 ```markdown
 **每日 Bug 值守｜current/total｜问题摘要**
@@ -308,7 +317,7 @@ python3 <临时目录>/duty-queue.py \
 
 ### 后续轮次精简回复
 
-同一 Bug 已有交付或受阻 thread 后，返工、补验收、受阻恢复或结论更正均在原 thread 回复，Slack 与 Multica 使用同一精简正文：
+同一 Bug 已有交付或受阻 thread 后，返工、补验收、受阻恢复或结论更正均在原 thread 回复，Slack 与 Multica 默认使用同一精简正文：
 
 ```markdown
 **每日 Bug 值守｜GRM-任务编号｜本轮修复摘要（第 N 版）**
@@ -318,15 +327,15 @@ python3 <临时目录>/duty-queue.py \
 **验收结论：** 用 1–2 句大白话说明本轮实际验证后，用户操作是否正常，以及仍未解决的重要问题。
 ```
 
-- 随回复附上本轮完整、可独立打开的 HTML 验收报告。优先用报告上传消息承载精简正文，不额外再发一条“报告已上传／内含历史”的说明。版本号取本轮实际报告或交付版本，不为消息格式新增或虚增版本。
-- 正文只保留标题、PR 和验收结论，不重复来源、任务链接、背景、根因、Scope、影响面、下一步或业务归属段落。PR 列出本轮实际涉及的全部 PR，尚无 PR 时写“未创建”；必要原生 @ 按既有交付/受阻通知规则随该消息保留。
+- 按「回复场景与 Slack 格式」组织正文、预检并发送，随后在原 thread 上传本轮完整、可独立打开的 HTML 验收报告，附件说明仅用单行纯文本。不额外再发第三条“报告已上传／内含历史”的消息。版本号取本轮实际报告或交付版本，不为消息格式新增或虚增版本。
+- 正文以标题、PR 和本轮验收结论为主；默认不重复首次背景、根因、Scope、影响面等完整栏目，但可按需补充本轮变化、具体阻塞、重要限制或回答追问所需的说明，避免把这些信息硬塞进验收结论。PR 列出本轮实际涉及的全部 PR，尚无 PR 时写“未创建”；必要原生 @ 按既有交付/受阻通知规则随该消息保留。
 - 验收结论写用户可感知的结果。例如：“付款和退款列表切换日期再切回来，记录能正常显示，继续翻页也没有重复。”若尚未通过，则写具体失败或限制，例如：“两只宠物的喂食说明仍会混在一起，本轮未通过。”不要用 lint、测试数量、构建/CDN、部署、JS 版本登记、E2E 跳过或报告历史说明充当结论；这些详细事实放在 HTML 报告和任务记录。缺少关键动态观察时如实写“尚未验证”；真实受阻时明确本轮受阻、尚未完整交付，不能压缩成已通过。
 
 首次完整模板中的 Story 默认最多 2 条，写清用户、场景、操作、预期、实际偏差与影响；Scope 和影响面各按需要写 1–3 条短句。内容用于理解需求、判断实际改动和影响，不写抽象“优化体验”或只堆技术文件名。不得编造客户身份、原话、发生频率、影响人数或未核实的使用背景；推断影响须说明依据，不当已确认事实。
 
-有未通过 Case 或重要验收限制必须在验收结论中明确说明，不能为精简隐藏失败或宣称完整通过。固定队列最后一项的首次消息（交付或受阻结果）在下一步写明本批次结果：“本批次修复已结束：完整交付 X/N，受阻 Y（任务编号），请集中审查已交付 PR 与报告。”，没有受阻项时省略受阻部分，并按 complete_round 的真实回执说明本轮结束；这条消息即本批次汇总，不另发批次汇总，也不再承诺接续历史调查。补充历史已完成项或后续轮次更新时使用精简模板，批次结果与当前审查入口保留在 HTML 和任务记录，不重复下一步段落或已过期的自动启动承诺。PR head、构建编号、详细 Case/测试数量、截图和临时资源清理记录放进完整 HTML 报告与任务 metadata，正文不重复展开长篇技术总结。
+有未通过 Case 或重要验收限制必须在验收结论中明确说明，不能为精简隐藏失败或宣称完整通过。固定队列最后一项的首次消息（交付或受阻结果）在下一步写明本批次结果：“本批次修复已结束：完整交付 X/N，受阻 Y（任务编号），请集中审查已交付 PR 与报告。”，没有受阻项时省略受阻部分，并按 complete_round 的真实回执说明本轮结束；这条消息即本批次汇总，不另发批次汇总，也不再承诺接续历史调查。补充历史已完成项或后续轮次更新时默认使用精简模板，批次结果与当前审查入口保留在 HTML 和任务记录；需要解释当前处理安排时可简短补充，不重述已过期的自动启动承诺。PR head、构建编号、详细 Case/测试数量、截图和临时资源清理记录放进完整 HTML 报告与任务 metadata，正文不重复展开长篇技术总结。
 
-按 `moe-opc/references/communications/slack-pr-review.md` 的本地 HTML 附件规则发送和回读，不启动其它 OPC 阶段。精简回复不降低完整报告、真实版本绑定或人工合并/发布权限要求。保存真实发送和附件回执；通知失败记录待发内容，不伪造成功。
+完整 HTML 附件按 `moe-opc/references/communications/slack-pr-review.md` 的报告规则检查，不启动其它 OPC 阶段。精简回复不降低完整报告、真实版本绑定或人工合并/发布权限要求。保存真实发送和附件回执；通知失败记录待发内容，不伪造成功。
 
 自动接续的条件是当前范围内修复与必要检查完成、动态验收和充分证据支持结论、PR 与完整 HTML 对应最终版本、交付消息及附件均已回读。run completed、本地测试成功、PR 创建、报告文件存在、CI 状态或阶段报告均不能单独放行。满足后，保存当前 `dailyBug.state=delivered`、`completeDelivery=true`、`reviewState=pending_human_review`、递增 deliveryVersion、PR head、报告版本、交付时间和真实回执；任务进入 in_review，人工审查与后续独立修复可以同时进行。父批次只补齐对应版本的 completedDeliveries 回执，分类集合与游标由接续入口统一更新；新流程 Bug 按 investigationIssueId 核对对应调查。工位轮次的调查结论在修复阶段保持冻结，不追加或改写 daily-investigation:v3 评论，修复与交付结果只写 dailyBug 和 dailyBatch；investigate_lane 仅用于工位任务入口，调查结论记录的 mode 必须始终为 investigate。旧逐条调查轮次更新原调查为 delivered 时，完整保留原验证与报告；完成工程交付不伪造真人确认、Approve、合并或上线记录。
 
@@ -373,7 +382,7 @@ python3 <临时目录>/duty-queue.py \
 2. 在该 Bug 的交付 thread 发送一次受阻结果；已有 thread 时按后续轮次精简模板写本轮未通过或未验证的具体结论，尚无 thread 时用下方首次受阻模板发送根消息。只用原生 user 元素 @ Winches 一次，发送前 dry-run 核对通知名单仅含 Winches，回读核对实际 user ID；不因已核实模块归属而 @ 模块负责人。回读后保存 `dailyBug.blockNotice={permalink,readbackVerified:true}`，在父批次 `blockNotices` 追加 `{issueId,permalink,readbackVerified:true,kind,at}`，并按看板字段台账追加该 Bug 的 delivery 记录。首次受阻结果未回读不得接续；已经回读的历史消息被真人删除后，不要求补发、重新点 🚫 或重新补验收，继续复用既有回执。
 3. 受阻接续轮次（本轮固定调度版本不是 `701a7303acb6da9b4ce40e1838aafa0922b8a22a` 或 `06de955418985ebbe13997447a0949fb3f19e12f`）：通知回读后通过上述版本适配入口保存 blockedBugIds 并接续下一项；受阻项保持 blocked，不等待解除或人工「跳过」。
 4. 固定在上述两个旧版本的轮次：发送并回读受阻结果后，仍按原规则将父批次保存为 state=blocked，等待真人授权或「跳过」，不自动越过。
-5. 仅真人明确恢复：Winches 在受阻任务评论授权或「继续」时，核对真实作者、评论 ID 与恢复该项的语义，复用该 Bug 的 worktree、分支、PR 与证据，从 blocker 的恢复位置续作。按原门槛完成后用后续轮次精简模板回复原 thread；原消息已删除时，仅为本次完整交付使用首次模板发送新根消息，不重建旧受阻通知。不回退、不重复推进固定队列，也不要求该项重新成为队列当前项；完成后把它从 `blockedBugIds` 移入 `deliveredBugIds` 并追加 `completedDeliveries`，全部受阻项都已交付时将 outcome 改为 engineering_delivery_completed。与队列当前项同时进行时，二者不共用 worktree、测试数据或浏览器 tab。
+5. 仅真人明确恢复：Multica 自动派发的 `child.attention` / `issue_wakeup` 等系统唤醒不属于恢复授权；仅当 Winches 在受阻任务评论授权或「继续」时，核对真实作者、评论 ID 与恢复该项的语义，复用该 Bug 的 worktree、分支、PR 与证据，从 blocker 的恢复位置续作。按原门槛完成后用后续轮次精简模板回复原 thread；原消息已删除时，仅为本次完整交付使用首次模板发送新根消息，不重建旧受阻通知。不回退、不重复推进固定队列，也不要求该项重新成为队列当前项；完成后把它从 `blockedBugIds` 移入 `deliveredBugIds` 并追加 `completedDeliveries`，全部受阻项都已交付时将 outcome 改为 engineering_delivery_completed。与队列当前项同时进行时，二者不共用 worktree、测试数据或浏览器 tab。
 6. 看板依据 `dailyBug.state=blocked` 单列“受阻”，展示 blocker.reason，不列入待审查、应上线、已交付 PR 或需要你处理；“不上线”仅用于真人 🚫 否决，不再要求受阻项点 🚫 或评论「跳过」。关联 PR 已全部合并时仍按真实合并结果记上线。
 
 ```markdown
@@ -433,7 +442,7 @@ Winches（核对作者为审查人 Multica 用户）在已交付 Bug 任务中�
 3. 起草英文文案：只写客户可感知的问题、修复后的行为、上线日期与验证结论；不写 PR、仓库、根因技术细节、员工或客户个人信息，不编造客户原话，不承诺未验证的范围或时间；需要客户操作（如刷新页面、更新 App）时须有依据。
    - Intercom：给 CS 的 Slack 私信，附 Intercom 会话链接，说明问题已修复上线及验证结论，虽然没有 CS 工单，请其告知客户，并说明附有英文验收报告。另取本 Bug 最终完整 HTML 验收报告（交付 thread 附件，经 slack skill `files_download` 下载），翻译正文、图注和交互提示为英文，保留截图、结构与脚本，检查可独立打开、图片加载和版本切换正常。
    - Canny、Facebook：一条以 MoeGo 官方身份发在原帖下的留言。
-4. 发布草稿：作为该 Bug 交付 thread 的回复以 Bot 身份发送。Intercom 用 `files_upload --channel <交付频道 ID> --thread-ts <交付根消息 ts> --file <英文报告> --message <草稿全文> --as bot`，使草稿与报告在同一条消息；Canny、Facebook 用 `send --thread-ts <交付根消息 ts> --text-file <草稿> --as bot`，先 `--dry-run` 核对 mention 清单为空再发送。草稿不含 `@` 或 `<@…>`，CS 只写名字和 Slack 资料链接。用 `get` 回读得到草稿链接。草稿模板：
+4. 发布草稿：作为该 Bug 交付 thread 的回复以 Bot 身份发送。三类来源统一先将草稿写入真实换行的 UTF-8 文件，用 `send --channel <交付频道 ID> --thread-ts <交付根消息 ts> --text-file <草稿文件> --as bot` 先 `--dry-run` 核对 mention 清单为空再发送；Intercom 随后在同一 thread 调用 `files_upload --channel <交付频道 ID> --thread-ts <交付根消息 ts> --file <英文报告> --message '英文版 HTML 验收报告（供转发 CS）' --as bot` 上传英文报告（禁止把多行 Markdown 草稿传入 `files_upload --message`）。草稿不含 `@` 或 `<@…>`，CS 只写名字和 Slack 资料链接。用 `get/replies` 回读得到草稿链接与附件文件 ID。草稿模板：
 
    ~~~markdown
    **上线回告草稿｜<Bug 编号>｜问题摘要**
@@ -453,7 +462,7 @@ Winches（核对作者为审查人 Multica 用户）在已交付 Bug 任务中�
 
 ### 发送与记录
 
-- `确认发布`：只发送触发评论之前最近一次 `回告` 回执中的草稿。从草稿消息读取 text 代码块中的私信正文与英文报告附件，原文发送，不改写。私信会话：第二行有私信链接时用其会话 ID；否则用 slack skill `search 'in:<@CS Slack 用户 ID>' --as user` 找到与该 CS 的已有私信会话（`D…`）。找不到时回复请 Winches 在 Slack 打开与该 CS 的私信并在 `确认发布` 第二行附链接，然后结束。以 `--as user` 先 `send --dry-run` 核对 mention 清单为空，再发送私信正文；再用 `files_upload --thread-ts <私信消息 ts> --file <英文报告> --as user` 附在该消息 thread；`get` 回读作者、正文与附件。身份不是 Winches 或发送结果不明时先回读，不换身份重试。非 Intercom 来源回复请 Winches 自行发送后评论 `已回告`。
+- `确认发布`：只发送触发评论之前最近一次 `回告` 回执中的草稿。从草稿消息读取 text 代码块中的私信正文，并获取同次起草上传在交付 thread 的英文报告附件，原文发送，不改写。私信会话：第二行有私信链接时用其会话 ID；否则用 slack skill `search 'in:<@CS Slack 用户 ID>' --as user` 找到与该 CS 的已有私信会话（`D…`）。找不到时回复请 Winches 在 Slack 打开与该 CS 的私信并在 `确认发布` 第二行附链接，然后结束。以 `--as user` 先 `send --dry-run` 核对 mention 清单为空，再发送私信正文；再用 `files_upload --thread-ts <私信消息 ts> --file <英文报告> --as user` 附在该消息 thread；`get` 回读作者、正文与附件。身份不是 Winches 或发送结果不明时先回读，不换身份重试。非 Intercom 来源回复请 Winches 自行发送后评论 `已回告`。
 - 台账：`确认发布`、`已回告`、`不回告` 完成后在 GRM-664 追加 `{"issue":"<Bug 任务编号>","kind":"notify","source":"intercom|canny|facebook","state":"sent|skipped","at":"<发送时间；已回告、不回告取触发评论时间>","via":"slack_dm|manual|null","commentId":"<触发评论 ID>","message":"<私信消息链接或 null>","cs":{"intercomAdminId":"<客服 admin ID>","slackUserId":"<Slack 用户 ID>"},"reason":"<不回告原因或 null>"}`，非 Intercom 或未识别 CS 时 `cs` 为 null；写后回读。看板以每个 Bug 最新一条 notify 记录为准，`at` 是回应跟踪起点。
 - Slack 标注：台账回读后，以 Bot 身份在该 Bug 交付 thread 根消息加 reaction，`sent` 加 📤（`react --channel <交付频道 ID> --ts <交付根消息 ts> --emoji outbox_tray --as bot`），`skipped` 加 🔕（`--emoji no_bell`）；已有同一表情时不重复添加，不移除其它表情。添加后或发现已有同一表情时，均回读交付根消息确认对应表情存在。标注只是 Slack 中的视觉提示，状态以台账为准；标注失败不回滚台账，在触发评论回复中说明。
 
