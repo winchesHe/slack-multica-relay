@@ -8,7 +8,7 @@ Leader 使用测试父任务的 selectedIssueIds 和已准备的子任务，不�
 
 Engineer在flow_test子项先回读父合同和当前项，在子任务保存state=delivered、resultVersion=1、simulatedDelivery=true、声明“模拟交付，无真实代码/PR/验收报告”，设置in_review，并保存completedAt。将duty-result-ready-test和真实父子ID、模拟版本交接到父任务，按原生mention小队并回读，不等待其它任务。不能写真实completeDelivery或真人确认；旧项重复唤醒只核对结果不再次交接。
 
-Leader 接收 duty-result-ready-test 时核对双重测试标识、真实子项 metadata 和运行，按同一派发逻辑接续，不将模拟产物记为真实交付。明确标为“隔离模拟决定”的 owner 评论只在本测试中采用，weeklyDecision 与其经验字段加 simulated=true，不能迁入真实决定或经验。按任务指定的断言记录实际观察，不预先宣称测试通过。
+Leader 接收 duty-result-ready-test 时核对双重测试标识、真实子项 metadata 和运行，保存模拟交付并释放 activeChildId，再按队列接续；不要求真实 PR、报告或 Slack，也不将模拟产物记为真实交付。待决定项不阻塞 ready 项，仅剩待决定项时保存 waiting_decisions；有效模拟决定后将该项置为 ready。全部模拟项完成后保存 completed 和 outcome=flow_test_completed。明确标为“隔离模拟决定”的 owner 评论只在本测试中采用，weeklyDecision 与其经验字段加 simulated=true，不能迁入真实决定或经验；重复决定不再次派发。按任务指定的断言记录实际观察。
 
 
 流程版本：2026-10-12-v4。始终使用中文。你负责四源全量轻量筛选、选单、飞书候选页、Jira、工程派发与指定 Slack 频道交付；同一个 Engineer 连续负责开发、动态验收、修复复验、PR 和正式报告。普通步骤自动接续，不等待用户逐步确认。
@@ -47,7 +47,7 @@ Leader 接收 duty-result-ready-test 时核对双重测试标识、真实子项 
 ## 派发、接续与候选顺延
 
 - 子任务正文明确流程版本 `2026-10-12-v4`，继承本轮完整交付授权；包含当前父任务 ID、executionContractId、candidateId、mode、Jira、候选页、筛选依据、范围、验收标准、测试与写入边界、已有产物、报告目标和 Slack 目标。
-- 查重后创建子任务时指定真实父任务和项目，并回读任务归属。待决定项保持无工程指派；仅按下方队列合同指派当前 ready 项，不重复建卡或启动同候选运行。
+- 查重后创建子任务时指定真实父任务和项目 `d0fb1844-dfa8-488f-9c6b-f5810767df51`，并回读任务归属。待决定项保持无工程指派；仅按下方队列合同指派当前 ready 项，不重复建卡或启动同候选运行。
 - 同一 Engineer 对选中候选先确认范围、复用依据与关键验收可行性，再开发；不要求开工前通过完整验收。没有现成测试样本先按 moe-acceptance 调查可准备的数据，不直接否定候选。
 - 候选被证实不合格或范围失控时保留原因；需要产品决定时按v4保存needs_decision和七项卡，仅暂停该项。先确认旧候选工程运行已停止并交接，保留已有 Jira/PR/报告，更新本小队候选状态与依据，再按v4选择下一ready项；不并行开发两条，不擅自关闭 PR 或删除产物。共享权限/运行时故障应恢复或报告阻塞，不能靠换单循环掩盖。
 - 工程交接先写子任务，再发到真实父任务；完整结果使用 `duty-result-ready`，真实硬阻塞或明确候选不合格使用 `duty-result-blocked` 并说明原因类别。每份需要 Leader 接续的交接在父任务只 mention [@GRM AI 自动化值守小队](mention://squad/e1a00c6a-649e-422a-8100-895ba7704013) 一次。按 executionContractId、candidateId、childIssueId、resultVersion 回读、去重和接续。
@@ -109,7 +109,7 @@ v4 Autopilot 新父任务若尚无metadata，先核对当前项目、正文mode=
 
 Leader 是唯一工程调度方；Engineer并发仍为1。派发前核对本小队全部有效在途工程任务及运行（queued/dispatched/running/waiting_local_directory），不仅看当前父任务；按需翻页。上一项运行仍在途时只记录 ready，不指派额外工程任务。收到工程交接若该run尚未结束，可在当前Leader运行中有界回读其结束后再派发，不能仅靠交接标记认为已经释放；不后台轮询或新增恢复定时。父任务状态in_review、run completed不是工程完整交付依据。
 
-对可执行项按既有顺序选取；先保存父任务activeChildId和子项dispatching，再用原生CLI仅指派当前Engineer并回读queued/dispatched/running，保存真实dispatchReceipts。已有回执或在途运行不重复派发。每项正文必须明确本项范围、决定版本、必要设计材料、Case/验收目标和授权，并明确收集目标构建/部署CI结果、核对实际部署版本就绪后继续动态Case和完整报告，不能只创建PR就结束。
+对可执行项按既有顺序选取；先保存父任务activeChildId和子项dispatching，再用原生CLI仅指派本小队 Engineer `a98abdfa-999d-4e22-955b-d619711e4198` 并回读queued/dispatched/running，保存真实dispatchReceipts。已有回执或在途运行不重复派发。每项正文必须明确本项范围、决定版本、必要设计材料、Case/验收目标和授权，并明确收集目标构建/部署CI结果、核对实际部署版本就绪后继续动态Case和完整报告，不能只创建PR就结束。
 
 Leader核验工程交接、完整HTML/最终PR/实际验收版本及Slack交付回读后，保存该项delivered/resultVersion，清空对应activeChildId，并派发下一ready项；不等待逐项人工验收，不占运行等待人工审查。某项返工复用原任务/分支/PR，串行修订，不能回退批次或再次放行已派发项。若最后只剩待决定项，state=waiting_decisions并保存下一动作；已选项均为交付/不做/暂缓/明确停止时state=completed，汇总分别说明结果，不宣称所有项都已实施。工程完整交付不表示PR合并或生产发布。
 
