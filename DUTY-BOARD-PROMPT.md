@@ -7,14 +7,14 @@
 ## 固定目标
 
 - Multica：服务 `https://multica.devops.moego.dev`，工作区 GRM `1b6d114a-8407-4ba8-adea-d31209caabe5`；所有 CLI 调用显式带 `--server-url` 与 `--workspace-id`，结构化读取加 `--output json`。
-- 值守项目 `724dce94-a8b9-44e7-8390-9c3cbdac7bc0`；字段台账任务 GRM-664；常驻看板任务 GRM-665（`01a139d1-9465-7d2b-af4d-477e34da29a5`）。两者都无人指派，保持原状；阶段进度只读本项目现有 dailyScan、dailyRound、dailyInvestigation、dailyBatch、dailyBug 与真实活动 run，最终分类、PR、回告等仍复用字段台账。未登记最终台账不等于未扫描；在 GRM-664 只追加 `kind=notify-followup` 记录，不写其它类型、不改删已有评论。
+- 值守项目 `724dce94-a8b9-44e7-8390-9c3cbdac7bc0`；字段台账任务 GRM-664；常驻看板任务 GRM-665（`01a139d1-9465-7d2b-af4d-477e34da29a5`）。两者都无人指派，保持原状；阶段进度只读本项目现有 dailyScan、dailyRound、dailyInvestigation、dailyBatch、dailyBug 与真实活动 run，最终分类、PR、回告等仍复用字段台账；范围内 Bug 缺少台账时，脚本按任务已存 PR、交付与受阻记录纳入明细，并明确告警缺失字段，不因漏登记而排除任务。未登记最终台账不等于未扫描；在 GRM-664 只追加 `kind=notify-followup` 记录，不写其它类型、不改删已有评论。
 - d1 反馈日 `2026-10-12`；可用 🚫 标注不上线的审查人 Slack `<审查人 Slack 用户 ID>`。
 - Slack 频道 `<交付频道 ID>`。本 Prompt 授权每天向该频道发送一条由脚本生成的看板消息、在该消息的 thread 上传一份当日 `board.html`，并在 GRM-665 追加一条看板评论；真人明确要求补发时，相同目标的上述动作按单次补发请求执行；不授权其它频道、私信、mention、reaction、编辑或删除。
 
 ## 每次运行
 
 1. 计算本次运行的 Asia/Shanghai 日期 today，看板统计截至 today 前一天的反馈日。在 Runtime 临时目录建立本次工作目录，不写入仓库。
-2. 获取脚本：对 `/Users/moego-winches/Desktop/Company/person/slack-multica-relay` 执行 `git fetch origin main`，回读 `git rev-parse origin/main` 固定本次 SHA，再用参数数组分别 `git show <同一 SHA>:scripts/duty-board.py`、`scripts/duty-progress.py`、`scripts/duty-queue.py` 导出到同一个工作目录后运行。三个文件必须来自同一 SHA，后两个是阶段证据与交付校验依赖。只用 `origin/main` 版本，不用该仓库当前分支、工作区或未提交内容，也不切换其分支。获取失败时报告原因并结束，不改用其它版本。
+2. 获取脚本：本次发布固定看板脚本修订为 `<看板脚本提交 SHA>`（同步时替换为本 PR 已推送并回读的完整提交 SHA）。对 `/Users/moego-winches/Desktop/Company/person/slack-multica-relay` 用参数数组执行 `git fetch origin <看板脚本提交 SHA>`，再用 `git show <看板脚本提交 SHA>:scripts/duty-board.py`、`scripts/duty-progress.py`、`scripts/duty-queue.py` 导出到同一个工作目录后运行。三个文件必须来自这个完整 SHA，后两个是阶段证据与交付校验依赖。不使用当前分支、工作区未提交内容或旧 origin/main，也不切换分支；后续脚本发布同步时重新绑定完整 SHA。获取失败时报告原因并结束，不改用其它版本。
 3. 取截至日的扫描证据索引：用 `multica issue search '每日 Bug 值守｜<截至日 MM-DD> 反馈' --include-closed --output json` 找到值守项目内该反馈日最新创建的扫描任务，核对标题与项目；读取其评论，从最新一条带附件的评论中用 `multica attachment download <附件 ID> -o <工作目录>/scan-index` 下载 `scan-evidence-index.json`，没有该文件时改下载同一评论中的证据 zip。下载成功时运行脚本加 `--scan-index <下载得到的文件>`；找不到任务或附件、下载失败时不加该参数，记下命令、退出码与 stderr 摘要，继续后续步骤。
 4. 运行脚本：
 

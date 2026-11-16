@@ -240,7 +240,7 @@ class BugStateTests(unittest.TestCase):
 
 
 class SlackReadResilienceTests(unittest.TestCase):
-    def collect(self, first_state, prs, read_thread, string_delivery=False):
+    def collect(self, first_state, prs, read_thread, string_delivery=False, missing_ledger=False):
         scan = {'id': 'scan', 'identifier': 'S1', 'title': 'scan', 'created_at': '2026-10-14T01:00:00Z',
                 'assignee_id': DUTY_AGENT, 'metadata': {'dailyScan': {'targetDate': '2026-10-13'}}}
         issues = [scan]
@@ -253,6 +253,11 @@ class SlackReadResilienceTests(unittest.TestCase):
                                                     'blocker': {'reason': '测试环境权限不足'}}}})
             entries.append({'issue': identifier, 'kind': 'bug', 'source': 'facebook',
                             'prs': urls, 'delivery': identifier if string_delivery else {'permalink': identifier}})
+        if missing_ledger:
+            entries = [entry for entry in entries if entry['issue'] != 'B1']
+            issues[1]['metadata']['dailyBug'].update({
+                'prs': [{'url': url} for url in prs], 'pr': next(iter(prs), None),
+                'delivery': {'permalink': 'B1'}, 'completeDelivery': first_state == 'delivered'})
         comments = [{'created_at': '2026-10-14', 'content': board_module.BOARD_MARKER
                      + '\n```json\n' + json.dumps(entries) + '\n```'}]
         args = SimpleNamespace(start='2026-10-13', today='2026-10-15', project='p', ledger_issue='L',
@@ -265,6 +270,27 @@ class SlackReadResilienceTests(unittest.TestCase):
         result = board_module.build_board(scans, bugs, dt.date(2026, 10, 13), dt.date(2026, 10, 15))
         result['warnings'].extend(warnings)
         return result, threads
+
+    def test_missing_ledger_keeps_delivered_blocked_and_multi_pr_facts(self):
+        cases = [('delivered', {'https://github.com/o/r/pull/1': pr('open')}, 'review'),
+                 ('delivered', {'https://github.com/o/r/pull/1': pr('merged'),
+                                'https://github.com/o/r/pull/2': pr('open')}, 'review'),
+                 ('delivered', {'https://github.com/o/r/pull/1': pr('merged')}, 'released'),
+                 ('blocked', {}, 'blocked'),
+                 ('blocked', {'https://github.com/o/r/pull/1': pr('open')}, 'blocked')]
+        for state, prs, expected in cases:
+            with self.subTest(state=state, prs=prs):
+                board, threads = self.collect(state, prs, lambda cli, url: [], missing_ledger=True)
+                first = board['bugs'][0]
+                self.assertEqual(first['state'], expected)
+                self.assertEqual(len(first['prs']), len(prs))
+                self.assertEqual(first['delivered'], state == 'delivered')
+                self.assertEqual(board['total']['confirmed'], 2)
+                self.assertEqual(len(board['warnings']), 1)
+                self.assertIn('B1', board_module.render_slack(board, NOW))
+                self.assertIn('缺少字段台账', board_module.render_markdown(board, NOW))
+                if expected == 'blocked':
+                    threads.assert_called_once_with('slack', 'B2')
 
     def test_string_delivery_permalink_in_legacy_ledger_is_read_without_dropping_bugs(self):
         board, threads = self.collect('delivered', {'one': pr('open')}, lambda cli, url: [], string_delivery=True)

@@ -115,7 +115,7 @@ python3 scripts/duty-queue.py \
 
 看板每天 10:00 输出当时快照，不等待全轮调查或修复结束。`scripts/duty-progress.py` 复用 `duty-queue.py` 的固定清单、报告版本和完整交付门槛，只读推导采集、调查、修复三个阶段；缺最终台账时仍展示已采集事实与现有进度，数据缺失或运行查询失败明确标为待核对，不记成零或未扫描。确认项在登记 Bug 前后按调查 ID 去重；PR 存在不计为完整修复交付。三个脚本运行时须从同一发布 SHA 导出到同一目录。
 
-`scripts/duty-board.py` 只读汇总「GRM 每日 Bug 值守」的扫描批次漏斗：读取值守项目任务、字段台账任务 GRM-664 的 `<!-- duty-board:v1 -->` 评论、GitHub PR 的合并状态、Slack 交付 thread 上审查人的 🚫，以及下节的回告记录与回应跟踪，输出 `board.json`、`board.md`、`slack.md`，以及可直接打开、支持切换反馈日期的 `board.html`。「GRM 每日值守看板」Agent（Prompt 真源 [DUTY-BOARD-PROMPT.md](DUTY-BOARD-PROMPT.md)）由 Autopilot（入口真源 [DUTY-BOARD-AUTOPILOT-PROMPT.md](DUTY-BOARD-AUTOPILOT-PROMPT.md)）每天 10:00 运行 `origin/main` 版本，发送到指定交付频道、在该消息 thread 上传 `board.html`，并追加到 GRM-665。本地预览：
+`scripts/duty-board.py` 只读汇总「GRM 每日 Bug 值守」的扫描批次漏斗：读取值守项目任务、字段台账任务 GRM-664 的 `<!-- duty-board:v1 -->` 评论、GitHub PR 的合并状态、Slack 交付 thread 上审查人的 🚫，以及下节的回告记录与回应跟踪，输出 `board.json`、`board.md`、`slack.md`，以及可直接打开、支持切换反馈日期的 `board.html`。「GRM 每日值守看板」Agent（Prompt 真源 [DUTY-BOARD-PROMPT.md](DUTY-BOARD-PROMPT.md)）由 Autopilot（入口真源 [DUTY-BOARD-AUTOPILOT-PROMPT.md](DUTY-BOARD-AUTOPILOT-PROMPT.md)）每天 10:00 运行 instructions 绑定的完整发布 SHA 版本，发送到指定交付频道、在该消息 thread 上传 `board.html`，并追加到 GRM-665。本地预览：
 
 ```bash
 python3 scripts/duty-board.py --project <值守项目 ID> --ledger-issue GRM-664 --start 2026-10-12 --reviewer <审查人 Slack 用户 ID> --canny-account-ref <Canny 内部测试账号 aid> --output-dir <输出目录>
@@ -123,7 +123,7 @@ python3 scripts/duty-board.py --project <值守项目 ID> --ledger-issue GRM-664
 
 HTML 默认展示昨天的反馈日，可在顶部切换 d1 起的任意反馈日（例如 `2026-10-13`）。选择项与趋势行同时标出扫描日和反馈日（如 10-13 扫描、10-12 反馈）。切换后同步更新该扫描批次的漏斗、截至所选反馈日的累计与 Bug 范围、每日趋势和该日逐条记录；历史扫描证据会内置在同一份 HTML 中，离线打开也可切换。Bug 的修复、上线与回告进度采用生成时的最新状态，不表示历史时点快照。未扫描或证据索引不可用的日期会显示具体原因（下载失败时含命令退出码与 stderr 摘要，默认日期的原因同时输出在 stdout 的 `scanNote`）。默认日期的索引可用 `--scan-index <scan-evidence-index.json 或证据 zip>` 传入已下载的文件，看板 Agent 即按此方式先自行下载再交给脚本；其它日期仍由脚本从扫描任务附件下载。Markdown、Slack 与 JSON 仍只输出默认日期。
 
-修复受阻且关联 PR 尚未全部合并时，在 Markdown 漏斗与 HTML 每日趋势的独立“受阻”列计数，在 Bug 状态的“受阻”列表查看原因与任务；不计应上线或已交付 PR，不列入待审查或需要你处理，历史 PR 仅保留为任务证据。已全部合并仍按已上线统计。“不上线”仅用于真人 🚫 否决，撤销 🚫 后按真实 PR 状态恢复分类。已回读的受阻消息被删除不要求补发。其它 Bug 的 Slack thread 删除、读取失败或超时仅生成审查标记未核对警告，不中断其它 Bug 的汇总与看板生成，也不把读取失败当作真人通过审查。
+范围内 Bug 缺少字段台账时，仍按任务已保存的 PR、交付与受阻记录纳入明细，缺失字段保留待补齐告警，不因漏登记排除任务。修复受阻且关联 PR 尚未全部合并时，在 Markdown 漏斗与 HTML 每日趋势的独立“受阻”列计数，在 Bug 状态的“受阻”列表查看原因与任务；不计应上线或已交付 PR，不列入待审查或需要你处理，历史 PR 仅保留为任务证据。已全部合并仍按已上线统计。“不上线”仅用于真人 🚫 否决，撤销 🚫 后按真实 PR 状态恢复分类。已回读的受阻消息被删除不要求补发。其它 Bug 的 Slack thread 删除、读取失败或超时仅生成审查标记未核对警告，不中断其它 Bug 的汇总与看板生成，也不把读取失败当作真人通过审查。
 
 确认可修按 Bug 的 `dailyBug.batchId`（或父任务）所属扫描批次归组，调查后新建的修复批次通过 `dailyBatch.sourceScanId` 和真实父任务回溯原扫描，使用原扫描反馈日，保留原反馈日作为追溯字段；不使用客户原帖时间或 Bug 创建时间归组。范围外批次不计入明细、累计或回告跟踪，缺少批次关联时告警并排除，不再回溯补入“试运行”。确认可修的数量包含受阻项和后续被驳回的方案；受阻项不计已交付 PR，被真人驳回的已交付方案仍保留其 PR 计数。关联 PR 全部 merged 才计入“已上线”，部分 merged、open、closed 未合并均不算；已全部 merged 时历史 🚫 不覆盖合并结果。
 

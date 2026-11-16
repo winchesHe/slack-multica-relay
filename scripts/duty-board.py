@@ -697,10 +697,17 @@ def collect(args, now):
                 warnings.append(f"{issue['identifier']} 已有采集记录，最终分类或调查进度尚未登记")
             scans.append(record)
             continue
-        if board is None:
-            warnings.append(f"{issue['identifier']} 在字段台账中没有记录，未计入看板")
-            continue
         daily_bug = _meta(issue, 'dailyBug') or {}
+        if board is None:
+            # 台账是展示索引；漏登记不能抹去范围内已确认的任务与交付事实。
+            urls = [item.get('url') if isinstance(item, dict) else item
+                    for item in daily_bug.get('prs') or []]
+            if daily_bug.get('pr'):
+                urls.append(daily_bug['pr'])
+            board = {'prs': list(dict.fromkeys(url for url in urls if isinstance(url, str) and PR_URL.fullmatch(url))),
+                     'delivery': daily_bug.get('delivery') or daily_bug.get('blockNotice'),
+                     'source': daily_bug.get('source'), 'sourceUrl': daily_bug.get('sourceUrl')}
+            warnings.append(f"{issue['identifier']} 缺少字段台账，已按任务记录纳入看板；来源等缺失字段待补齐")
         delivery = board.get('delivery')
         # 兼容历史台账直接保存 Slack permalink 的写法。
         if isinstance(delivery, str):
