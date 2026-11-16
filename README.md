@@ -115,7 +115,7 @@ python3 scripts/duty-queue.py \
 
 看板每天 10:00 输出当时快照，不等待全轮调查或修复结束。`scripts/duty-progress.py` 复用 `duty-queue.py` 的固定清单、报告版本和完整交付门槛，只读推导采集、调查、修复三个阶段；缺最终台账时仍展示已采集事实与现有进度，数据缺失或运行查询失败明确标为待核对，不记成零或未扫描。确认项在登记 Bug 前后按调查 ID 去重；PR 存在不计为完整修复交付。三个脚本运行时须从同一发布 SHA 导出到同一目录。
 
-`scripts/duty-board.py` 只读汇总「GRM 每日 Bug 值守」的扫描批次漏斗：读取值守项目任务、字段台账任务 GRM-664 的 `<!-- duty-board:v1 -->` 评论、GitHub PR 的合并状态、Slack 交付 thread 上审查人的 🚫，以及下节的回告记录与回应跟踪，输出 `board.json`、`board.md`、`slack.md`，以及可直接打开、支持切换反馈日期的 `board.html`。「GRM 每日值守看板」Agent（Prompt 真源 [DUTY-BOARD-PROMPT.md](DUTY-BOARD-PROMPT.md)）由 Autopilot（入口真源 [DUTY-BOARD-AUTOPILOT-PROMPT.md](DUTY-BOARD-AUTOPILOT-PROMPT.md)）每天 10:00 运行 instructions 绑定的完整发布 SHA 版本，发送到指定交付频道、在该消息 thread 上传 `board.html`，并追加到 GRM-665。本地预览：
+`scripts/duty-board.py` 只读汇总「GRM 每日 Bug 值守」的扫描批次漏斗：读取值守项目任务、字段台账任务 GRM-664 的 `<!-- duty-board:v1 -->` 评论、GitHub PR 的合并状态、Slack 交付 thread 上审查人的 🚫，以及下节的回告记录与回应跟踪，输出 `board.json`、`board.md`、`slack.md`，以及可直接打开、支持切换反馈日期的 `board.html`。「GRM 每日值守看板」Agent（Prompt 真源 [DUTY-BOARD-PROMPT.md](DUTY-BOARD-PROMPT.md)）由 Autopilot（入口真源 [DUTY-BOARD-AUTOPILOT-PROMPT.md](DUTY-BOARD-AUTOPILOT-PROMPT.md)）每天 10:00 运行 `origin/main` 版本，发送到指定交付频道、在该消息 thread 上传 `board.html`，并追加到 GRM-665。本地预览：
 
 ```bash
 python3 scripts/duty-board.py --project <值守项目 ID> --ledger-issue GRM-664 --start 2026-10-12 --reviewer <审查人 Slack 用户 ID> --canny-account-ref <Canny 内部测试账号 aid> --output-dir <输出目录>

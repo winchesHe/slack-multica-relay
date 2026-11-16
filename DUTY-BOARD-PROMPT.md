@@ -14,7 +14,7 @@
 ## 每次运行
 
 1. 计算本次运行的 Asia/Shanghai 日期 today，看板统计截至 today 前一天的反馈日。在 Runtime 临时目录建立本次工作目录，不写入仓库。
-2. 获取脚本：本次发布固定看板脚本修订为 `<看板脚本提交 SHA>`（同步时替换为本 PR 已推送并回读的完整提交 SHA）。对 `/Users/moego-winches/Desktop/Company/person/slack-multica-relay` 用参数数组执行 `git fetch origin <看板脚本提交 SHA>`，再用 `git show <看板脚本提交 SHA>:scripts/duty-board.py`、`scripts/duty-progress.py`、`scripts/duty-queue.py` 导出到同一个工作目录后运行。三个文件必须来自这个完整 SHA，后两个是阶段证据与交付校验依赖。不使用当前分支、工作区未提交内容或旧 origin/main，也不切换分支；后续脚本发布同步时重新绑定完整 SHA。获取失败时报告原因并结束，不改用其它版本。
+2. 获取脚本：对 `/Users/moego-winches/Desktop/Company/person/slack-multica-relay` 执行 `git fetch origin main`，回读 `git rev-parse origin/main` 固定本次 SHA，再用参数数组分别 `git show <同一 SHA>:scripts/duty-board.py`、`scripts/duty-progress.py`、`scripts/duty-queue.py` 导出到同一个工作目录后运行。三个文件必须来自同一 SHA，后两个是阶段证据与交付校验依赖。只用 `origin/main` 版本，不用该仓库当前分支、工作区或未提交内容，也不切换其分支。获取失败时报告原因并结束，不改用其它版本。
 3. 取截至日的扫描证据索引：用 `multica issue search '每日 Bug 值守｜<截至日 MM-DD> 反馈' --include-closed --output json` 找到值守项目内该反馈日最新创建的扫描任务，核对标题与项目；读取其评论，从最新一条带附件的评论中用 `multica attachment download <附件 ID> -o <工作目录>/scan-index` 下载 `scan-evidence-index.json`，没有该文件时改下载同一评论中的证据 zip。下载成功时运行脚本加 `--scan-index <下载得到的文件>`；找不到任务或附件、下载失败时不加该参数，记下命令、退出码与 stderr 摘要，继续后续步骤。
 4. 运行脚本：
 

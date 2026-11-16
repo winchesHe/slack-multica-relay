@@ -2,7 +2,7 @@
 
 按 Agent 当前 instructions 在每天北京时间 10:00 生成并发布值守阶段快照，统计截至昨日反馈日。
 
-按 Agent instructions 绑定的同一完整发布 SHA 导出 scripts/duty-board.py、scripts/duty-progress.py 与 scripts/duty-queue.py，展示已采集数量、调查留档与结论、完整修复交付进度、真实当前任务和下一步。最终台账尚未登记时也读取已有阶段事实，不把调查中、修复中或读取失败标为未扫描。范围内 Bug 缺台账时仍按任务已存 PR、交付与受阻记录纳入明细，并告警缺失字段。
+从同一 origin/main SHA 导出 scripts/duty-board.py、scripts/duty-progress.py 与 scripts/duty-queue.py，展示已采集数量、调查留档与结论、完整修复交付进度、真实当前任务和下一步。最终台账尚未登记时也读取已有阶段事实，不把调查中、修复中或读取失败标为未扫描。范围内 Bug 缺台账时仍按任务已存 PR、交付与受阻记录纳入明细，并告警缺失字段。
 
 受阻且尚未全部合并的 Bug 单列“受阻”，Markdown 漏斗与 HTML 每日趋势增加独立受阻列；不计应上线、已交付 PR 或待审查，不列入需要你处理，保留证据，不催办解除或自动补验收。“不上线”仅用于真人 🚫 否决，撤销 🚫 后按真实 PR 状态恢复分类。历史 Slack thread 缺失只记录脚本警告，继续发布可用结果。
 
