@@ -19,8 +19,7 @@ def issue(key, **metadata):
 
 
 def record(name):
-    return {'attachmentId': name, 'sha256': hashlib.sha256(name.encode()).hexdigest(),
-            'readbackHashVerified': True}
+    return {'attachmentId': name}
 
 
 def candidate(key='investigation', state='ready'):
@@ -105,7 +104,7 @@ def lane_freeze(scan, keys, complete=False):
     scan['metadata']['dailyRound'] = {
         'schemaVersion': 1, 'policy': 'investigate_all_then_repair', 'state': 'investigating',
         'registrationComplete': True, 'candidateCount': len(ids), 'investigationStore': 'lane_comments',
-        'laneIssueIds': ['lane-1', 'lane-2'], 'candidateSetSha256': queue.candidate_set_hash(ids),
+        'laneIssueIds': ['lane-1', 'lane-2'],
         'candidateManifest': record('manifest'), 'investigationComplete': complete}
     if complete:
         scan['metadata']['dailyRound'].update(state='ready_repair', investigationIndex=record('index'))
@@ -167,10 +166,10 @@ class LaneRoundTests(unittest.TestCase):
 
     def test_manifest_lane_roster_and_foreign_records_fail_closed(self):
         lanes = lane_freeze(self.scan, ['a'])
-        for change in ('hash', 'lane', 'foreign', 'manifest'):
+        for change in ('count', 'lane', 'foreign', 'manifest'):
             scan, rows = copy.deepcopy(self.scan), copy.deepcopy(lanes)
-            if change == 'hash':
-                scan['metadata']['dailyRound']['candidateSetSha256'] = '0' * 64
+            if change == 'count':
+                scan['metadata']['dailyRound']['candidateCount'] = 2
             elif change == 'lane':
                 rows.pop()
             elif change == 'foreign':
@@ -179,6 +178,31 @@ class LaneRoundTests(unittest.TestCase):
                 scan['_comments'] = []
             with self.subTest(change=change), self.assertRaises(queue.QueueError):
                 queue.round_candidates(scan, [scan, *rows], 'agent')
+
+    def test_missing_or_truncated_hashes_do_not_block_while_placeholders_still_fail(self):
+        for bad in ('', ' ', 'pending-upload', 'PENDING', '<实际附件 UUID>'):
+            with self.subTest(bad=bad):
+                self.assertFalse(queue.verified_record({'attachmentId': bad}))
+        # 兼容缺失哈希/回读字段以及历史手抄截断的 SHA-256。
+        lanes = lane_freeze(self.scan, ['101'], complete=True)
+        self.scan['metadata']['dailyRound']['candidateSetSha256'] = '0' * 64
+        self.scan['metadata']['dailyRound']['investigationIndex'] = {
+            'attachmentId': '01a1e187-141a-7746-b30f-87172c369bfe',
+            'sha256': '8e5871af4050e0dd4274843db523353c82318352889e0b8635b4d906bc6a8',
+            'readbackHashVerified': False,
+        }
+        item = conclude(lanes[0], '101', 'confirmed')
+        item['investigationRecord'] = {'attachmentId': 'att-101', 'evidenceRevision': 'v1', 'sha256': 'short'}
+        lanes[0]['_comments'][-1] = comment(queue.RECORD_MARKER, {**item, 'laneIssueId': lanes[0]['id']})
+        confirmed = queue.round_candidates(self.scan, [self.scan, *lanes], 'agent')[0]
+        bugs = add_repair(self.scan, confirmed)
+        deliver(self.scan, bugs[0])
+        self.scan['metadata']['dailyBatch']['completedDeliveries'][0]['report'] = {'multicaAttachmentId': 'html-uuid'}
+        plan = queue.next_action([self.scan, *lanes, *bugs], [], project_id='project', agent_id='agent',
+                                 current_issue_id=bugs[0]['id'], round_id='scan')
+        self.assertEqual(plan['action'], 'complete_round')
+        self.scan['metadata']['dailyBatch']['completedDeliveries'][0]['report']['multicaAttachmentId'] = 'pending-upload'
+        self.assertFalse(queue.verified_delivery(self.scan['metadata']['dailyBatch'], bugs[0]))
 
     def test_lane_round_finalizes_and_repairs_with_record_identities(self):
         lanes = lane_freeze(self.scan, ['a', 'b'])
@@ -227,8 +251,6 @@ class LaneRoundTests(unittest.TestCase):
         for label, mutate_second in (
             ('shared_attachment', lambda second, first: second['investigationRecord'].update(
                 attachmentId=first['investigationRecord']['attachmentId'])),
-            ('shared_sha256', lambda second, first: second['investigationRecord'].update(
-                sha256=first['investigationRecord']['sha256'])),
         ):
             scan, rows = copy.deepcopy(self.scan), copy.deepcopy(lanes)
             first = conclude(rows[0], '101', 'confirmed')
@@ -344,7 +366,7 @@ class RoundTests(unittest.TestCase):
     def test_unread_manifest_cannot_be_used_as_a_frozen_round(self):
         row = candidate()
         freeze(self.scan, [row])
-        self.scan['metadata']['dailyRound']['candidateManifest']['readbackHashVerified'] = False
+        self.scan['metadata']['dailyRound']['candidateManifest']['attachmentId'] = 'pending-upload'
         with self.assertRaises(queue.QueueError):
             self.plan(row)
 
@@ -362,7 +384,7 @@ class RoundTests(unittest.TestCase):
             del changed['metadata']['dailyInvestigation']['verification'][key]
             with self.subTest(key=key):
                 self.assertEqual(self.plan(changed)['action'], 'investigate')
-        row['metadata']['dailyInvestigation']['investigationRecord']['readbackHashVerified'] = False
+        row['metadata']['dailyInvestigation']['investigationRecord']['attachmentId'] = 'pending-upload'
         self.assertEqual(self.plan(row)['action'], 'investigate')
 
     def test_report_for_an_old_source_revision_cannot_close_current_investigation(self):
@@ -465,11 +487,16 @@ class RoundTests(unittest.TestCase):
         deliver(self.scan, bug)
         self.assertEqual(self.plan(row, bug)['action'], 'complete_round')
         receipt = self.scan['metadata']['dailyBatch']['completedDeliveries'][0]
-        for key, flag in (('report', 'readbackHashVerified'), ('delivery', 'readbackVerified')):
-            receipt[key][flag] = False
+        for key, mutator in (
+                ('report', lambda r: r['report'].__setitem__('multicaAttachmentId', 'pending-upload')),
+                ('delivery', lambda r: r['delivery'].__setitem__('readbackVerified', False)),
+        ):
+            saved = copy.deepcopy(receipt)
+            mutator(receipt)
             with self.subTest(key=key), self.assertRaises(queue.QueueError):
                 self.plan(row, bug)
-            receipt[key][flag] = True
+            receipt.clear()
+            receipt.update(saved)
         receipt['deliveryVersion'] = 1
         with self.assertRaises(queue.QueueError):
             self.plan(row, bug)
@@ -576,10 +603,10 @@ class RoundTests(unittest.TestCase):
         freeze(self.scan, [row], complete=True)
         bug = add_repair(self.scan, [row], 'completed')[0]
         self.scan['metadata']['dailyBatch'].update(outcome='finished_with_skips', currentIssueId=None)
-        row['metadata']['dailyInvestigation']['investigationRecord']['readbackHashVerified'] = False
+        row['metadata']['dailyInvestigation']['investigationRecord']['attachmentId'] = 'pending-upload'
         with self.assertRaises(queue.QueueError):
             self.plan(row, bug)
-        row['metadata']['dailyInvestigation']['investigationRecord']['readbackHashVerified'] = True
+        row['metadata']['dailyInvestigation']['investigationRecord']['attachmentId'] = 'investigation'
         bug['metadata']['dailyBug']['candidateId'] = 'another-feedback'
         with self.assertRaises(queue.QueueError):
             self.plan(row, bug)

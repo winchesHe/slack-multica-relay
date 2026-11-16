@@ -104,7 +104,7 @@ class ProgressTests(unittest.TestCase):
         self.assertEqual((result['repair']['completed'], result['repair']['total']), (0, 1))
         deliver(scan, bugs[0])
         self.assertEqual(snapshot(scan, issues)['repair']['state'], 'completed')
-        scan['metadata']['dailyBatch']['completedDeliveries'][0]['report']['readbackHashVerified'] = False
+        scan['metadata']['dailyBatch']['completedDeliveries'][0]['report']['multicaAttachmentId'] = 'pending-upload'
         result = snapshot(scan, issues)
         self.assertEqual(result['repair']['state'], 'attention')
         self.assertIsNone(result['repair']['completed'])

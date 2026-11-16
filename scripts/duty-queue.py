@@ -27,6 +27,7 @@ FAILURE_POLICY = 'retry_2_then_skip_v1'
 RETRY_LIMIT = 2
 RECORD_MARKER = 'daily-investigation:v3'
 MANIFEST_MARKER = 'daily-round-manifest:v3'
+PLACEHOLDERS = {'pending', 'pending-upload', 'pending_upload', 'tbd', 'todo', 'none', 'null'}
 
 
 class QueueError(ValueError):
@@ -124,10 +125,9 @@ def verified_delivery(batch, bug_issue):
         if receipt.get('issueId') != bug_issue['id'] or receipt.get('deliveryVersion') != version:
             continue
         report, delivery = receipt.get('report') or {}, receipt.get('delivery') or {}
-        if (report.get('readbackHashVerified') is True and delivery.get('readbackVerified') is True
-                and re.fullmatch(r'[0-9a-f]{64}', report.get('sha256') or '')
-                and text(report.get('multicaAttachmentId')) and text(delivery.get('permalink'))
-                and text(receipt.get('pr')) and re.fullmatch(r'[0-9a-f]{40}', receipt.get('prHead') or '')):
+        if (delivery.get('readbackVerified') is True
+                and valid_attachment_id(report.get('multicaAttachmentId')) and text(delivery.get('permalink'))
+                and text(receipt.get('pr')) and re.fullmatch(r'[0-9a-f]{7,40}', receipt.get('prHead') or '')):
             return True
     return False
 
@@ -158,14 +158,23 @@ def order(issue):
 
 
 def candidate_set_hash(candidate_ids):
+    """仅保留给历史逐条调查轮次（无评论清单）校验固定身份集合。"""
     payload = json.dumps(sorted(candidate_ids), ensure_ascii=False, separators=(',', ':'))
     return hashlib.sha256(payload.encode('utf-8')).hexdigest()
 
 
+def valid_attachment_id(value):
+    """附件回执只需非空且非待上传或模板占位符的真实 attachmentId，不再要求手抄 SHA-256。"""
+    if not text(value):
+        return False
+    normalized = value.strip()
+    if normalized.lower() in PLACEHOLDERS:
+        return False
+    return not (normalized.startswith('<') and normalized.endswith('>'))
+
+
 def verified_record(record):
-    return (isinstance(record, dict) and text(record.get('attachmentId'))
-            and re.fullmatch(r'[0-9a-f]{64}', record.get('sha256') or '') is not None
-            and record.get('readbackHashVerified') is True)
+    return isinstance(record, dict) and valid_attachment_id(record.get('attachmentId'))
 
 
 def valid_failure_skip(item):
@@ -263,8 +272,7 @@ def lane_round_candidates(scan, issues, agent_id):
     info = meta(scan, 'dailyRound')
     entries = round_manifest(scan, agent_id)
     ids = [entry['candidateId'] for entry in entries]
-    if (type(info.get('candidateCount')) is not int or len(ids) != info['candidateCount']
-            or len(set(ids)) != len(ids) or candidate_set_hash(ids) != info.get('candidateSetSha256')):
+    if type(info.get('candidateCount')) is not int or len(ids) != info['candidateCount'] or len(set(ids)) != len(ids):
         raise QueueError('本轮候选数量或身份与冻结清单不一致')
     lanes = round_lanes(scan, issues, agent_id)
     found = []
@@ -275,7 +283,7 @@ def lane_round_candidates(scan, issues, agent_id):
             found.append((created, item, lane))
     latest = {item['candidateId']: (item, lane) for _, item, lane in sorted(found, key=lambda entry: entry[0])}
     rows, pending = [], []
-    seen_attachments, seen_hashes, seen_intercom = {}, {}, {}
+    seen_attachments, seen_intercom = {}, {}
     enforce_unique = info.get('investigationComplete') is not True
     for entry in sorted(entries, key=lambda value: (value['feedbackDate'], value['candidateId'])):
         default = {'schemaVersion': 1, 'mode': 'investigate', 'roundId': scan['id'], 'sourceScanId': scan['id'],
@@ -293,15 +301,11 @@ def lane_round_candidates(scan, issues, agent_id):
             raise QueueError('工位调查记录的来源锚点与候选清单不一致')
         if enforce_unique and concluded(item) and item['state'] != 'skipped_failure':
             rec = item.get('investigationRecord') or {}
-            att_id, digest = rec.get('attachmentId'), rec.get('sha256')
+            att_id = rec.get('attachmentId')
             if text(att_id):
                 if att_id in seen_attachments:
                     raise QueueError('不同候选复用了同一份调查报告或来源会话证据')
                 seen_attachments[att_id] = entry['candidateId']
-            if text(digest):
-                if digest in seen_hashes:
-                    raise QueueError('不同候选复用了同一份调查报告或来源会话证据')
-                seen_hashes[digest] = entry['candidateId']
             if item['state'] in FIXABLE:
                 intercom_tokens = [tok for tok in source_tokens(item.get('evidenceRevision'))
                                    if tok.startswith('intercom:')]
@@ -328,14 +332,15 @@ def round_candidates(scan, issues, agent_id):
             or round_info.get('state') not in ROUND_STATES):
         raise QueueError('本轮调查协议或阶段无效')
     if not verified_record(round_info.get('candidateManifest')):
-        raise QueueError('本轮冻结清单缺少真实附件及哈希回读')
+        raise QueueError('本轮冻结清单缺少真实附件回执')
     if lane_store(scan):
         return lane_round_candidates(scan, issues, agent_id)
     rows = [row for row in issues if meta(row, 'dailyInvestigation').get('roundId') == scan['id']]
     identities = [meta(row, 'dailyInvestigation')['candidateId'] for row in rows]
     if (type(round_info.get('candidateCount')) is not int or round_info['candidateCount'] < 0
             or len(rows) != round_info['candidateCount'] or len(set(identities)) != len(rows)
-            or candidate_set_hash(identities) != round_info.get('candidateSetSha256')):
+            or (text(round_info.get('candidateSetSha256'))
+                and candidate_set_hash(identities) != round_info.get('candidateSetSha256'))):
         raise QueueError('本轮候选数量或身份与冻结清单不一致')
     pending = []
     for row in sorted(rows, key=order):
