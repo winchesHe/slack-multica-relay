@@ -121,7 +121,7 @@ Multica 任务操作一律用原生 CLI：先看帮助，核对服务、GRM 工�
    }
    ```
 
-3. 工位轮次不为候选逐条建任务：完整分页查重后，在原扫描追加清单评论，首行 `<!-- daily-round-manifest:v3 round=<扫描 UUID> -->`，再写一句说明和一个 ```json 代码块 `{"roundId":"<扫描 UUID>","candidates":[{"candidateId","feedbackDate","summary"}]}`，summary 是一句中文摘要；写后回读，确认 candidateId 集合摘要与 dailyRound 一致。随后在原扫描下建两张工位卡，标题「反馈调查｜MM-DD 反馈｜工位 n/2」，首行 `mode=investigate_lane`，标记 `<!-- daily-investigation-lane:v3 round=<扫描 UUID> lane=<n> -->`，初始无 assignee；metadata `dailyLane={schemaVersion:1,mode:"investigate_lane",roundId,lane:n,laneCount:2,state:"ready",currentCandidateId:null}`。两张工位卡回读后，在 dailyRound 写入 `investigationStore:"lane_comments"`、`laneIssueIds`，再设置 registrationComplete=true、state=investigating。
+3. 工位轮次不为候选逐条建任务：完整分页查重后，在原扫描追加清单评论，首行 `<!-- daily-round-manifest:v3 round=<扫描 UUID> -->`，再写一句说明和一个 ```json 代码块 `{"roundId":"<扫描 UUID>","candidates":[{"candidateId","feedbackDate","summary","sourceUrl"}]}`，summary 是一句中文摘要，sourceUrl 为该候选的原反馈链接；写后回读，确认 candidateId 集合摘要与 dailyRound 一致。随后在原扫描下建两张工位卡，标题「反馈调查｜MM-DD 反馈｜工位 n/2」，首行 `mode=investigate_lane`，标记 `<!-- daily-investigation-lane:v3 round=<扫描 UUID> lane=<n> -->`，初始无 assignee；metadata `dailyLane={schemaVersion:1,mode:"investigate_lane",roundId,lane:n,laneCount:2,state:"ready",currentCandidateId:null}`。两张工位卡回读后，在 dailyRound 写入 `investigationStore:"lane_comments"`、`laneIssueIds`，再设置 registrationComplete=true、state=investigating。
    逐条调查轮次仍按原规则：完整分页查重后，将本轮每个疑似项登记为原扫描的子任务，标题「反馈调查｜原反馈日｜摘要」，首行 `mode=investigate`，标记 `<!-- daily-investigation:v2 round=<扫描 UUID> candidate=<candidateId> -->`。初始无 assignee，旧轮仅下一调查项指派自身，新协议只由统一调度器领取并启动。`dailyInvestigation` 保存 `{schemaVersion:1,mode:"investigate",roundId,sourceScanId,feedbackDate,candidateId,state:"ready",evidenceRevision,nextAction}`；roundId、sourceScanId 和真实父任务均为当前扫描。全部任务数量与身份集合回读吻合后，才设置 registrationComplete=true、state=investigating。metadata 总量不超过 8KB，详细清单和过程放附件。
 4. 登记或启动结果不明先按稳定标记找回，不重复创建；登记未完成不能以零项报告完成。每个运行只执行一条调查，结论保存并回读后自动调度本轮下一条：工位轮次由调度器给工位分配下一条候选并排后继，逐条调查轮次由调度器补足最多两个调查名额，不等人工催办。
 
@@ -129,9 +129,9 @@ Multica 任务操作一律用原生 CLI：先看帮助，核对服务、GRM 工�
 
 补读原讨论、关联历史与附件，核对正确行为依据，定位实现，按需确认商家和窗口后查询副本、日志，并在授权测试环境做针对性验证。保存每个动作、结果、实际环境/版本/数据、截图或请求证据、未覆盖范围和下一动作；客户附件逐项记录序号、类型、SHA-256 与观察结论，未能查看的附件写明原因。实现、数据或验证路径确实不适用时，要记录原因，不能用一句“未复现”代替调查。
 
-工位轮次的每条结论不写在工位卡 metadata，而是在工位卡追加一条记录评论：首行 `<!-- daily-investigation:v3 round=<扫描 UUID> candidate=<candidateId> -->`，再写一句说明和一个 ```json 代码块，内容与逐条调查的 `dailyInvestigation` 字段相同，另加 laneIssueId；写后用 `issue comment list` 回读并确认 JSON 可解析。调查阶段同一候选以最新的本 Agent 记录为准，不修改或删除旧评论；修复队列建立后冻结工位调查结论，修复和交付只写 dailyBug/dailyBatch。真人写的同格式评论不算结论。
+工位轮次的每条结论不写在工位卡 metadata，而是在工位卡追加一条记录评论：首行 `<!-- daily-investigation:v3 round=<扫描 UUID> candidate=<candidateId> -->`，再写一句说明和一个 ```json 代码块，内容与逐条调查的 `dailyInvestigation` 字段相同，另加 laneIssueId 与 sourceUrl；写后用 `issue comment list` 回读并确认 JSON 可解析。工位每次开工先核对 `plan` 返回的 `candidateId` 与清单中的 `sourceUrl`，只读取和调查该候选对应的原反馈会话或帖子，不得跨候选混用其它会话、报告附件或证据。调查阶段同一候选以最新的本 Agent 记录为准，不修改或删除旧评论；修复队列建立后冻结工位调查结论，修复和交付只写 dailyBug/dailyBatch。真人写的同格式评论不算结论。
 
-每条报告上传后实际下载核对字节，并保存 `investigationRecord={attachmentId,sha256,readbackHashVerified:true,evidenceRevision}`，evidenceRevision 必须对应本次实际读取的材料版本；材料变化后不能复用旧报告结论。已确认、排除、重复、已有工单和外部缺证都必须有记录；报告文件存在或 Agent 自己声明完成不能替代回读。
+每条报告上传后实际下载核对字节，并保存 `investigationRecord={attachmentId,sha256,readbackHashVerified:true,evidenceRevision}`，evidenceRevision 必须对应本次实际读取的材料版本并包含该候选的来源标识（如 `intercom:<会话 ID>` 或 `canny:<标识>`）；材料变化后不能复用旧报告结论，不同候选不得复用同一份调查报告附件、哈希或单一 Intercom 会话证据。已确认、排除、重复、已有工单和外部缺证都必须有记录；报告文件存在或 Agent 自己声明完成不能替代回读。
 
 - `confirmed`：保存 `verification={fixable:true,productDecisionRequired:false,expectedBehaviorRef,observedDeviationRef,dedupeRef,customerSymptomLinkRef}`，前三个引用指向实际依据、已验证偏差和最新查重结果，customerSymptomLinkRef 指向报告中“客户原话或现象 → 该偏差如何导致”的因果说明。说明不成立或缺失时不能判为 confirmed。只登记确认结论，暂不创建或启动修复。
 - `excluded / duplicate / cs_followed`：保存 conclusionRef，指向真实排除依据、重复任务/PR 或已回读工单。调查完成后可将任务置 done；已有工单按原规则停止扩展调查，解释未执行路径的原因。
@@ -215,7 +215,7 @@ python3 <临时目录>/duty-queue.py \
   --round-id <原扫描 UUID>
 ```
 
-本次及之后版本的轮次必须带 `--round-id`，只规划该轮，其它轮次的调查与修复不挡本轮；`701a7303…` 旧轮不带。返回 protocolVersion 必须为 2；脚本只是只读计划器，不是启动或交付回执。按以下动作执行，任何字段矛盾都先核对，不能绕过全轮调查门槛：
+本次及之后版本的轮次必须带 `--round-id`，只收敛读取并规划该轮的评论与运行态，其它轮次的调查与修复不挡本轮，无需自行全项目分页遍历无关历史轮次；`701a7303…` 旧轮不带。返回 protocolVersion 必须为 2；脚本只是只读计划器，不是启动或交付回执。按以下动作执行，任何字段矛盾都先核对，不能绕过全轮调查门槛：
 
 - `collect_sources / register_round`：在对应新扫描继续采集或登记本轮固定清单；不恢复旧扫描附件。只补失败来源，已成功 Facebook、Intercom 窗口继续复用。
 - `investigate` / `investigate_lanes`：仅旧轮按 investigate 串行调查交接；逐条调查轮次和工位轮次必须改用上述 duty-dispatch.py，不按单条计划启动。旧轮继续所选本轮调查，或保存 dispatch intent 后只启动该项；确认一个 Bug 后仍接下一调查项，不进入修复。
@@ -362,7 +362,7 @@ python3 <临时目录>/duty-queue.py \
 
 跨仓时 `pr/prHead` 记录主 PR，另用 `prs` 保存全部 `{url,head}`；完整 HTML 必须绑定全部 PR 的实际版本，所有仓库都满足原交付门槛后才设置 completeDelivery。已有回执若采用其它字段，先根据原产物与真实回读核验并补齐上述字段，不能只为满足格式而补写成功标记。
 
-交付或受阻通知回读并保存回执后，查看本轮固定版本 `duty-dispatch.py --help`：支持 `repair-advance` 时，以调查调度相同的作用域参数调用它，由代码核验回执、更新分类与游标、启动下一项并回读；不手工改队列。返回 dispatch_repair 后结束当前运行，wait 时释放名额，attention 时保留具体错误。父扫描自动复核同样通过此入口接续，不回退队列。
+交付或受阻通知回读并保存回执后，查看本轮固定版本 `duty-dispatch.py --help`：支持 `repair-advance` 时，以调查调度相同的作用域参数调用它，由代码按本轮 `--round-id` 收敛核验回执、更新分类与游标、启动下一项并回读；不手工改队列。若上一项已推进 `dailyBatch.currentIssueId` 但目标 Bug 尚未指派或无活动运行，或调用时的运行已退出，可直接以当前或目标 Bug 作为 `--current-issue` 调用 `repair-advance`（无活动运行时可省略 `--current-run`）完成断点重入与启动，无需手工修改 metadata 或拆解脚本。返回 dispatch_repair 后结束当前运行，wait 时释放名额，attention 时保留具体错误。父扫描自动复核同样通过此入口接续，不回退队列。
 
 不支持该命令的既有轮次继续该固定版本的原接续流程：按有效交付或受阻通知更新分类，保存下一项 index/currentIssueId 后唯一指派并回读；只有该版本允许越过受阻项时才推进。不因新 Prompt 切换旧轮脚本或调用不存在的命令。
 
