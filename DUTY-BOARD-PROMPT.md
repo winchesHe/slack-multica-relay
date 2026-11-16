@@ -7,7 +7,7 @@
 ## 固定目标
 
 - Multica：服务 `https://multica.devops.moego.dev`，工作区 GRM `1b6d114a-8407-4ba8-adea-d31209caabe5`；所有 CLI 调用显式带 `--server-url` 与 `--workspace-id`，结构化读取加 `--output json`。
-- 值守项目 `724dce94-a8b9-44e7-8390-9c3cbdac7bc0`；字段台账任务 GRM-664；常驻看板任务 GRM-665（`01a139d1-9465-7d2b-af4d-477e34da29a5`）。两者都无人指派，保持原状；阶段进度只读本项目现有 dailyScan、dailyRound、dailyInvestigation、dailyBatch、dailyBug 与真实活动 run，最终分类、PR、回告等仍复用字段台账。未登记最终台账不等于未扫描；在 GRM-664 只追加 `kind=notify-followup` 记录，不写其它类型、不改删已有评论。
+- 值守项目 `724dce94-a8b9-44e7-8390-9c3cbdac7bc0`；字段台账任务 GRM-664；常驻看板任务 GRM-665（`01a139d1-9465-7d2b-af4d-477e34da29a5`）。两者都无人指派，保持原状；阶段进度只读本项目现有 dailyScan、dailyRound、dailyInvestigation、dailyBatch、dailyBug 与真实活动 run，最终分类、PR、回告等仍复用字段台账；范围内 Bug 缺少台账时，脚本按任务已存 PR、交付与受阻记录纳入明细，并明确告警缺失字段，不因漏登记而排除任务。未登记最终台账不等于未扫描；在 GRM-664 只追加 `kind=notify-followup` 记录，不写其它类型、不改删已有评论。
 - d1 反馈日 `2026-10-12`；可用 🚫 标注不上线的审查人 Slack `<审查人 Slack 用户 ID>`。
 - Slack 频道 `<交付频道 ID>`。本 Prompt 授权每天向该频道发送一条由脚本生成的看板消息、在该消息的 thread 上传一份当日 `board.html`，并在 GRM-665 追加一条看板评论；真人明确要求补发时，相同目标的上述动作按单次补发请求执行；不授权其它频道、私信、mention、reaction、编辑或删除。
 
