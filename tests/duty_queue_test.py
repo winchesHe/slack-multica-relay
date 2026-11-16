@@ -201,6 +201,69 @@ class LaneRoundTests(unittest.TestCase):
         plan = queue.next_action([self.scan, *lanes], [], project_id='project', agent_id='agent', round_id='scan')
         self.assertEqual(plan['action'], 'investigate_lanes')
 
+    def test_lane_source_anchor_and_duplicate_evidence_fail_closed(self):
+        lanes = lane_freeze(self.scan, ['101', '102'])
+        # 兼容未写入 sourceUrl 的历史清单，也核对写有 sourceUrl 时的来源锚点。
+        self.assertTrue(queue.valid_source_anchor(
+            candidate('101', 'confirmed')['metadata']['dailyInvestigation'], {'candidateId': 'intercom:101'}))
+        self.scan['_comments'] = [comment(queue.MANIFEST_MARKER, {'roundId': 'scan', 'candidates': [
+            {'candidateId': 'intercom:101', 'feedbackDate': '2026-10-21', 'summary': '101',
+             'sourceUrl': 'https://app.intercom.com/a/inbox/ws/inbox/conversation/101'},
+            {'candidateId': 'intercom:102', 'feedbackDate': '2026-10-21', 'summary': '102',
+             'sourceUrl': 'https://app.intercom.com/a/inbox/ws/inbox/conversation/102'}]})]
+        for label, mutate in (
+            ('wrong_url', lambda item: item.update(
+                sourceUrl='https://app.intercom.com/a/inbox/ws/inbox/conversation/999',
+                evidenceRevision='intercom:999')),
+            ('wrong_revision_token', lambda item: item.update(evidenceRevision='intercom:999')),
+        ):
+            scan, rows = copy.deepcopy(self.scan), copy.deepcopy(lanes)
+            item = conclude(rows[0], '101', 'confirmed')
+            mutate(item)
+            rows[0]['_comments'][-1] = comment(queue.RECORD_MARKER, {**item, 'laneIssueId': rows[0]['id']})
+            with self.subTest(case=label), self.assertRaisesRegex(queue.QueueError, '来源锚点'):
+                queue.round_candidates(scan, [scan, *rows], 'agent')
+
+        for label, mutate_second in (
+            ('shared_attachment', lambda second, first: second['investigationRecord'].update(
+                attachmentId=first['investigationRecord']['attachmentId'])),
+            ('shared_sha256', lambda second, first: second['investigationRecord'].update(
+                sha256=first['investigationRecord']['sha256'])),
+        ):
+            scan, rows = copy.deepcopy(self.scan), copy.deepcopy(lanes)
+            first = conclude(rows[0], '101', 'confirmed')
+            first.update(sourceUrl='https://app.intercom.com/a/inbox/ws/inbox/conversation/101',
+                         evidenceRevision='intercom:101')
+            first['investigationRecord']['evidenceRevision'] = 'intercom:101'
+            rows[0]['_comments'][-1] = comment(queue.RECORD_MARKER, {**first, 'laneIssueId': rows[0]['id']})
+            second = conclude(rows[1], '102', 'excluded')
+            second.update(sourceUrl='https://app.intercom.com/a/inbox/ws/inbox/conversation/102',
+                          evidenceRevision='intercom:102')
+            second['investigationRecord']['evidenceRevision'] = 'intercom:102'
+            mutate_second(second, first)
+            rows[1]['_comments'][-1] = comment(queue.RECORD_MARKER, {**second, 'laneIssueId': rows[1]['id']})
+            with self.subTest(case=label), self.assertRaisesRegex(queue.QueueError, '复用了同一份调查报告或来源会话证据'):
+                queue.round_candidates(scan, [scan, *rows], 'agent')
+
+        # 两条确认可修项若仅引用同一个 Intercom 会话（在无 sourceUrl 的旧清单下）也拒绝。
+        legacy_scan = copy.deepcopy(self.scan)
+        legacy_rows = lane_freeze(legacy_scan, ['101', '102'])
+        first = conclude(legacy_rows[0], '101', 'confirmed')
+        first['evidenceRevision'] = 'intercom:101'
+        first['investigationRecord']['evidenceRevision'] = 'intercom:101'
+        legacy_rows[0]['_comments'][-1] = comment(queue.RECORD_MARKER, {**first, 'laneIssueId': legacy_rows[0]['id']})
+        second = conclude(legacy_rows[1], '102', 'confirmed')
+        second['evidenceRevision'] = 'intercom:101'
+        second['investigationRecord']['evidenceRevision'] = 'intercom:101'
+        legacy_rows[1]['_comments'][-1] = comment(queue.RECORD_MARKER, {**second, 'laneIssueId': legacy_rows[1]['id']})
+        with self.assertRaisesRegex(queue.QueueError, '复用了同一份调查报告或来源会话证据'):
+            queue.round_candidates(legacy_scan, [legacy_scan, *legacy_rows], 'agent')
+
+        # 已完成调查（investigationComplete=True）的既有轮次仍可向后兼容读取。
+        legacy_scan['metadata']['dailyRound']['investigationComplete'] = True
+        resolved, pending = queue.round_candidates(legacy_scan, [legacy_scan, *legacy_rows], 'agent')
+        self.assertEqual((len(resolved), len(pending)), (2, 0))
+
 
 class ScopedPlanTests(unittest.TestCase):
     """跨轮：其它轮次的调查与修复不挡本轮；修复队列全局一次只登记一条。"""
@@ -592,6 +655,36 @@ class SnapshotTests(unittest.TestCase):
         row = candidate()
         row['metadata']['dailyInvestigation'] = json.dumps(row['metadata']['dailyInvestigation'])
         self.assertEqual(queue.meta(row, 'dailyInvestigation')['candidateId'], 'intercom:investigation')
+
+    def test_round_scoped_snapshot_skips_unrelated_rounds_and_comments(self):
+        scan = issue('scan', dailyRound={'schemaVersion': 1, 'investigationStore': 'lane_comments',
+                                          'state': 'investigating'})
+        lane = {**issue('lane-1', dailyLane={'roundId': 'scan', 'state': 'investigating'}),
+                'parent_issue_id': 'scan', 'status': 'in_progress'}
+        other_scan = issue('other', dailyRound={'schemaVersion': 1, 'investigationStore': 'lane_comments',
+                                                'state': 'investigating'})
+        other_lane = {**issue('other-lane', dailyLane={'roundId': 'other', 'state': 'investigating'}),
+                      'parent_issue_id': 'other', 'status': 'in_progress'}
+        other_bug = {**issue('other-bug', dailyBug={'batchId': 'other'}), 'status': 'in_progress'}
+        all_issues = [scan, lane, other_scan, other_lane, other_bug]
+        with patch.object(queue, 'query', side_effect=[
+            {'id': 'project'}, {'id': 'agent', 'max_concurrent_tasks': 2},
+            {'issues': all_issues, 'has_more': False, 'total': len(all_issues), 'offset': 0},
+            [{'id': 'c-scan'}], [{'id': 'c-lane'}], [],
+        ]) as query:
+            issues, runs = queue.snapshot(['multica'], 'project', 'agent', 'scan', round_id='scan')
+        commands = [call.args[1] for call in query.call_args_list]
+        self.assertEqual(commands[3:], [
+            ['issue', 'comment', 'list', 'scan', '--full', '--compact'],
+            ['issue', 'comment', 'list', 'lane-1', '--full', '--compact'],
+            ['issue', 'runs', 'lane-1', '--active'],
+        ])
+        self.assertEqual(runs, [])
+        by_id = {row['id']: row for row in issues}
+        self.assertIn('_comments', by_id['scan'])
+        self.assertIn('_comments', by_id['lane-1'])
+        self.assertNotIn('_comments', by_id['other'])
+        self.assertNotIn('_comments', by_id['other-lane'])
 
 
 if __name__ == '__main__':
