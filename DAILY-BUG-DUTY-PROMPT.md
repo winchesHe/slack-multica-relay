@@ -61,7 +61,7 @@ Multica 任务操作一律用原生 CLI：先看帮助，核对服务、GRM 工�
 2. Canny 不用 vote/Quick Win 门槛过滤 Bug；按 newest 读取到日期边界后，只取窗口内创建的帖子及其页面可见评论。覆盖口径为 period-created-posts / page-visible；不承诺发现旧帖当天的新评论、编辑或票数变化，不称全历史或全量评论。评论不全时可按需补背景，信息不足的候选不能进入修复。Facebook 只代表现有 Slack 汇总频道，不直接抓 Facebook。Intercom 每个会话一条 evidence：`inWindow=true` 的客户消息是当日反馈，其余消息只作上下文；自行判断是否 Bug 与业务归属，不只关注功能需求；被隐藏的邮箱、电话、链接不得还原。本轮 scan 保存候选后，按 Intercom manifest 的 `runArtifact` 与 `evidenceArtifacts` 删除会话文件；之后需要原文时，用会话链接经 intercom skill 的 `get-conversation` 重读。Intercom evidence 的 `csTickets` 是该会话已关联的 CS 工单；`moegoCompanyIds` 是联系人所属公司的 MoeGo company ID，只是候选：联系人可能属于多个公司，也可能是代客户提问的 MoeGo 内部员工；达到 10 个时列表可能不全。取证前先用会话中的对象 ID、链接，或逐个 company 查数据，确认实际出问题的商家。
 3. 覆盖各业务，团队/domain 字段仅帮助确定背景与目标仓库，不能作为排除理由；实际背景不明时补证。归并同一问题，保存来源稳定身份、链接、现象、预期及依据、影响、平台和验收目标。对当前项目、现有周度值守和 Bug Resolver 的任务/PR 查重，已有在途工作只关联，不重复开工；不自动恢复取消、停止或已关闭项。已有合并修复仍须核对客户受影响版本与修复范围，不能仅凭有 PR 就排除回归。已关联工单的反馈视为已有工单跟进：Intercom 以 `csTickets` 非空，或 `jiraKeys` 中经 jira skill 回读确认存在的研发项目工单（如 MER、IFRFE）为准；Canny、Facebook 在补证时经 jira skill 按来源链接或标题只读搜索 CS；命中的记录标为已有工单跟进并保存工单号，不再调查验证，也不计入待验证。
 4. 用本项目任务和 metadata 保存候选与来源覆盖，不新增规则后台。三源任一失败时可以保存已读事实和候选，但不新建完整修复批次或宣称无 Bug；记录受影响来源、已尝试路径及补采条件。
-5. 本轮固定清单均已形成有依据的结论或有界重试后留档跳过、完整调查索引已回读后，才为 confirmed 项形成唯一固定修复批次与顺序；有 1 项即可组成批次，但不能在其余调查未完成时提前启动。`total` 是本批次入选数量，不随之后采集增长。使用批次任务 metadata `dailyBatch` 保存 `{mode,state,bugIds,index,total,currentIssueId,deliveryVersion,advancePolicy,deliveredBugIds,completedDeliveries}`，修复队列的 index 从 1 开始，advancePolicy 为 after_verified_delivery；受阻接续轮次另用 `blockedBugIds` 与 `blockNotices` 记录已通知的受阻项（见第 3 节「受阻通知与接续」）；真实父子任务关系必须与 batchId 一致。每个 Bug 独立建任务，metadata `dailyBug` 保存 `{mode,batchId,index,total,candidateId,state,deliveryVersion,reviewState}`，正文保存必要上下文与验收目标，并明确完整交付后自动接续、不等待逐项人工确认。每个依赖测试部署的 Bug 正文必须明确写入：「本任务验收必须收集目标修复分支的构建/部署 CI 结果，确认目标提交实际部署并就绪，然后完成动态 Case 和完整报告交付；仅本地测试通过、PR 已创建或 CI 仍在运行不满足验收标准。」保存后回读该条件；不能仅在 Agent Prompt 中泛写需验收，而遗漏任务自身对 CI 结果的明确要求。
+5. 本轮固定清单均已形成有依据的结论或有界重试后留档跳过、完整调查索引已回读后，才为 confirmed 项形成唯一固定修复批次与顺序；有 1 项即可组成批次，但不能在其余调查未完成时提前启动。`total` 是本批次入选数量，不随之后采集增长。使用批次任务 metadata `dailyBatch` 保存 `{mode,state,bugIds,index,total,currentIssueId,deliveryVersion,advancePolicy,deliveredBugIds,completedDeliveries}`，修复队列的 index 从 1 开始，advancePolicy 为 after_verified_delivery；受阻接续轮次另用 `blockedBugIds` 与 `blockNotices` 记录已通知的受阻项（见第 3 节「受阻通知与接续」）；真实父子任务关系必须与 batchId 一致。每个 Bug 独立建任务，metadata `dailyBug` 保存 `{mode,batchId,index,total,candidateId,state,deliveryVersion,reviewState}`，正文保存必要上下文与验收目标，并明确完整交付后自动接续、不等待逐项人工确认。建任务或锁定仓库后按仓库交付形态确定验收条件：有 PR 构建/部署流水线的应用、服务与前端仓库，正文必须明确写入「本任务验收必须收集目标修复分支的构建/部署 CI 结果，确认目标提交实际部署并就绪，然后完成动态 Case 和完整报告交付；仅本地测试通过、PR 已创建或 CI 仍在运行不满足验收标准。」保存后回读该条件；若已通过 `gh workflow list` 与 `.github/workflows` 核实目标仓库为纯 SQL / 数仓视图等无 PR 构建或环境自动部署流水线的静态定义仓库，则在正文写明「本任务涉及无 PR 构建/部署流水线的 SQL/视图仓库，必须结合 PR 变更在授权只读数据副本或数仓上完成修复前后 SQL 对真实业务样本（原问题样本、核心筛选条件与相邻回归场景）的查询对比验证，并与 PR 和完整 HTML 报告一并交付；不得擅自合并 PR 或写入线上视图」，不得以“无 PR 部署 CI”将其判为受阻。
 6. 未结束修复批次按原固定队列恢复，不另起第二批次、不回退 index。新流程必须先完成本轮全部调查再登记修复，后续 Bug 初始均无 assignee，只指派首项自身启动并回读；每项完整交付后，或在受阻接续轮次中受阻结果回读后，按固定顺序自动接续，不等待逐项人工确认。不能提前将全部任务指派启动，也不能占着唯一运行名额等待下一个任务。工程 completed/finished_with_skips 且仅人工待审不算在途修复；状态矛盾先核对。
 7. 本轮全部调查留档后，scan 将实际开始时间、上海目标日、各来源窗口/状态/证据、查重与候选分类、在途检查、调度回执和结论保存于当前任务及附件。逐条证据索引固定命名为 `scan-evidence-index.json`，单独作为当前任务附件上传或放入证据 zip；每日看板据此展示昨日逐条记录。零项合格或缺源也保存真实结果；调查未完成只保存当前阶段和恢复动作，不发送完成通知；缺源记录失败及补采条件，不写成成功零反馈。每轮扫描结束后向指定交付频道发送一次扫描结果并回读。按以下模板替换全部占位，控制在 8 行内；补证方式、归并与计数口径、历史接续等过程描述只放任务附件，不写进消息：
 
@@ -102,7 +102,7 @@ Multica 任务操作一律用原生 CLI：先看帮助，核对服务、GRM 工�
 #### 固定清单与完整登记
 
 1. 采集和初筛完成后，只将本轮确需调查的疑似 Bug 归并成固定清单，保存 candidateId、原反馈日、来源链接、原采集 runId、现象和正确行为线索。普通支持、产品诉求和已确认已有工单跟进项也保留分类依据。
-2. 将固定清单作为附件上传、下载并核对实际字节 SHA-256；在当前扫描的 `dailyRound` 保存以下协议。`candidateSetSha256` 对本轮全部 candidateId 排序后的 JSON 数组计算：`hashlib.sha256(json.dumps(sorted(candidate_ids), ensure_ascii=False, separators=(',', ':')).encode('utf-8')).hexdigest()`。清单写定后不追加新候选或混入历史积压。
+2. 将固定清单作为附件上传并保存返回的真实 `attachmentId`（不得使用 `pending-upload` 等占位符）；在当前扫描的 `dailyRound` 保存以下协议。工位轮次不再计算或填写 `candidateSetSha256`、`sha256` 或 `readbackHashVerified`。清单写定后不追加新候选或混入历史积压。
 
    ```json
    {
@@ -110,28 +110,25 @@ Multica 任务操作一律用原生 CLI：先看帮助，核对服务、GRM 工�
      "policy": "investigate_all_then_repair",
      "state": "registering",
      "candidateCount": 0,
-     "candidateSetSha256": "<固定身份集合的 64 位 SHA-256>",
      "candidateManifest": {
-       "attachmentId": "<清单真实附件 ID>",
-       "sha256": "<下载字节的 64 位 SHA-256>",
-       "readbackHashVerified": true
+       "attachmentId": "<清单真实附件 UUID>"
      },
      "registrationComplete": false,
      "investigationComplete": false
    }
    ```
 
-3. 工位轮次不为候选逐条建任务：完整分页查重后，在原扫描追加清单评论，首行 `<!-- daily-round-manifest:v3 round=<扫描 UUID> -->`，再写一句说明和一个 ```json 代码块 `{"roundId":"<扫描 UUID>","candidates":[{"candidateId","feedbackDate","summary","sourceUrl"}]}`，summary 是一句中文摘要，sourceUrl 为该候选的原反馈链接；写后回读，确认 candidateId 集合摘要与 dailyRound 一致。随后在原扫描下建两张工位卡，标题「反馈调查｜MM-DD 反馈｜工位 n/2」，首行 `mode=investigate_lane`，标记 `<!-- daily-investigation-lane:v3 round=<扫描 UUID> lane=<n> -->`，初始无 assignee；metadata `dailyLane={schemaVersion:1,mode:"investigate_lane",roundId,lane:n,laneCount:2,state:"ready",currentCandidateId:null}`。两张工位卡回读后，在 dailyRound 写入 `investigationStore:"lane_comments"`、`laneIssueIds`，再设置 registrationComplete=true、state=investigating。
+3. 工位轮次不为候选逐条建任务：完整分页查重后，在原扫描追加清单评论，首行 `<!-- daily-round-manifest:v3 round=<扫描 UUID> -->`，再写一句说明和一个 ```json 代码块 `{"roundId":"<扫描 UUID>","candidates":[{"candidateId","feedbackDate","summary","sourceUrl"}]}`，summary 是一句中文摘要，sourceUrl 为该候选的原反馈链接；写后回读，确认 candidateId 数量与无重复及 dailyRound 一致。随后在原扫描下建两张工位卡，标题「反馈调查｜MM-DD 反馈｜工位 n/2」，首行 `mode=investigate_lane`，标记 `<!-- daily-investigation-lane:v3 round=<扫描 UUID> lane=<n> -->`，初始无 assignee；metadata `dailyLane={schemaVersion:1,mode:"investigate_lane",roundId,lane:n,laneCount:2,state:"ready",currentCandidateId:null}`。两张工位卡回读后，在 dailyRound 写入 `investigationStore:"lane_comments"`、`laneIssueIds`，再设置 registrationComplete=true、state=investigating。
    逐条调查轮次仍按原规则：完整分页查重后，将本轮每个疑似项登记为原扫描的子任务，标题「反馈调查｜原反馈日｜摘要」，首行 `mode=investigate`，标记 `<!-- daily-investigation:v2 round=<扫描 UUID> candidate=<candidateId> -->`。初始无 assignee，旧轮仅下一调查项指派自身，新协议只由统一调度器领取并启动。`dailyInvestigation` 保存 `{schemaVersion:1,mode:"investigate",roundId,sourceScanId,feedbackDate,candidateId,state:"ready",evidenceRevision,nextAction}`；roundId、sourceScanId 和真实父任务均为当前扫描。全部任务数量与身份集合回读吻合后，才设置 registrationComplete=true、state=investigating。metadata 总量不超过 8KB，详细清单和过程放附件。
 4. 登记或启动结果不明先按稳定标记找回，不重复创建；登记未完成不能以零项报告完成。每个运行只执行一条调查，结论保存并回读后自动调度本轮下一条：工位轮次由调度器给工位分配下一条候选并排后继，逐条调查轮次由调度器补足最多两个调查名额，不等人工催办。
 
 #### 每条调查必须有过程和结论
 
-补读原讨论、关联历史与附件，核对正确行为依据，定位实现，按需确认商家和窗口后查询副本、日志，并在授权测试环境做针对性验证。保存每个动作、结果、实际环境/版本/数据、截图或请求证据、未覆盖范围和下一动作；客户附件逐项记录序号、类型、SHA-256 与观察结论，未能查看的附件写明原因。实现、数据或验证路径确实不适用时，要记录原因，不能用一句“未复现”代替调查。
+补读原讨论、关联历史与附件，核对正确行为依据，定位实现，按需确认商家和窗口后查询副本、日志，并在授权测试环境做针对性验证。保存每个动作、结果、实际环境/版本/数据、截图或请求证据、未覆盖范围和下一动作；客户附件逐项记录序号、类型与观察结论，未能查看的附件写明原因。实现、数据或验证路径确实不适用时，要记录原因，不能用一句“未复现”代替调查。
 
 工位轮次的每条结论不写在工位卡 metadata，而是在工位卡追加一条记录评论：首行 `<!-- daily-investigation:v3 round=<扫描 UUID> candidate=<candidateId> -->`，再写一句说明和一个 ```json 代码块，内容与逐条调查的 `dailyInvestigation` 字段相同，另加 laneIssueId 与 sourceUrl；写后用 `issue comment list` 回读并确认 JSON 可解析。工位每次开工先核对 `plan` 返回的 `candidateId` 与清单中的 `sourceUrl`，只读取和调查该候选对应的原反馈会话或帖子，不得跨候选混用其它会话、报告附件或证据。调查阶段同一候选以最新的本 Agent 记录为准，不修改或删除旧评论；修复队列建立后冻结工位调查结论，修复和交付只写 dailyBug/dailyBatch。真人写的同格式评论不算结论。
 
-每条报告上传后实际下载核对字节，并保存 `investigationRecord={attachmentId,sha256,readbackHashVerified:true,evidenceRevision}`，evidenceRevision 必须对应本次实际读取的材料版本并包含该候选的来源标识（如 `intercom:<会话 ID>` 或 `canny:<标识>`）；材料变化后不能复用旧报告结论，不同候选不得复用同一份调查报告附件、哈希或单一 Intercom 会话证据。已确认、排除、重复、已有工单和外部缺证都必须有记录；报告文件存在或 Agent 自己声明完成不能替代回读。
+每条报告上传后保存返回的真实 `attachmentId`，写入 `investigationRecord={attachmentId,evidenceRevision}`，`attachmentId` 必须为真实已上传附件 UUID（不能使用 `pending-upload` 等占位符），`evidenceRevision` 必须对应本次实际读取的材料版本并包含该候选的来源标识（如 `intercom:<会话 ID>` 或 `canny:<标识>`）；材料变化后不能复用旧报告结论，不同候选不得复用同一份调查报告附件 ID 或单一 Intercom 会话证据；不再下载附件重算或手抄 SHA-256。已确认、排除、重复、已有工单和外部缺证都必须有记录；报告文件存在或 Agent 自己声明完成不能替代上传后记录真实 `attachmentId`。
 
 - `confirmed`：保存 `verification={fixable:true,productDecisionRequired:false,expectedBehaviorRef,observedDeviationRef,dedupeRef,customerSymptomLinkRef}`，前三个引用指向实际依据、已验证偏差和最新查重结果，customerSymptomLinkRef 指向报告中“客户原话或现象 → 该偏差如何导致”的因果说明。说明不成立或缺失时不能判为 confirmed。只登记确认结论，暂不创建或启动修复。
 - `excluded / duplicate / cs_followed`：保存 conclusionRef，指向真实排除依据、重复任务/PR 或已回读工单。调查完成后可将任务置 done；已有工单按原规则停止扩展调查，解释未执行路径的原因。
@@ -158,7 +155,7 @@ Multica 任务操作一律用原生 CLI：先看帮助，核对服务、GRM 工�
 
 台账或通知失败按原规则保存待补内容和具体错误，不伪造回读；调查完成由固定清单与实际调查证据判断。完整调查索引上传或回读未完成时不能进入修复。
 
-本轮所有条目都达到上述有证据的结论，或已按有限重试协议留档为执行失败跳过，才汇总 `scan-evidence-index.json` 与完整调查索引，上传后下载核对，保存 `dailyRound.investigationIndex={attachmentId,sha256,readbackHashVerified:true}`、investigationComplete=true、state=ready_repair。原扫描、分类台账和扫描结果同步更新；未处理项必须为 0，不能仅上传 pending-candidates 附件后结束。执行失败跳过数及恢复条件在完整索引与阶段进度中明确保留；不能把含跳过项的轮次说成全部验证通过。真正外部缺证的数量如实保留。调查未完成时只能报告当前阶段和未完成范围，不能发送“反馈扫描完成”。三源失败仍如实记录，不能把缺源解释为无 Bug。
+本轮所有条目都达到上述有证据的结论，或已按有限重试协议留档为执行失败跳过，才汇总 `scan-evidence-index.json` 与完整调查索引并上传，保存 `dailyRound.investigationIndex={attachmentId}`、investigationComplete=true、state=ready_repair。原扫描、分类台账和扫描结果同步更新；未处理项必须为 0，不能仅上传 pending-candidates 附件后结束。执行失败跳过数及恢复条件在完整索引与阶段进度中明确保留；不能把含跳过项的轮次说成全部验证通过。真正外部缺证的数量如实保留。调查未完成时只能报告当前阶段和未完成范围，不能发送“反馈扫描完成”。三源失败仍如实记录，不能把缺源解释为无 Bug。
 
 #### 固定本轮修复队列
 
@@ -256,7 +253,10 @@ python3 <临时目录>/duty-queue.py \
 
 ### 构建与测试部署期间持续推进
 
-沿用本值守 Agent 当前持续验收规则，按 `moe-acceptance/references/repair-and-retest.md` 的「等待构建或部署后续验」执行。目标分支的构建/部署 CI 结果是任务明确要求的验收前置。若已有 Bug 正文遗漏这一要求，按上述已获授权的验收标准用 `--no-start` 补齐并回读，再跟踪其实际构建；不改写 Runtime 自动管理的规则文件。
+先通过目标仓库的 `gh workflow list` 与 `.github/workflows` 区分交付形态：
+
+- **有构建或测试部署流水线的应用、服务与前端仓库（默认）**：沿用本值守 Agent 当前持续验收规则，按 `moe-acceptance/references/repair-and-retest.md` 的「等待构建或部署后续验」执行。目标分支的构建/部署 CI 结果是任务明确要求的验收前置；若已有 Bug 正文遗漏这一要求，按上述已获授权的验收标准用 `--no-start` 补齐并回读，再跟踪其实际构建，不改写 Runtime 自动管理的规则文件。
+- **纯 SQL / 数仓视图 / 无 PR 构建或环境自动部署流水线的静态定义仓库**（例如只含 ClickHouse view DDL、无 PR 构建/部署 workflow 的 `moego-flow-dw`）：确认仓库确实没有 PR 构建/部署 CI（而非已有流水线失败、排队或未触发）后，不适用“等待 PR 部署 CI”前置，也不得以“无 PR 部署 CI”标为 `blocked`（`deployment_unavailable`）；改用授权只读数仓或数据库副本完成**修复前原 SQL vs 修复后新 SQL 的真实业务样本 Before/After 对比查询**（覆盖客户原问题样本、核心筛选条件样本及相邻边界/回归场景）配合 SQL 静态/括号/语法检查完成动态数据验收，并在完整 HTML 报告与交付文案中写明对比样本、观察结果及「该仓库无 PR 部署 CI，待 PR 合并后按数仓视图流程生效」，直接按完整交付推进与自动接续，PR 合并与线上视图变更仍保留人工审批。
 
 先锁定当前 PR head、具体构建/部署 run、目标测试环境与服务；在同一运行内按 Runtime 对明确 CI 验收请求允许的前台阻塞方式收集结果，使用工具支持的有界等待并观察真实进展。不能后台放置等待后结束运行，不能只回复“CI 运行中”或“等待部署”就交回用户。单次工具超时或轮询时限结束仅是一次观察边界，须根据新进展、运行能力与剩余路径继续判断，不能直接当作整个任务结束。部署仍正常排队、构建或 rollout 时保持任务 `in_progress`、当前 Bug/批次 `state=running`，只记录等待阶段和下一动作，不提前标为 blocked 或清理接续现场。
 
@@ -339,19 +339,17 @@ python3 <临时目录>/duty-queue.py \
 
 自动接续的条件是当前范围内修复与必要检查完成、动态验收和充分证据支持结论、PR 与完整 HTML 对应最终版本、交付消息及附件均已回读。run completed、本地测试成功、PR 创建、报告文件存在、CI 状态或阶段报告均不能单独放行。满足后，保存当前 `dailyBug.state=delivered`、`completeDelivery=true`、`reviewState=pending_human_review`、递增 deliveryVersion、PR head、报告版本、交付时间和真实回执；任务进入 in_review，人工审查与后续独立修复可以同时进行。父批次只补齐对应版本的 completedDeliveries 回执，分类集合与游标由接续入口统一更新；新流程 Bug 按 investigationIssueId 核对对应调查。工位轮次的调查结论在修复阶段保持冻结，不追加或改写 daily-investigation:v3 评论，修复与交付结果只写 dailyBug 和 dailyBatch；investigate_lane 仅用于工位任务入口，调查结论记录的 mode 必须始终为 investigate。旧逐条调查轮次更新原调查为 delivered 时，完整保留原验证与报告；完成工程交付不伪造真人确认、Approve、合并或上线记录。
 
-`dailyBug.deliveryVersion` 为正整数。父批次 `completedDeliveries` 每条记录使用以下结构，与 `duty-queue.py` 的交付恢复校验一致；示例中的占位符必须替换为实际值，两个 readback 标记仅在对应真实回读完成后才能为 true：
+`dailyBug.deliveryVersion` 为正整数。父批次 `completedDeliveries` 每条记录使用以下结构，与 `duty-queue.py` 的交付恢复校验一致；示例中的占位符必须替换为实际值（`multicaAttachmentId` 为实际上传的 HTML 报告 UUID，`delivery.readbackVerified` 仅在 Slack 交付消息真实回读完成后才能为 `true`，不再要求计算或填写报告 `sha256` 与 `readbackHashVerified`）：
 
 ```json
 {
   "issueId": "<Bug Issue UUID>",
   "deliveryVersion": 1,
   "pr": "<主 PR URL>",
-  "prHead": "<主 PR 最终 40 位十六进制 SHA>",
+  "prHead": "<主 PR 最终提交 SHA>",
   "report": {
     "version": 1,
-    "sha256": "<最终 HTML 字节的 64 位十六进制 SHA-256>",
-    "multicaAttachmentId": "<实际报告附件 UUID>",
-    "readbackHashVerified": true
+    "multicaAttachmentId": "<实际报告附件 UUID>"
   },
   "delivery": {
     "permalink": "<真实交付根消息链接>",
@@ -376,7 +374,7 @@ python3 <临时目录>/duty-queue.py \
 
 ### 受阻通知与接续
 
-完成「缺口处理与受阻判定」复核后，只有第 2 节所列、需要真人或外部条件才能继续的真实阻塞按本节处理，包括必要权限缺失、目标构建/部署真实失败且恢复路径已尝试，以及开工后才发现需要产品决定；部署仍在正常推进、单次工具超时或运行被硬中断都不是受阻。真实受阻且尚未全部合并的 Bug 单列“受阻”，适用于既有受阻项和后续同类问题；保留已做动作、未完成范围、报告与恢复条件，不计完整交付、应上线或已交付 PR，不自动补验收、不催办解除、不自动回流当前或后续轮次。确认受阻后不再新建 PR 或发送可审查交付；已有 PR 仅保留为任务证据，不为归类关闭 PR 或删除证据。只有真人明确要求恢复该项才续作。
+完成「缺口处理与受阻判定」复核后，只有第 2 节所列、需要真人或外部条件才能继续的真实阻塞按本节处理，包括必要权限缺失、有部署流水线的目标构建/部署真实失败且恢复路径已尝试，以及开工后才发现需要产品决定；经 `gh workflow list` / `.github/workflows` 核实无 PR 构建或环境自动部署流水线的纯 SQL / 数仓视图仓库不适用部署 CI 门槛，应改在授权只读数仓/副本上完成修复前后 SQL 对真实业务样本的对比验证并直接完整交付，不得仅因无 PR CI 判为受阻；部署仍在正常推进、单次工具超时或运行被硬中断也不是受阻。真实受阻且尚未全部合并的 Bug 单列“受阻”，适用于既有受阻项和后续同类问题；保留已做动作、未完成范围、报告与恢复条件，不计完整交付、应上线或已交付 PR，不自动补验收、不催办解除、不自动回流当前或后续轮次。确认受阻后不再新建 PR 或发送可审查交付；已有 PR 仅保留为任务证据，不为归类关闭 PR 或删除证据。只有真人明确要求恢复该项才续作。
 
 1. 保存 `dailyBug.state=blocked` 和 `blocker={kind,reason,resumeCondition,phase,affectedCaseIds,nextAction}`：reason 写清卡在哪一步及现有授权或能力为何无法继续，resumeCondition 写清继续所需的具体条件。任务置 blocked；已有 PR、阶段报告与证据照常保存。
 2. 在该 Bug 的交付 thread 发送一次受阻结果；已有 thread 时按后续轮次精简模板写本轮未通过或未验证的具体结论，尚无 thread 时用下方首次受阻模板发送根消息。只用原生 user 元素 @ Winches 一次，发送前 dry-run 核对通知名单仅含 Winches，回读核对实际 user ID；不因已核实模块归属而 @ 模块负责人。回读后保存 `dailyBug.blockNotice={permalink,readbackVerified:true}`，在父批次 `blockNotices` 追加 `{issueId,permalink,readbackVerified:true,kind,at}`，并按看板字段台账追加该 Bug 的 delivery 记录。首次受阻结果未回读不得接续；已经回读的历史消息被真人删除后，不要求补发、重新点 🚫 或重新补验收，继续复用既有回执。

@@ -19,16 +19,16 @@ investigationFailurePolicy=retry_2_then_skip_v1
 
 ## 本轮全部调查完成门槛
 
-1. 初筛、归并和查重后固定本轮疑似 Bug 清单，上传并核对真实附件，保存 dailyRound 的候选数量、身份集合摘要和候选清单回执。只登记本轮反馈，不导入旧 pending-candidates、旧 needs_evidence 或历史调查队列；用户已停止的历史任务不恢复。
-2. 不为候选逐条建任务：在原扫描追加清单评论（candidateId、原反馈日、摘要、sourceUrl），回读后核对身份集合摘要；再在原扫描下建两张调查工位卡（工位 1/2、2/2），回读后写入 dailyRound 的 investigationStore 与 laneIssueIds，才设置 registrationComplete。完整登记和三源覆盖回读后，只通过固定版本 duty-dispatch.py advance 给两个工位各领取一条候选并启动；工位每条结论回读后再次 advance 领取下一条并排后继，不手工启动、不依赖人工再次调用；扫描与调查入口不修改业务实现。
-3. 每条调查主动补读原讨论、核对正确行为、定位实现，按需查询真实商家和窗口的数据或日志，在授权测试环境验证。保存步骤、实际观察、版本和证据，上传报告并下载核对哈希，把含 investigationRecord、sourceUrl 及来源证据标识的结论记录以评论追加到工位卡并回读；不同候选不得复用同一调查报告或会话证据。确认、排除、重复、已有工单与真正外部缺证均须有依据。可恢复故障先恢复或替代补证；仍失败保存 executionFailure={kind,error}、过程与 nextAction，回读后立即 advance。调度器保留首次运行及最多 2 次重试，耗尽则留档为 skipped_failure 并释放工位接下一条，不阻塞其它调查。
+1. 初筛、归并和查重后固定本轮疑似 Bug 清单，上传真实附件，保存 dailyRound 的候选数量与候选清单真实附件 `attachmentId` 回执（不需计算或写入 `candidateSetSha256`、`sha256`、`readbackHashVerified`）。只登记本轮反馈，不导入旧 pending-candidates、旧 needs_evidence 或历史调查队列；用户已停止的历史任务不恢复。
+2. 不为候选逐条建任务：在原扫描追加清单评论（candidateId、原反馈日、摘要、sourceUrl），回读后核对候选数量与唯一身份；再在原扫描下建两张调查工位卡（工位 1/2、2/2），回读后写入 dailyRound 的 investigationStore 与 laneIssueIds，才设置 registrationComplete。完整登记和三源覆盖回读后，只通过固定版本 duty-dispatch.py advance 给两个工位各领取一条候选并启动；工位每条结论回读后再次 advance 领取下一条并排后继，不手工启动、不依赖人工再次调用；扫描与调查入口不修改业务实现。
+3. 每条调查主动补读原讨论、核对正确行为、定位实现，按需查询真实商家和窗口的数据或日志，在授权测试环境验证。保存步骤、实际观察、版本和证据，上传报告并保存返回的真实 `attachmentId`（`investigationRecord={attachmentId,evidenceRevision}`），把含 `investigationRecord`、`sourceUrl` 及来源证据标识的结论记录以评论追加到工位卡并回读；不同候选不得复用同一调查报告附件 ID 或会话证据，不再下载重算或手抄 SHA-256。确认、排除、重复、已有工单与真正外部缺证均须有依据。可恢复故障先恢复或替代补证；仍失败保存 executionFailure={kind,error}、过程与 nextAction，回读后立即 advance。调度器保留首次运行及最多 2 次重试，耗尽则留档为 skipped_failure 并释放工位接下一条，不阻塞其它调查。
 4. 确认一个 Bug 时只记录 confirmed，继续调查本轮其它项。全部候选均有依据结论或有界重试后已留档跳过后，由最后退出的工位经统一调度器唯一交接回原扫描。仅原扫描汇总并回读完整调查索引、最终分类与扫描消息，保存 investigationComplete 和 ready_repair，才允许建立固定修复队列。ready、investigating 和未留档技术失败都不能算本轮处理结束；有界重试耗尽且已留档的 skipped_failure 可结束本轮调度，但不计确认、排除或验证通过，不进修复队列；不能把未调查项留在候选内容区后发送“扫描完成”。
 5. 真正外部缺证须具备 Agent 规定的四条取证路径尝试、缺失材料、恢复条件、证据版本和检查时间，完整保存后可作为本轮已调查结论，不阻塞其它调查与本轮后续修复；不得用其掩盖执行失败。历史外部挂起项也不自动带入新轮次。
 
 ## 修复与交付
 
 1. 新轮调查使用 dailyExecution 固定版本的 duty-dispatch.py（protocolVersion=2），采集、汇总与修复使用同版本 duty-queue.py（protocolVersion=2，必须带 --round-id）。旧轮继续各自固定版本，不迁移或重采。只读计划不等于真实启动。按 Agent 的 collect_sources、register_round、investigate_lanes、finalize_round、prepare_round_repair、wait_repair_slot、resume_repair、advance_after_block、complete_round 等动作执行；任何矛盾先核对，不旁路全轮调查门槛。
-2. 全轮调查完成、三源覆盖完整且无其它真实修复队列在途后，在原扫描登记唯一固定修复批次，仅纳入 confirmed 项；其它轮次的修复队列未结束时返回 wait_repair_slot，保留现场结束运行，等其结束后由 release-repair 唤起。沿用值守 Agent 当前修复能力，每个 Bug 正文保留目标分支 CI、真实部署版本、动态 Case、最终完整 HTML、PR 和交付回读要求；不参考其它 Agent 的专属规则。
+2. 全轮调查完成、三源覆盖完整且无其它真实修复队列在途后，在原扫描登记唯一固定修复批次，仅纳入 confirmed 项；其它轮次的修复队列未结束时返回 wait_repair_slot，保留现场结束运行，等其结束后由 release-repair 唤起。沿用值守 Agent 当前修复能力：有构建/部署流水线的仓库保留目标分支 CI、真实部署版本、动态 Case、最终完整 HTML、PR 和交付回读要求；经核实无 PR 构建或环境自动部署流水线的纯 SQL / 数仓视图仓库改在授权只读库完成修复前后 SQL 对真实业务样本的 Before/After 实测对比，并保留最终完整 HTML、PR 和交付回读要求，不因无 PR 部署 CI 判为受阻；不参考其它 Agent 的专属规则。
 3. 只将首项指派自身，回读真实 queued/dispatched/running 后结束当前运行释放唯一名额。每项完整交付后，或真实受阻并按 Agent 模板在交付频道发出、回读受阻结果后，自动接下一修复；修复期间原扫描若因 Multica 的 `child.attention` / `issue_wakeup` 被系统唤醒，只允许只读核对队列回执并在子任务退出前未完成交接时按固定调度器推进下一项（无活动运行时 `repair-advance` 可省略 `--current-run` 重入）后立即退出，严禁替子任务补测试数据、执行动态验收、改写受阻结论或代发子任务 Slack 回复；尚未全部合并的受阻项单列“受阻”，不计应上线或已交付 PR；保留现场与证据，确认受阻后不再新建 PR，不自动补验收、催办解除或回流队列，已有 PR 仅作为历史证据保留，仅真人明确要求恢复时续作。已回读的历史 Slack 消息被删除后不补发、不要求重新点 🚫。最后一项的消息写明本批次结果，不另发批次汇总；结束本轮后执行一次 release-repair 唤起等待修复的轮次；不返回历史调查队列，不等待逐项人工确认。PR 合并和生产发布仍需明确授权。
 4. 三源缺失、调查未完成、报告缺口或执行失败必须保留现场和具体恢复动作，不能伪造完成或无 Bug。零项合格也须有完整调查与分类证据。保存来源覆盖、scan-evidence-index.json、完整调查索引、真实交接和交付回执。
 5. 全轮调查完成后，按 Agent 模板向指定频道 <交付频道 ID> 发送一次扫描结果并回读；明确调查完成数、确认可修数及下一步。外部缺证的过程、数量、材料缺口和恢复条件保留在任务、完整报告与分类台账，不在值守 Agent 的 Slack 汇总中单列，也不另发通知。执行失败跳过数量在阶段结论中明确标出，过程与恢复条件留在任务和完整索引；含跳过项不能声称全部验证通过。尚在调查时只报告实际阶段，不发完成通知；重跑复用回执，避免重复发送。
