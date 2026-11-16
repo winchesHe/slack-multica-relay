@@ -156,13 +156,30 @@ class LaneRoundTests(unittest.TestCase):
         lanes = lane_freeze(self.scan, ['a', 'b', 'c'])
         conclude(lanes[0], 'a', 'excluded')
         conclude(lanes[1], 'b', 'confirmed', at='2026-10-22T02:00:00Z')
-        # 人写的同格式评论不算结论；同一候选取最新的 Agent 记录。
+        # 人写的同格式评论（未带 manualOverride=true）不算结论；同一候选取最新的 Agent 记录。
         conclude(lanes[1], 'c', 'excluded', author='human')
         conclude(lanes[0], 'b', 'investigating', at='2026-10-22T03:00:00Z')
         rows, pending = queue.round_candidates(self.scan, [self.scan, *lanes], 'agent')
         self.assertEqual([row['id'] for row in rows], ['scan:intercom:a', 'scan:intercom:b', 'scan:intercom:c'])
         self.assertEqual([row['id'] for row in pending], ['scan:intercom:b', 'scan:intercom:c'])
         self.assertEqual(rows[0]['laneIssueId'], 'lane-1')
+
+    def test_explicit_manual_override_member_record_supersedes_incomplete_agent_record(self):
+        lanes = lane_freeze(self.scan, ['a', 'b'])
+        conclude(lanes[0], 'a', 'suspended_external', at='2026-10-22T02:00:00Z')
+        conclude(lanes[1], 'b', 'excluded', at='2026-10-22T02:05:00Z')
+        # 未带 manualOverride=true 的普通人类评论仍被忽略。
+        plain_human = {**candidate('a', 'excluded')['metadata']['dailyInvestigation'], 'laneIssueId': lanes[0]['id']}
+        lanes[0]['_comments'].append(comment(queue.RECORD_MARKER, plain_human, author='human', at='2026-10-22T03:00:00Z'))
+        _, pending_before = queue.round_candidates(self.scan, [self.scan, *lanes], 'agent')
+        self.assertEqual([row['id'] for row in pending_before], ['scan:intercom:a'])
+
+        # 显式携带 manualOverride=true 的人工覆写记录可结算该候选。
+        override_body = {**plain_human, 'manualOverride': True}
+        lanes[0]['_comments'].append(comment(queue.RECORD_MARKER, override_body, author='human', at='2026-10-22T04:00:00Z'))
+        rows, pending_after = queue.round_candidates(self.scan, [self.scan, *lanes], 'agent')
+        self.assertEqual(pending_after, [])
+        self.assertEqual(rows[0]['metadata']['dailyInvestigation']['state'], 'excluded')
 
     def test_manifest_lane_roster_and_foreign_records_fail_closed(self):
         lanes = lane_freeze(self.scan, ['a'])

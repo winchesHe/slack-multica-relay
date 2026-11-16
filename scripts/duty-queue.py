@@ -217,21 +217,30 @@ def record_id(round_id, candidate_id):
 
 
 def comment_records(issue, marker, agent_id):
-    """读取值守 Agent 写入的结构化评论（首行标记 + 一个 json 代码块），按创建时间排序。"""
+    """读取值守 Agent 写入的结构化评论（首行标记 + 一个 json 代码块），或显式 manualOverride=true 的人工覆写记录，按创建时间排序。"""
     records = []
     for comment in issue.get('_comments') or []:
         content = comment.get('content') or ''
         if not content.startswith('<!-- ' + marker + ' '):
             continue
-        if comment.get('author_type') != 'agent' or comment.get('author_id') != agent_id:
+        is_agent = comment.get('author_type') == 'agent' and comment.get('author_id') == agent_id
+        # 仅在调查记录标记下允许人工成员通过显式 manualOverride=true 覆写结论，普通人类同格式评论仍忽略。
+        is_member_override = marker == RECORD_MARKER and comment.get('author_type') == 'member'
+        if not (is_agent or is_member_override):
             continue
         match = re.search(r'```json\n(.*?)\n```', content, re.S)
         try:
             value = json.loads(match.group(1)) if match else None
         except json.JSONDecodeError as error:
-            raise QueueError(f"{issue['id']} 的 {marker} 记录无法解析") from error
+            if is_agent:
+                raise QueueError(f"{issue['id']} 的 {marker} 记录无法解析") from error
+            continue
         if not isinstance(value, dict):
-            raise QueueError(f"{issue['id']} 的 {marker} 记录不是对象")
+            if is_agent:
+                raise QueueError(f"{issue['id']} 的 {marker} 记录不是对象")
+            continue
+        if is_member_override and value.get('manualOverride') is not True:
+            continue
         records.append((comment.get('created_at') or '', value))
     return sorted(records, key=lambda pair: pair[0])
 
