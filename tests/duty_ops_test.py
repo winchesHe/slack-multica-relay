@@ -100,7 +100,7 @@ class FakeNative:
         with self.lock:
             self.next_run += 1
             issue_id = f"created-{self.next_run}"
-            parent = args[args.index("--parent-id") + 1]
+            parent = args[args.index("--parent") + 1]
             row = {"id": issue_id, "project_id": "project", "parent_issue_id": parent,
                    "status": "backlog", "assignee_id": None, "metadata": {}, "_comments": []}
             self.issues[issue_id] = row
@@ -114,6 +114,7 @@ class FakeSlack:
         self.messages = []
         self.history_calls = 0
         self.uploads = []
+        self.edit_calls = []
         self.ambiguous_send = False
 
     def send(self, channel, text_file, blocks_file=None, thread_ts=None, dry_run=False):
@@ -124,13 +125,16 @@ class FakeSlack:
         return {} if self.ambiguous_send else {"permalink": link}
 
     def upload(self, channel, file_path, digest, message, thread_ts=None):
-        self.uploads.append((channel, digest, message))
+        self.uploads.append((channel, digest, message, thread_ts))
+        if self.messages:
+            self.messages[-1].setdefault("files", []).append({"id": "file-1", "sha256": digest})
         return {"file": {"id": "file-1"}}
 
     def get(self, url):
         return {"ok": True, "permalink": url}
 
-    def edit(self, url, text_file, blocks_file=None):
+    def edit(self, url, text_file, blocks_file=None, dry_run=False):
+        self.edit_calls.append((url, text_file, blocks_file, dry_run))
         for message in self.messages:
             if message["permalink"] == url:
                 message["text"] = Path(text_file).read_text(encoding="utf-8")
@@ -139,7 +143,7 @@ class FakeSlack:
     def replies(self, url):
         return {"messages": self.messages}
 
-    def history(self, channel, limit=200):
+    def history(self, channel, limit=200, thread_ts=None):
         self.history_calls += 1
         return {"messages": self.messages}
 
@@ -333,6 +337,7 @@ class OpsTests(unittest.TestCase):
             "sources": {"canny": {"status": "success"}, "facebook": {"status": "success"},
                         "intercom": {"status": "success"}},
             "collected": {"canny": 1, "facebook": 0, "intercom": 1}})
+        self.native.issues["scan"]["created_at"] = "2026-10-22T18:00:00Z"
         claim = self.ops.claim("scan", "lane-1")
         report = Path(self.temp.name) / "investigation.html"
         report.write_text("investigation", encoding="utf-8")
@@ -353,6 +358,13 @@ class OpsTests(unittest.TestCase):
         self.assertTrue(finish["evidenceIndex"]["readbackVerified"])
         self.assertTrue(any(ops_module.comment_json(comment, ops_module.FINISH_MARKER)
                             for comment in self.native.comments("scan")))
+        ledger_rows = [ops_module.comment_json(comment, ops_module.BOARD_MARKER)
+                       for comment in self.native.comments("GRM-664")]
+        ledger_row = next(row for row in ledger_rows if row)
+        self.assertEqual(ledger_row["scanDate"], "2026-10-23")
+        self.assertEqual(self.ops._ledger("GRM-664", ledger_row),
+                         next(comment["id"] for comment in self.native.comments("GRM-664")
+                              if ops_module.comment_json(comment, ops_module.BOARD_MARKER) == ledger_row))
         progress_spec = importlib.util.spec_from_file_location("duty_progress", Path(__file__).parents[1] / "scripts" / "duty-progress.py")
         progress = importlib.util.module_from_spec(progress_spec)
         progress_spec.loader.exec_module(progress)
@@ -414,6 +426,7 @@ class OpsTests(unittest.TestCase):
                                      channel="C0C14HSSP2T", text_file=text)
         self.assertEqual(blocked["blocker"], blocker)
         self.assertEqual(self.native.issue("bug-2")["status"], "blocked")
+
     def test_ambiguous_slack_send_recovers_history_without_double_post(self):
         bug = issue("bug-slack", parent_issue_id="scan", status="in_progress", metadata={"dailyBug": {
             "schemaVersion": 1, "protocolVersion": 3, "mode": "bug", "batchId": "scan",
@@ -439,7 +452,162 @@ class OpsTests(unittest.TestCase):
                              prs=["https://github.com/o/r/pull/3"], pr_heads=["c" * 40])
         self.assertEqual(len(self.slack.messages), sent)
         self.assertGreaterEqual(self.slack.history_calls, 2)
+    def test_attachment_id_prefers_nested_attachment_over_comment_id(self):
+        self.assertEqual(ops_module.attachment_id({"id": "comment-uuid", "attachments": [{"id": "att-uuid"}]}), "att-uuid")
+        self.assertIsNone(ops_module.attachment_id({"id": "comment-uuid", "content": "comment"}))
 
+    def test_cli_contract_and_path_traversal_validation(self):
+        calls = []
+        def runner(command, **kwargs):
+            calls.append(command)
+            class Result:
+                stdout = json.dumps({"comments": []} if "comment" in command else {"id": "new"})
+            return Result()
+        native = ops_module.Native("https://multica.example", "workspace", runner=runner)
+        native.comments("issue")
+        native.create(["--project", "project", "--title", "lane", "--parent", "scan"])
+        comment_call = next(call for call in calls if "comment" in call)
+        self.assertIn("--full", comment_call)
+        self.assertIn("--compact", comment_call)
+        create_call = next(call for call in calls if "create" in call)
+        self.assertIn("--parent", create_call)
+        self.assertNotIn("--parent-id", create_call)
+        self.assertEqual(ops_module.main(["inspect-round", "--workspace-id", "workspace",
+                                          "--round-id", "../escape", "--state-dir", self.temp.name]), 1)
+
+    def test_orphan_lane_is_reused_and_metadata_completed(self):
+        self.native.issues.pop("lane-2")
+        self.native.comments_by_issue.pop("lane-2")
+        self.native.runs_by_issue.pop("lane-2")
+        orphan = issue("orphan", parent_issue_id="scan", title="反馈调查｜10-21 反馈｜工位 2/2",
+                       description="mode=investigate_lane\nroundId=scan\n")
+        self.native.issues["orphan"] = orphan
+        self.native.comments_by_issue["orphan"] = orphan["_comments"]
+        self.native.runs_by_issue["orphan"] = []
+        lanes = self.ops._ensure_lanes(self.native.issue("scan"), "project", "agent", "2026-10-21")
+        self.assertEqual(len(lanes), 2)
+        self.assertEqual(self.native.issue("orphan")["metadata"]["dailyLane"]["lane"], 2)
+
+    def test_block_then_deliver_recovery_and_v3_progress_readback(self):
+        bug = issue("bug-recover", parent_issue_id="scan", metadata={"dailyBug": {
+            "schemaVersion": 1, "protocolVersion": 3, "mode": "bug", "batchId": "scan",
+            "sourceScanId": "scan", "candidateId": "intercom:1", "investigationRef": "scan:intercom:1",
+            "feedbackDate": "2026-10-21", "source": "intercom", "sourceUrl": "https://app.intercom.com/conversation/1"}})
+        self.native.issues[bug["id"]] = bug
+        self.native.comments_by_issue[bug["id"]] = bug["_comments"]
+        self.native.runs_by_issue[bug["id"]] = []
+        text = Path(self.temp.name) / "recovery.txt"
+        text.write_text("blocked")
+        blocker = {"kind": "permission", "reason": "缺少权限", "resumeCondition": "权限恢复"}
+        self.ops.block_bug(bug_id=bug["id"], blocker=blocker, ledger_issue="GRM-664",
+                           channel="C0C14HSSP2T", text_file=text)
+        blocked_url = self.slack.messages[0]["permalink"]
+        report = Path(self.temp.name) / "recovery.html"
+        report.write_text("<html>done</html>")
+        text.write_text("delivered")
+        delivered = self.ops.deliver_bug(bug_id=bug["id"], report_file=report, ledger_issue="GRM-664",
+                                          channel="C0C14HSSP2T", text_file=text,
+                                          prs=["https://github.com/o/r/pull/10"], pr_heads=["a" * 40])
+        self.assertEqual(delivered["deliveryVersion"], 1)
+        self.assertNotEqual(delivered["slack"]["permalink"], blocked_url)
+        self.assertTrue(any(call[0] == blocked_url for call in getattr(self.slack, "edit_calls", [])))
+        progress_spec = importlib.util.spec_from_file_location("duty_progress_recovery", Path(__file__).parents[1] / "scripts" / "duty-progress.py")
+        progress = importlib.util.module_from_spec(progress_spec); progress_spec.loader.exec_module(progress)
+        self.assertEqual(progress.v3_latest_receipt(self.native.issue(bug["id"]), self.native.issue("scan"))[1], "delivered")
+        board_spec = importlib.util.spec_from_file_location("duty_board_recovery", Path(__file__).parents[1] / "scripts" / "duty-board.py")
+        board = importlib.util.module_from_spec(board_spec); board_spec.loader.exec_module(board)
+        self.assertEqual(board.progress_module.v3_latest_receipt(self.native.issue(bug["id"]), self.native.issue("scan"))[1], "delivered")
+
+    def test_delivery_rework_increments_version_and_uploads_to_thread(self):
+        bug = issue("bug-rework", parent_issue_id="scan", metadata={"dailyBug": {
+            "schemaVersion": 1, "protocolVersion": 3, "mode": "bug", "batchId": "scan",
+            "sourceScanId": "scan", "candidateId": "intercom:1", "investigationRef": "scan:intercom:1",
+            "feedbackDate": "2026-10-21", "source": "intercom", "sourceUrl": "https://app.intercom.com/conversation/1"}})
+        self.native.issues[bug["id"]] = bug; self.native.comments_by_issue[bug["id"]] = bug["_comments"]; self.native.runs_by_issue[bug["id"]] = []
+        report = Path(self.temp.name) / "rework.html"; report.write_text("one")
+        text = Path(self.temp.name) / "rework.txt"; text.write_text("one")
+        self.ops.deliver_bug(bug_id=bug["id"], report_file=report, ledger_issue="GRM-664", channel="C0",
+                             text_file=text, thread_ts="1234567890.123456", prs=["https://github.com/o/r/pull/1"], pr_heads=["a" * 40])
+        report.write_text("two"); text.write_text("two")
+        second = self.ops.deliver_bug(bug_id=bug["id"], report_file=report, ledger_issue="GRM-664", channel="C0",
+                                      text_file=text, thread_ts="1234567890.123456", prs=["https://github.com/o/r/pull/2"], pr_heads=["b" * 40])
+        self.assertEqual(second["deliveryVersion"], 2)
+        self.assertEqual(self.slack.uploads[-1][3], "1234567890.123456")
+        self.assertTrue(any("version=2" in comment["content"] for comment in self.native.comments(bug["id"])))
+
+    def test_launch_reconciliation_and_parent_intent_guards(self):
+        result = self.ops._launch_if_idle_unlocked("scan", "agent", round_id="scan")
+        self.assertIn(result["status"], {"started", "reconciled"})
+        self.native.runs_by_issue["scan"][0]["status"] = "completed"
+        second = self.ops._launch_if_idle_unlocked("scan", "agent", round_id=None)
+        self.assertEqual(second["status"], "started")
+        self.assertTrue((Path(self.temp.name) / "dispatch-scan.json").exists())
+        self.native.runs_by_issue["scan"] = [{"id": "running", "issue_id": "scan", "agent_id": "agent", "status": "running"}]
+        active = self.ops._launch_if_idle_unlocked("scan", "agent", round_id="scan")
+        self.assertEqual(active["status"], "active")
+        before = len(self.native.runs_by_issue["scan"])
+        self.native.issues["scan"]["status"] = "cancelled"
+        self.ops._rerun_parent_if_needed_unlocked("scan", "agent")
+        self.assertEqual(len(self.native.runs_by_issue["scan"]), before)
+
+    def test_legacy_policy_and_top_level_metadata_are_read_only(self):
+        scan = self.native.issues["scan"]
+        scan["metadata"]["dailyRound"] = {"state": "old"}
+        scan["metadata"]["dailyExecution"] = {"protocolVersion": 3, "policy": "old"}
+        before = copy.deepcopy(scan)
+        self.assertEqual(self.ops.inspect_round("scan")["status"], "legacy_round_delegate")
+        self.assertEqual(self.ops.recover("scan", apply=True)["status"], "legacy_round_delegate")
+        self.assertEqual(self.native.issue("scan"), before)
+
+    def test_manual_override_and_intercom_source_token_deduplication(self):
+        record = {"schemaVersion": 1, "protocolVersion": 3, "mode": "investigate", "roundId": "scan",
+                  "sourceScanId": "scan", "candidateId": "intercom:1", "feedbackDate": "2026-10-21",
+                  "sourceUrl": "https://app.intercom.com/conversation/1", "laneIssueId": "lane-1", "fencingToken": 1,
+                  "conclusion": "duplicate", "evidenceRevision": "intercom:1", "manualOverride": True,
+                  "report": {"attachmentId": "att-manual", "sha256": "x", "readbackVerified": True},
+                  "conclusionRef": "JIRA-1"}
+        self.native.comments_by_issue["lane-1"].append({"author_type": "member", "author_id": "member",
+            "created_at": "2026-10-23T00:00:00Z", "content": ops_module.comment_text(ops_module.INVESTIGATION_MARKER, record, " round=scan candidate=intercom:1")})
+        _, records = self.ops._records("scan", self.ops.manifest("scan"), [self.native.issue("lane-1")], "agent")
+        self.assertEqual(records["intercom:1"]["conclusion"], "duplicate")
+        self.assertIn("intercom:1", ops_module.source_tokens(record["sourceUrl"]))
+        self.assertIn("intercom:1", ops_module.source_tokens(record["evidenceRevision"]))
+
+    def test_update_scan_status_cli_and_explicit_identity_flags(self):
+        parser_args = ops_module.build_parser().parse_args([
+            "init-scan-manifest", "--workspace-id", "workspace", "--agent-id", "agent",
+            "--project-id", "project", "--runtime-id", "12345678-1234-4234-8234-123456789abc",
+            "--round-id", "scan", "--manifest-file", "manifest.json", "--scheduler-revision", "a" * 40])
+        self.assertEqual((parser_args.agent_id, parser_args.project_id), ("agent", "project"))
+        scan = {"id": "scan", "metadata": {"dailyScan": {"targetDate": "2026-10-21"}}}
+        calls = []
+        def runner(command, **kwargs):
+            calls.append(command)
+            if "issue" in command and "get" in command:
+                stdout = json.dumps(scan)
+            elif "metadata" in command and "set" in command:
+                key = command[command.index("--key") + 1]
+                value = json.loads(command[command.index("--value") + 1])
+                scan["metadata"][key] = value
+                stdout = "{}"
+            else:
+                stdout = "{}"
+            class Result:
+                pass
+            result = Result(); result.stdout = stdout
+            return result
+        original = ops_module.subprocess.run
+        original_native = ops_module.Native
+        ops_module.subprocess.run = runner
+        ops_module.Native = lambda server, workspace: original_native(server, workspace, runner=runner)
+        self.addCleanup(lambda: setattr(ops_module.subprocess, "run", original))
+        self.addCleanup(lambda: setattr(ops_module, "Native", original_native))
+        self.assertEqual(ops_module.main([
+            "update-scan-status", "--workspace-id", "workspace", "--state-dir", self.temp.name,
+            "--round-id", "scan", "--agent-id", "agent", "--source", "intercom",
+            "--source-url", "https://intercom.example/1", "--collected", '{"intercom": 1}']), 0)
+        self.assertTrue(any("--workspace-id" in call and "workspace" in call for call in calls))
+        self.assertEqual(scan["metadata"]["dailyScan"]["collected"], {"intercom": 1})
 
 if __name__ == "__main__":
     unittest.main()
