@@ -1,4 +1,5 @@
 """只读推导每日值守阶段快照；复用调度器的证据与交付门槛，不推进业务状态。"""
+import datetime as dt
 import importlib.util
 import json
 import re
@@ -21,6 +22,20 @@ def count(value):
     return type(value) is int and value >= 0
 
 
+UTC_MIN = dt.datetime.min.replace(tzinfo=dt.timezone.utc)
+
+
+def _comment_timestamp(value):
+    try:
+        return queue.timestamp(value)
+    except queue.QueueError:
+        return UTC_MIN
+
+
+def _issue_label(row):
+    return row.get('identifier') or row['id']
+
+
 def is_v3_scan(issue):
     """判断一个扫描父任务是否使用 v3 双读协议。"""
     execution = queue.meta(issue, 'dailyExecution')
@@ -31,6 +46,8 @@ def is_v3_scan(issue):
 
 
 def _comment_value(comment, marker):
+    if not isinstance(comment, dict):
+        return None
     content = comment.get('content') or ''
     if not content.startswith('<!-- ' + marker + ' '):
         return None
@@ -44,37 +61,55 @@ def _comment_value(comment, marker):
     return value if isinstance(value, dict) else None
 
 
-def _agent_comments(issue, marker, agent_id):
+def _agent_comments_with_index(issue, marker, agent_id):
     values = []
-    for comment in sorted(issue.get('_comments') or [], key=lambda item: item.get('created_at') or ''):
+    for index, comment in enumerate(issue.get('_comments') or []):
         item = _comment_value(comment, marker)
         if item is None:
             continue
-        is_agent = comment.get('author_type') == 'agent' and comment.get('author_id') == agent_id
+        is_agent = (comment.get('author_type') == 'agent' and queue.text(agent_id)
+                    and comment.get('author_id') == agent_id)
         is_override = (marker == V3_INVESTIGATION_MARKER and comment.get('author_type') == 'member'
                        and item.get('manualOverride') is True)
         if is_agent or is_override:
-            values.append((comment.get('created_at') or '', item, is_override))
-    return values
+            values.append((comment.get('created_at'), item, is_override, index))
+    return sorted(values, key=lambda value: (_comment_timestamp(value[0]), value[3]))
+
+
+def _agent_comments(issue, marker, agent_id):
+    return [(created, item, is_override)
+            for created, item, is_override, _ in _agent_comments_with_index(issue, marker, agent_id)]
 
 
 def v3_manifest(scan, agent_id):
-    """返回一致的 v3 清单回执；无有效清单时返回 None。"""
+    """返回一致的 v3 清单回执；无清单时返回 None。"""
+    raw_agent_comments = [comment for comment in (scan.get('_comments') or [])
+                          if isinstance(comment, dict)
+                          and (comment.get('content') or '').startswith('<!-- ' + V3_MANIFEST_MARKER + ' ')
+                          and comment.get('author_type') == 'agent'
+                          and queue.text(agent_id) and comment.get('author_id') == agent_id]
+    # Agent 已发布清单后，任何坏回执都必须停在待核对，不能退回“尚未登记”掩盖冲突。
+    if any(_comment_value(comment, V3_MANIFEST_MARKER) is None for comment in raw_agent_comments):
+        raise queue.QueueError('v3 扫描清单回执无效或未通过回读校验')
     valid = []
     for created, item, _ in _agent_comments(scan, V3_MANIFEST_MARKER, agent_id):
         entries = item.get('candidates')
-        ids = [entry.get('candidateId') if isinstance(entry, dict) else None
-               for entry in entries] if isinstance(entries, list) else []
-        if (item.get('protocolVersion') != 3 or item.get('roundId') != scan['id']
-                or item.get('feedbackDate') != queue.meta(scan, 'dailyScan').get('targetDate')
-                or type(item.get('candidateCount')) is not int or item['candidateCount'] != len(entries or [])
-                or any(not queue.text(candidate_id) for candidate_id in ids) or len(set(ids)) != len(ids)
-                or queue.candidate_set_hash(ids) != item.get('candidateSetSha256')
-                or not queue.valid_attachment_id(item.get('attachmentId')) or not queue.text(item.get('sha256'))
-                or item.get('readbackHashVerified') is not True
-                or any(not isinstance(entry, dict) or entry.get('feedbackDate') != item['feedbackDate']
-                       for entry in (entries or []))):
-            continue
+        ids = ([entry.get('candidateId') for entry in entries]
+               if isinstance(entries, list) and all(isinstance(entry, dict) for entry in entries) else [])
+        invalid = (not isinstance(entries, list)
+                   or item.get('protocolVersion') != 3 or item.get('roundId') != scan['id']
+                   or item.get('feedbackDate') != queue.meta(scan, 'dailyScan').get('targetDate')
+                   or type(item.get('candidateCount')) is not int
+                   or item['candidateCount'] != len(entries)
+                   or any(not queue.text(candidate_id) for candidate_id in ids) or len(set(ids)) != len(ids)
+                   or queue.candidate_set_hash(ids) != item.get('candidateSetSha256')
+                   or not queue.valid_attachment_id(item.get('attachmentId')) or not queue.text(item.get('sha256'))
+                   or item.get('readbackHashVerified') is not True
+                   or any(entry.get('feedbackDate') != item['feedbackDate'] for entry in entries
+                          if isinstance(entry, dict))
+                   or any(not isinstance(entry, dict) for entry in entries))
+        if invalid:
+            raise queue.QueueError('v3 扫描清单回执无效或未通过回读校验')
         valid.append((created, item))
     if not valid:
         return None
@@ -91,12 +126,15 @@ def v3_manifest(scan, agent_id):
 def v3_finish(scan, agent_id):
     values = []
     for created, item, _ in _agent_comments(scan, V3_FINISH_MARKER, agent_id):
-        if item.get('protocolVersion') == 3 and item.get('roundId') == scan['id']:
+        if (isinstance(item, dict) and item.get('protocolVersion') == 3
+                and item.get('roundId') == scan['id']):
             values.append((created, item))
     return values[-1][1] if values else None
 
 
 def v3_lanes(scan, issues, agent_id):
+    if not queue.text(agent_id):
+        raise queue.QueueError('v3 调查工位缺少值守 Agent')
     rows = [row for row in issues if queue.meta(row, 'dailyLane').get('roundId') == scan['id']]
     if len(rows) != 2:
         raise queue.QueueError('v3 调查工位数量不是 2')
@@ -110,7 +148,7 @@ def v3_lanes(scan, issues, agent_id):
                                                            ('state', 'currentCandidateId', 'failureHandoffCandidateId'))
                 or row.get('parent_issue_id') != scan['id']
                 or row.get('assignee_id') not in (None, agent_id)
-                or row.get('status') in V3_STOPPED):
+                or row.get('status') in {'cancelled', 'canceled'}):
             raise queue.QueueError('v3 调查工位协议或父子关系无效')
         numbers.append(lane['lane'])
     if numbers != [1, 2]:
@@ -128,7 +166,7 @@ def _v3_record_valid(item, entry, agent_record):
             or conclusion not in V3_CONCLUSIONS
             or not queue.valid_source_anchor(item, entry)):
         return False
-    if agent_record and (not isinstance(item.get('fencingToken'), int) or item['fencingToken'] < 1):
+    if agent_record and (type(item.get('fencingToken')) is not int or item['fencingToken'] < 1):
         return False
     if conclusion == 'skipped_failure':
         failure = item.get('failureSkip')
@@ -137,14 +175,17 @@ def _v3_record_valid(item, entry, agent_record):
         candidate = dict(item)
         candidate['nextAction'] = item.get('nextAction') or failure.get('resumeCondition')
         return queue.valid_failure_skip(candidate)
-    report = item.get('report') or {}
+    report = item.get('report')
+    if not isinstance(report, dict):
+        return False
     if (not queue.valid_attachment_id(report.get('attachmentId')) or not queue.text(report.get('sha256'))
             or report.get('readbackVerified') is not True or not queue.text(item.get('evidenceRevision'))):
         return False
     if conclusion == 'confirmed' and not queue.valid_confirmation(item):
         return False
-    if conclusion == 'suspended_external' and not queue.valid_external_block(item):
-        return False
+    if conclusion == 'suspended_external':
+        if not isinstance(item.get('blocker'), dict) or not queue.valid_external_block(item):
+            return False
     if conclusion in {'duplicate', 'excluded', 'cs_followed'} and not queue.text(item.get('conclusionRef')):
         return False
     return True
@@ -165,14 +206,16 @@ def _v3_latest_records(scan, lanes, manifest, agent_id):
     selected = {}
     for candidate_id, candidates in by_candidate.items():
         if candidates['manual']:
-            manual = max(candidates['manual'], key=lambda pair: pair[0])
-            latest_agent = max(candidates['agent'], key=lambda pair: pair[0], default=None)
-            if latest_agent is None or manual[0] >= latest_agent[0]:
+            manual = max(candidates['manual'], key=lambda pair: _comment_timestamp(pair[0]))
+            latest_agent = max(candidates['agent'], key=lambda pair: _comment_timestamp(pair[0]), default=None)
+            # 人工覆写只按时间覆盖 Agent 记录；Agent 之间仍按 fencingToken 保护并发写入顺序。
+            if latest_agent is None or _comment_timestamp(manual[0]) >= _comment_timestamp(latest_agent[0]):
                 selected[candidate_id] = manual[1]
                 continue
         if candidates['agent']:
             selected[candidate_id] = max(candidates['agent'],
-                                          key=lambda pair: (pair[1].get('fencingToken'), pair[0]))[1]
+                                          key=lambda pair: (pair[1].get('fencingToken'),
+                                                            _comment_timestamp(pair[0])))[1]
     seen_attachments, seen_intercom = set(), set()
     for candidate_id, item in selected.items():
         conclusion = item.get('conclusion') or item.get('state')
@@ -195,8 +238,6 @@ def investigation_v3(scan, issues):
     agent_id = scan.get('assignee_id')
     manifest = v3_manifest(scan, agent_id)
     if manifest is None:
-        if queue.meta(scan, 'dailyScan').get('coverageComplete') is True:
-            return {'state': 'registering', 'completed': None, 'total': None, 'confirmed': None}, []
         return {'state': 'registering', 'completed': None, 'total': None, 'confirmed': None}, []
     lanes = v3_lanes(scan, issues, agent_id)
     entries, selected = _v3_latest_records(scan, lanes, manifest, agent_id)
@@ -227,33 +268,46 @@ def investigation_v3(scan, issues):
 
 def _v3_receipts(issue, scan, agent_id):
     valid = []
-    for created, item, _ in _agent_comments(issue, 'daily-delivery:v3', agent_id):
-        report, slack, ledger = item.get('report') or {}, item.get('slack') or {}, item.get('ledger') or {}
-        bug = queue.meta(issue, 'dailyBug')
-        prs = item.get('prs') or ([item.get('pr')] if item.get('pr') else [])
-        if (item.get('protocolVersion') != 3 or item.get('issueId') != issue['id']
-                or item.get('roundId') != scan['id'] or item.get('candidateId') != bug.get('candidateId')
-                or type(item.get('deliveryVersion')) is not int or item['deliveryVersion'] < 1
-                or not isinstance(prs, list) or not prs or not all(isinstance(pr, str) and PR_URL.fullmatch(pr) for pr in prs)
-                or not isinstance(item.get('prHeads'), list) or not item['prHeads']
-                or not all(isinstance(head, str) and re.fullmatch(r'[0-9a-fA-F]{7,40}', head) for head in item['prHeads'])
-                or not queue.valid_attachment_id(report.get('attachmentId')) or not queue.text(report.get('sha256'))
-                or report.get('readbackVerified') is not True or not queue.text(slack.get('permalink'))
-                or slack.get('readbackVerified') is not True or not queue.text(ledger.get('issue'))
-                or not queue.text(ledger.get('commentId')) or ledger.get('readbackVerified') is not True):
-            continue
-        valid.append((created, 'delivered', item))
-    for created, item, _ in _agent_comments(issue, 'daily-blocked:v3', agent_id):
-        blocker, slack, ledger = item.get('blocker') or {}, item.get('slack') or {}, item.get('ledger') or {}
-        if (item.get('protocolVersion') != 3 or item.get('issueId') != issue['id']
-                or item.get('roundId') != scan['id'] or item.get('candidateId') != queue.meta(issue, 'dailyBug').get('candidateId')
-                or not all(queue.text(blocker.get(key)) for key in ('kind', 'reason', 'resumeCondition'))
-                or not queue.text(slack.get('permalink')) or slack.get('readbackVerified') is not True
-                or not queue.text(ledger.get('issue')) or not queue.text(ledger.get('commentId'))
-                or ledger.get('readbackVerified') is not True):
-            continue
-        valid.append((created, 'blocked', item))
-    return max(valid, key=lambda value: value[0]) if valid else None
+    for marker, state in (('daily-delivery:v3', 'delivered'), ('daily-blocked:v3', 'blocked')):
+        for created, item, _, index in _agent_comments_with_index(issue, marker, agent_id):
+            if not isinstance(item, dict):
+                continue
+            report, slack, ledger = item.get('report'), item.get('slack'), item.get('ledger')
+            bug = queue.meta(issue, 'dailyBug')
+            prs = item.get('prs') or ([item.get('pr')] if item.get('pr') else [])
+            if state == 'delivered':
+                valid_item = (isinstance(report, dict) and isinstance(slack, dict) and isinstance(ledger, dict)
+                              and item.get('protocolVersion') == 3 and item.get('issueId') == issue['id']
+                              and item.get('roundId') == scan['id']
+                              and item.get('candidateId') == bug.get('candidateId')
+                              and type(item.get('deliveryVersion')) is int and item['deliveryVersion'] >= 1
+                              and isinstance(prs, list) and bool(prs)
+                              and all(isinstance(pr, str) and PR_URL.fullmatch(pr) for pr in prs)
+                              and isinstance(item.get('prHeads'), list) and bool(item['prHeads'])
+                              and all(isinstance(head, str) and re.fullmatch(r'[0-9a-fA-F]{7,40}', head)
+                                      for head in item['prHeads'])
+                              and queue.valid_attachment_id(report.get('attachmentId'))
+                              and queue.text(report.get('sha256')) and report.get('readbackVerified') is True
+                              and queue.text(slack.get('permalink')) and slack.get('readbackVerified') is True
+                              and queue.text(ledger.get('issue')) and queue.text(ledger.get('commentId'))
+                              and ledger.get('readbackVerified') is True)
+            else:
+                blocker = item.get('blocker')
+                valid_item = (isinstance(blocker, dict) and isinstance(slack, dict) and isinstance(ledger, dict)
+                              and item.get('protocolVersion') == 3 and item.get('issueId') == issue['id']
+                              and item.get('roundId') == scan['id']
+                              and item.get('candidateId') == bug.get('candidateId')
+                              and all(queue.text(blocker.get(key)) for key in ('kind', 'reason', 'resumeCondition'))
+                              and queue.text(slack.get('permalink')) and slack.get('readbackVerified') is True
+                              and queue.text(ledger.get('issue')) and queue.text(ledger.get('commentId'))
+                              and ledger.get('readbackVerified') is True)
+            if valid_item:
+                # 同一时间的 delivery/blocked 以评论列表顺序为准，避免状态字符串字典序改变业务结果。
+                valid.append((created, index, state, item))
+    if not valid:
+        return None
+    created, _, state, item = max(valid, key=lambda value: (_comment_timestamp(value[0]), value[1]))
+    return created, state, item
 
 
 def v3_latest_receipt(issue, scan):
@@ -310,8 +364,10 @@ def investigation(scan, issues):
 
 
 def _active_run(issue_id, runs, agent_id):
-    return runs is not None and any(run.get('issue_id') == issue_id and run.get('agent_id') == agent_id
-                                    and run.get('status') in queue.IN_FLIGHT for run in runs)
+    return (runs is not None and queue.text(agent_id)
+            and any(isinstance(run, dict) and run.get('issue_id') == issue_id
+                    and run.get('agent_id') == agent_id and run.get('status') in queue.IN_FLIGHT
+                    for run in runs))
 
 
 def repair_v3(scan, issues, investigated, members, runs, warnings):
@@ -342,36 +398,45 @@ def repair_v3(scan, issues, investigated, members, runs, warnings):
             if any(key in item for key in ('state', 'index', 'total', 'completeDelivery', 'deliveryVersion', 'reviewState')):
                 raise queue.QueueError('v3 修复任务包含已废弃状态字段')
             if item.get('candidateId') not in confirmed_by_candidate:
-                continue
+                raise queue.QueueError('v3 修复任务包含未确认候选')
             bugs.append(row)
     by_candidate = {queue.meta(row, 'dailyBug').get('candidateId'): row for row in bugs}
-    if len(by_candidate) != len(bugs) or set(by_candidate) != set(confirmed_by_candidate):
-        raise queue.QueueError('v3 修复任务与确认候选集合不一致')
+    if len(by_candidate) != len(bugs):
+        raise queue.QueueError('v3 修复任务存在重复候选')
+    if not bugs:
+        # 调查完成到父任务创建 Bug 子卡之间存在短暂窗口，保留已确认总数供看板展示。
+        return {'state': 'not_started', 'completed': 0, 'blocked': 0,
+                'total': len(confirmed_by_candidate), 'index': None,
+                'currentIssueId': None, 'needsRecovery': []}, []
+    if len(bugs) < len(confirmed_by_candidate):
+        warnings.append(f"已确认 {len(confirmed_by_candidate)} 个 Bug，已建子卡 {len(bugs)} 个")
     completed = blocked = 0
     recovery = []
     attention = False
     for candidate_id, bug in by_candidate.items():
         receipt = _v3_receipts(bug, scan, scan.get('assignee_id'))
         if receipt:
+            # delivery 与 blocked 都是终态回执；同一时间按评论顺序决定最后写入的业务事实。
             if receipt[1] == 'delivered':
                 completed += 1
             else:
                 blocked += 1
             continue
-        if bug.get('status') == 'in_review':
+        # in_review/done/cancelled 是外部状态事实，缺回执必须告警；in_progress 才进入恢复判断。
+        if bug.get('status') in {'in_review', 'done', 'cancelled', 'canceled'}:
             attention = True
-            warnings.append(f"{bug.get('identifier', bug['id'])} 处于 in_review 但缺少有效 deliveryReceipt")
+            warnings.append(f"{_issue_label(bug)} 处于 {bug.get('status')} 但缺少有效 deliveryReceipt")
         elif (runs is not None and bug.get('status') == 'in_progress'
               and not _active_run(bug['id'], runs, scan.get('assignee_id'))):
             recovery.append(bug['id'])
-            warnings.append(f"{bug.get('identifier', bug['id'])} 处于 in_progress 且无活动运行，等待 recover；未计为 blocked")
+            warnings.append(f"{_issue_label(bug)} 处于 in_progress 且无活动运行，等待 recover；未计为 blocked")
     if attention:
         state = 'attention'
-    elif completed + blocked == len(bugs):
+    elif completed + blocked == len(confirmed_by_candidate):
         state = 'completed_with_blocked' if blocked else 'completed'
     else:
         state = 'repairing'
-    return {'state': state, 'completed': completed, 'blocked': blocked, 'total': len(bugs), 'index': None,
+    return {'state': state, 'completed': completed, 'blocked': blocked, 'total': len(confirmed_by_candidate), 'index': None,
             'currentIssueId': None, 'needsRecovery': recovery}, bugs
 
 
@@ -452,38 +517,48 @@ def snapshot(scan, issues, runs, now, issue_url_base, scan_record=None):
                 result[name], members = investigation(scan, issues)
             else:
                 result[name], bugs = repair(scan, issues, result['investigation'], members, runs, result['warnings'])
-        except (queue.QueueError, KeyError, TypeError, ValueError):
+        except (queue.QueueError, KeyError, TypeError, ValueError, AttributeError):
             # 阶段读取失败不能伪装为 0 或未扫描，也不能阻断其它已有事实的展示。
             result[name] = {'state': 'attention', 'completed': None, 'total': None, 'confirmed': None}
             label = {'collection': '采集', 'investigation': '调查', 'repair': '修复'}[name]
-            result['warnings'].append(f"{scan['identifier']} 的{label}阶段数据不完整或证据待核对")
+            result['warnings'].append(f"{_issue_label(scan)} 的{label}阶段数据不完整或证据待核对")
+
     lanes = []
     if is_v3_scan(scan):
         try:
             if v3_manifest(scan, scan.get('assignee_id')) is not None:
                 lanes = v3_lanes(scan, issues, scan.get('assignee_id'))
         except queue.QueueError:
-            result['warnings'].append(f"{scan['identifier']} 的调查工位登记待核对")
+            result['warnings'].append(f"{_issue_label(scan)} 的调查工位登记待核对")
     elif queue.lane_store(scan):
         try:
             lanes = queue.round_lanes(scan, issues, scan.get('assignee_id'))
         except queue.QueueError:
-            result['warnings'].append(f"{scan['identifier']} 的调查工位登记待核对")
+            result['warnings'].append(f"{_issue_label(scan)} 的调查工位登记待核对")
     by_id = {row['id']: row for row in [scan, *members, *bugs, *lanes]}
     member_ids, bug_ids = {row['id'] for row in members} | {row['id'] for row in lanes}, {row['id'] for row in bugs}
-    titles = {queue.meta(row, 'dailyInvestigation').get('candidateId'): row['title'].split('｜')[-1] for row in members}
+    titles = {}
+    for row in members:
+        item = queue.meta(row, 'dailyInvestigation')
+        titles[item.get('candidateId')] = str(row.get('title') or '').split('｜')[-1]
     if runs is None:
         result['warnings'].append('值守运行状态读取失败，当前处理任务未知')
     else:
-        for run in sorted(runs, key=lambda row: row.get('status') != 'running'):
+        for run in sorted((run for run in runs if isinstance(run, dict)), key=lambda row: row.get('status') != 'running'):
             row = by_id.get(run.get('issue_id'))
             if (not row or run.get('status') not in queue.IN_FLIGHT
+                    or not queue.text(scan.get('assignee_id'))
                     or run.get('agent_id') != scan.get('assignee_id')):
                 continue
             scan_phase = '采集' if result['collection']['state'] != 'completed' else '扫描汇总'
             phase = '调查' if row['id'] in member_ids else '修复' if row['id'] in bug_ids else scan_phase
-            summary = row['title'].split('｜')[-1]
-            claim = queue.meta(row, 'dailyLane').get('currentCandidateId')
+            summary = str(row.get('title') or '').split('｜')[-1]
+            try:
+                lane_metadata = queue.meta(row, 'dailyLane')
+            except queue.QueueError:
+                lane_metadata = {}
+                result['warnings'].append(f"{_issue_label(row)} 的调查工位数据待核对")
+            claim = lane_metadata.get('currentCandidateId')
             if claim in titles:
                 # 工位卡展示「工位 n/2：正在查的候选」，便于看出两路各自在查什么。
                 summary = f'{summary}：{titles[claim]}'
@@ -498,17 +573,20 @@ def snapshot(scan, issues, runs, now, issue_url_base, scan_record=None):
         known_work = (result['collection']['state'] != 'completed'
                       or result['investigation']['state'] not in {'completed', 'legacy'}
                       or result['repair']['state'] not in {'completed', 'completed_with_blocked', 'completed_with_skips', 'not_needed'})
+        child_active = bool(result['current']) or any(
+            _active_run(row['id'], runs, scan.get('assignee_id')) for row in [*lanes, *bugs])
         if (is_v3_scan(scan) and scan.get('status') == 'in_progress' and known_work
-                and not _active_run(scan['id'], runs, scan.get('assignee_id'))):
+                and not _active_run(scan['id'], runs, scan.get('assignee_id'))
+                and not child_active):
             result['needsRecovery'].append(scan['id'])
-            result['warnings'].append(f"{scan.get('identifier', scan['id'])} 处于 in_progress 且无活动运行，等待 recover")
+            result['warnings'].append(f"{_issue_label(scan)} 处于 in_progress 且无活动运行，等待 recover")
         if is_v3_scan(scan) and result['investigation']['state'] == 'investigating':
             for lane in lanes:
                 if (lane.get('status') == 'in_progress'
                         and not _active_run(lane['id'], runs, scan.get('assignee_id'))
                         and lane['id'] not in result['needsRecovery']):
                     result['needsRecovery'].append(lane['id'])
-                    result['warnings'].append(f"{lane.get('identifier', lane['id'])} 处于 in_progress 且无活动运行，等待 recover")
+                    result['warnings'].append(f"{_issue_label(lane)} 处于 in_progress 且无活动运行，等待 recover")
     inv, fix = result['investigation'], result['repair']
     if result['collection']['state'] != 'completed':
         next_action = '继续完成本轮采集与覆盖核对，成功来源不重采'

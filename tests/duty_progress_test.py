@@ -198,6 +198,134 @@ class ProgressTests(unittest.TestCase):
         self.assertIn('串行修复中', text)
         self.assertNotIn('None/1', text)
 
+    def test_v3_done_lanes_are_closed_after_investigation_without_breaking_completion(self):
+        scan, lanes, bugs, entries = v3_fixture()
+        scan['status'] = 'in_progress'
+        for lane in lanes:
+            lane['status'] = 'done'
+        lanes[0]['_comments'].append(v3_comment(progress.V3_INVESTIGATION_MARKER, v3_investigation(entries[0])))
+        bugs[0]['status'] = 'done'
+        bugs[0]['_comments'].append(v3_delivery(bugs[0]))
+        result = snapshot(scan, [scan, *lanes, *bugs])
+        self.assertEqual((result['investigation']['state'], result['repair']['state']), ('completed', 'completed'))
+
+    def test_v3_repair_window_before_bug_creation_and_partial_registration(self):
+        scan, lanes, bugs, entries = v3_fixture(('intercom:1', 'intercom:2'))
+        for index, (lane, entry) in enumerate(zip(lanes, entries), 1):
+            lane['_comments'].append(v3_comment(progress.V3_INVESTIGATION_MARKER,
+                                                v3_investigation(entry, attachment=f'r{index}')))
+        no_bugs = snapshot(scan, [scan, *lanes])
+        self.assertEqual(no_bugs['repair'], {'state': 'not_started', 'completed': 0, 'blocked': 0,
+                                             'total': 2, 'index': None, 'currentIssueId': None,
+                                             'needsRecovery': []})
+        partial = snapshot(scan, [scan, *lanes, bugs[0]])
+        self.assertEqual((partial['repair']['state'], partial['repair']['total']), ('repairing', 2))
+        self.assertIn('已确认 2 个 Bug，已建子卡 1 个', '\\n'.join(partial['warnings']))
+
+    def test_v3_stray_bug_and_duplicate_candidate_are_attention_errors(self):
+        scan, lanes, bugs, entries = v3_fixture(('intercom:1', 'intercom:2'))
+        for index, (lane, entry) in enumerate(zip(lanes, entries), 1):
+            lane['_comments'].append(v3_comment(progress.V3_INVESTIGATION_MARKER,
+                                                v3_investigation(entry, attachment=f'r{index}')))
+        stray = copy.deepcopy(bugs[0])
+        stray['id'] = 'bug-stray'
+        stray['metadata']['dailyBug']['candidateId'] = 'intercom:999'
+        stray['metadata']['dailyBug']['investigationRef'] = 'scan:intercom:999'
+        result = snapshot(scan, [scan, *lanes, bugs[0], stray])
+        self.assertEqual(result['repair']['state'], 'attention')
+        self.assertIn('修复阶段数据不完整', '\\n'.join(result['warnings']))
+
+        duplicate = copy.deepcopy(bugs[0])
+        duplicate['id'] = 'bug-duplicate'
+        duplicate['identifier'] = 'GRM-DUP'
+        result = snapshot(scan, [scan, *lanes, bugs[0], duplicate])
+        self.assertEqual(result['repair']['state'], 'attention')
+        self.assertIn('修复阶段数据不完整', '\\n'.join(result['warnings']))
+
+    def test_v3_terminal_bug_without_receipt_needs_attention(self):
+        for status in ('done', 'cancelled'):
+            scan, lanes, bugs, entries = v3_fixture()
+            lanes[0]['_comments'].append(v3_comment(progress.V3_INVESTIGATION_MARKER, v3_investigation(entries[0])))
+            bugs[0]['status'] = status
+            result = snapshot(scan, [scan, *lanes, bugs[0]])
+            with self.subTest(status=status):
+                self.assertEqual(result['repair']['state'], 'attention')
+                self.assertIn(f'处于 {status} 但缺少有效 deliveryReceipt', '\\n'.join(result['warnings']))
+
+    def test_v3_scan_recovery_waits_for_children_and_ignores_unknown_runs(self):
+        scan, lanes, bugs, entries = v3_fixture()
+        scan['status'] = 'in_progress'
+        lanes[0]['status'] = 'in_progress'
+        active = snapshot(scan, [scan, *lanes, *bugs],
+                          [{'issue_id': lanes[0]['id'], 'agent_id': 'agent', 'status': 'running'},
+                           {'issue_id': 'other', 'agent_id': 'agent', 'status': 'running'}])
+        self.assertNotIn(scan['id'], active['needsRecovery'])
+        idle = snapshot(scan, [scan, *lanes, *bugs], [])
+        self.assertIn(scan['id'], idle['needsRecovery'])
+        unavailable = progress.snapshot(scan, [scan, *lanes, *bugs], None, NOW, BASE)
+        self.assertNotIn(scan['id'], unavailable['needsRecovery'])
+
+    def test_v3_manual_override_loses_to_later_agent_across_timezones_and_bool_token_is_invalid(self):
+        scan, lanes, bugs, entries = v3_fixture()
+        manual = v3_investigation(entries[0], 'confirmed', attachment='manual')
+        manual['manualOverride'] = True
+        agent = v3_investigation(entries[0], 'duplicate', token=2, attachment='agent')
+        lanes[0]['_comments'] = [v3_comment(progress.V3_INVESTIGATION_MARKER, manual,
+                                             '2026-10-22T00:30:00Z', author='member'),
+                                 v3_comment(progress.V3_INVESTIGATION_MARKER, agent,
+                                             '2026-10-22T09:00:00+08:00')]
+        result = snapshot(scan, [scan, *lanes, *bugs])
+        self.assertEqual((result['investigation']['confirmed'], result['investigation']['duplicate']), (0, 1))
+        lanes[0]['_comments'] = [v3_comment(progress.V3_INVESTIGATION_MARKER,
+                                             v3_investigation(entries[0], token=True))]
+        result = snapshot(scan, [scan, *lanes, *bugs])
+        self.assertEqual(result['investigation']['completed'], 0)
+
+    def test_v3_invalid_readback_fields_are_rejected_without_type_errors(self):
+        scan, lanes, bugs, entries = v3_fixture()
+        manifest = json.loads(json.dumps(progress._comment_value(scan['_comments'][0], progress.V3_MANIFEST_MARKER)))
+        manifest['readbackHashVerified'] = False
+        scan['_comments'] = [v3_comment(progress.V3_MANIFEST_MARKER, manifest)]
+        with self.assertRaises(progress.queue.QueueError):
+            progress.v3_manifest(scan, 'agent')
+        for field in ('report', 'slack', 'ledger'):
+            bug = copy.deepcopy(bugs[0])
+            body = json.loads(v3_delivery(bug)['content'].split('```json\n', 1)[1].rsplit('\n```', 1)[0])
+            body[field]['readbackVerified'] = False
+            bug['_comments'] = [v3_comment('daily-delivery:v3', body)]
+            self.assertIsNone(progress.v3_latest_receipt(bug, scan))
+            body[field] = False
+            bug['_comments'] = [v3_comment('daily-delivery:v3', body)]
+            self.assertIsNone(progress.v3_latest_receipt(bug, scan))
+
+    def test_v3_duplicate_attachment_and_intercom_evidence_are_rejected(self):
+        scan, lanes, bugs, entries = v3_fixture(('intercom:1', 'intercom:2'))
+        for lane, entry in zip(lanes, entries):
+            lane['_comments'].append(v3_comment(progress.V3_INVESTIGATION_MARKER,
+                                                v3_investigation(entry, attachment='same-report')))
+        with self.assertRaisesRegex(progress.queue.QueueError, '复用了同一份报告附件'):
+            progress.investigation_v3(scan, [scan, *lanes])
+
+        scan, lanes, bugs, entries = v3_fixture(('intercom:1', 'intercom:2'))
+        for index, (lane, entry) in enumerate(zip(lanes, entries), 1):
+
+            item = v3_investigation(entry, attachment=f'report-{index}')
+            item['evidenceRevision'] = 'intercom:1'
+            lane['_comments'].append(v3_comment(progress.V3_INVESTIGATION_MARKER, item))
+        with self.assertRaisesRegex(progress.queue.QueueError, '复用了同一份 Intercom 会话证据'):
+            progress.investigation_v3(scan, [scan, *lanes])
+
+    def test_progress_views_explain_recovery_when_no_run_is_visible(self):
+        progress_data = {'collection': {'state': 'completed', 'collected': {'canny': 1}, 'total': 1},
+                         'investigation': {'state': 'completed', 'completed': 1, 'total': 1, 'confirmed': 0,
+                                           'duplicate': 0, 'csFollowed': 0, 'excluded': 0},
+                         'repair': {'state': 'not_needed', 'completed': 0, 'total': 0},
+                         'current': [], 'activityKnown': True, 'needsRecovery': ['scan'],
+                         'nextAction': 'recover'}
+        self.assertIn('有在途任务异常中断待恢复（详见看板警告）', '\\n'.join(board.progress_lines(progress_data)))
+        html = board._html_progress({'rows': [{'progress': progress_data}], 'generatedAt': 'now'})
+        self.assertIn('有在途任务异常中断待恢复（详见看板警告）', html)
+
 
 class BoardStagesTests(unittest.TestCase):
     def test_lane_round_progress_counts_comment_records_and_shows_each_lane(self):

@@ -17,6 +17,11 @@ DUTY_AGENT = '387e0620-8a22-44f5-919c-4a3e6296fcfb'
 NOW = dt.datetime(2026, 10, 15, 0, 30, tzinfo=dt.timezone.utc)
 
 
+def v3_comment(marker, body, at='2026-10-14T02:00:00Z', author=DUTY_AGENT):
+    return {'author_type': 'agent', 'author_id': author, 'created_at': at,
+            'content': f'<!-- {marker} v3 -->\n```json\n{json.dumps(body)}\n```'}
+
+
 def pr(state, deployable=True, release=None):
     return {'url': 'https://github.com/o/r/pull/1', 'repo': 'o/r', 'number': 1, 'state': state,
             'createdAt': '2026-10-13T00:00:00Z', 'mergedAt': '2026-10-14T00:00:00Z' if state == 'merged' else None,
@@ -562,9 +567,117 @@ class BoardTests(unittest.TestCase):
         board = board_module.build_board([], bugs, dt.date(2026, 10, 13), dt.date(2026, 10, 14))
         self.assertEqual([entry[0]['identifier'] for entry in board_module.attention(board, NOW)['notify']], ['N0'])
         self.assertIn('- 已上线待回告 1：[N0](https://m/N0)', board_module.render_slack(board, NOW))
+    def test_v3_bug_without_receipt_is_fixing_and_build_board_is_safe(self):
+        scan = {'id': 'scan-v3', 'identifier': 'S1', 'title': '每日扫描',
+                'created_at': '2026-10-14T01:00:00Z', 'assignee_id': DUTY_AGENT, 'status': 'in_progress',
+                'metadata': {'dailyScan': {'targetDate': '2026-10-13', 'coverageComplete': True,
+                    'collected': {'canny': 1, 'facebook': 1, 'intercom': 1}},
+                    'dailyExecution': {'protocolVersion': 3}}}
+        bug = {'id': 'bug-v3', 'identifier': 'B1', 'title': '修复｜问题',
+               'created_at': '2026-10-14T02:00:00Z', 'parent_issue_id': 'scan-v3', '_comments': [],
+               'metadata': {'dailyBug': {'schemaVersion': 1, 'protocolVersion': 3, 'mode': 'bug',
+                   'batchId': 'scan-v3', 'sourceScanId': 'scan-v3', 'candidateId': 'intercom:1',
+                   'investigationRef': 'scan-v3:intercom:1', 'feedbackDate': '2026-10-13',
+                   'source': 'intercom', 'sourceUrl': 'https://app.intercom.com/conversation/1'}}}
+        args = SimpleNamespace(start='2026-10-13', today='2026-10-15', project='project', ledger_issue='GRM-664',
+                               issue_url_base='https://m/', reviewer=REVIEWER, slack_cli='slack', duty_agent=DUTY_AGENT)
+        issues = [scan, bug]
+        def query(command):
+            if 'agent' in command and 'tasks' in command:
+                return []
+            return []
+        with patch.object(board_module, 'load_issues', return_value=issues), \
+             patch.object(board_module, 'run_json', side_effect=query):
+            scans, bugs, warnings = board_module.collect(args, NOW)
+        result = board_module.build_board(scans, bugs, dt.date(2026, 10, 13), dt.date(2026, 10, 15))
+        self.assertEqual((bugs[0]['state'], bugs[0]['delivered'], result['total']['delivered']), ('fixing', False, 0))
+        self.assertIn('B1', board_module.render_markdown(result, NOW))
 
+    def test_v3_blocked_receipt_with_all_merged_prs_is_released(self):
+        scan = {'id': 'scan-v3', 'identifier': 'S1', 'title': '每日扫描',
+                'created_at': '2026-10-14T01:00:00Z', 'assignee_id': DUTY_AGENT, 'status': 'backlog',
+                'metadata': {'dailyScan': {'targetDate': '2026-10-13', 'coverageComplete': True,
+                    'collected': {'canny': 1, 'facebook': 1, 'intercom': 1}},
+                    'dailyExecution': {'protocolVersion': 3}}}
+        blocked = {'protocolVersion': 3, 'issueId': 'bug-v3', 'roundId': 'scan-v3', 'candidateId': 'intercom:1',
+                   'prs': ['https://github.com/o/r/pull/1'],
+                   'blocker': {'kind': 'permission', 'reason': '权限不足', 'resumeCondition': '补权限'},
+                   'slack': {'permalink': 'https://slack/blocked', 'readbackVerified': True},
+                   'ledger': {'issue': 'GRM-664', 'commentId': 'blocked', 'readbackVerified': True}}
+        bug = {'id': 'bug-v3', 'identifier': 'B1', 'title': '修复｜问题',
+               'created_at': '2026-10-14T02:00:00Z', 'parent_issue_id': 'scan-v3', '_comments':
+               [v3_comment('daily-blocked:v3', blocked)],
+               'metadata': {'dailyBug': {'schemaVersion': 1, 'protocolVersion': 3, 'mode': 'bug',
+                   'batchId': 'scan-v3', 'sourceScanId': 'scan-v3', 'candidateId': 'intercom:1',
+                   'investigationRef': 'scan-v3:intercom:1', 'feedbackDate': '2026-10-13',
+                   'source': 'intercom', 'sourceUrl': 'https://app.intercom.com/conversation/1'}}}
+        args = SimpleNamespace(start='2026-10-13', today='2026-10-15', project='project', ledger_issue='GRM-664',
+                               issue_url_base='https://m/', reviewer=REVIEWER, slack_cli='slack', duty_agent=DUTY_AGENT)
+        issues = [scan, bug]
+        def query(command):
+            if 'agent' in command and 'tasks' in command:
+                return []
+            if command[1:3] == ['issue', 'comment'] and command[4] == 'bug-v3':
+                return bug['_comments']
+            return []
+        with patch.object(board_module, 'load_issues', return_value=issues), \
+             patch.object(board_module, 'run_json', side_effect=query), \
+             patch.object(board_module.GitHub, 'pr', return_value=pr('merged')):
+            scans, bugs, _ = board_module.collect(args, NOW)
+        self.assertEqual(bugs[0]['state'], 'released')
+        self.assertEqual(board_module.build_board(scans, bugs, dt.date(2026, 10, 13), dt.date(2026, 10, 15))['total']['blocked'], 0)
 
-class V3CohortTests(unittest.TestCase):
+    def test_collect_conflicting_v3_manifest_degrades_to_attention(self):
+        scan = {'id': 'scan-v3', 'identifier': 'S1', 'title': '每日扫描',
+                'created_at': '2026-10-14T01:00:00Z', 'assignee_id': DUTY_AGENT, 'status': 'backlog',
+                'metadata': {'dailyScan': {'targetDate': '2026-10-13', 'coverageComplete': True,
+                    'collected': {'canny': 1, 'facebook': 1, 'intercom': 1}},
+                    'dailyExecution': {'protocolVersion': 3}}}
+        def manifest(candidate):
+            entry = {'candidateId': candidate, 'feedbackDate': '2026-10-13', 'source': 'intercom',
+                     'sourceUrl': 'https://app.intercom.com/conversation/' + candidate.split(':')[-1], 'summary': candidate}
+            return {'protocolVersion': 3, 'roundId': 'scan-v3', 'feedbackDate': '2026-10-13', 'candidateCount': 1,
+                    'candidateSetSha256': board_module.progress_module.queue.candidate_set_hash([candidate]),
+                    'attachmentId': 'manifest-' + candidate, 'sha256': 'sha-' + candidate,
+                    'readbackHashVerified': True, 'candidates': [entry]}
+        comments = [v3_comment(board_module.progress_module.V3_MANIFEST_MARKER, manifest('intercom:1')),
+                    v3_comment(board_module.progress_module.V3_MANIFEST_MARKER, manifest('intercom:2'),
+                               '2026-10-22T02:00:00Z')]
+        scan['_comments'] = comments
+        args = SimpleNamespace(start='2026-10-13', today='2026-10-15', project='project', ledger_issue='GRM-664',
+                               issue_url_base='https://m/', reviewer=REVIEWER, slack_cli='slack', duty_agent=DUTY_AGENT)
+        def query(command):
+            if 'agent' in command and 'tasks' in command:
+                return []
+            if command[1:3] == ['issue', 'comment'] and command[4] == 'scan-v3':
+                return comments
+            return []
+        with patch.object(board_module, 'load_issues', return_value=[scan]), \
+             patch.object(board_module, 'run_json', side_effect=query):
+            scans, _, warnings = board_module.collect(args, NOW)
+        self.assertEqual(scans[0]['progress']['investigation']['state'], 'attention')
+        self.assertTrue(any('调查阶段数据不完整' in warning for warning in warnings))
+
+    def test_v3_finish_collected_fallback_and_bool_suspected_are_handled(self):
+        scan = {'id': 'scan-v3', 'identifier': 'S1', 'title': '每日扫描',
+                'created_at': '2026-10-14T01:00:00Z', 'assignee_id': DUTY_AGENT, 'status': 'backlog',
+                'metadata': {'dailyScan': {'targetDate': '2026-10-13', 'coverageComplete': True},
+                    'dailyExecution': {'protocolVersion': 3}}}
+        finish = {'protocolVersion': 3, 'roundId': 'scan-v3',
+                  'collected': {'canny': 1, 'facebook': 2, 'intercom': 3}, 'suspected': True}
+        scan['_comments'] = [v3_comment(board_module.progress_module.V3_FINISH_MARKER, finish)]
+        args = SimpleNamespace(start='2026-10-13', today='2026-10-15', project='project', ledger_issue='GRM-664',
+                               issue_url_base='https://m/', reviewer=REVIEWER, slack_cli='slack', duty_agent=DUTY_AGENT)
+        def query(command):
+            if 'agent' in command and 'tasks' in command:
+                return []
+            return scan['_comments'] if command[1:3] == ['issue', 'comment'] and command[4] == 'scan-v3' else []
+        with patch.object(board_module, 'load_issues', return_value=[scan]), \
+             patch.object(board_module, 'run_json', side_effect=query):
+            scans, _, _ = board_module.collect(args, NOW)
+        self.assertEqual(scans[0]['collected'], {'canny': 1, 'facebook': 2, 'intercom': 3})
+        self.assertNotIn('suspected', scans[0])
+
     def test_v3_bug_cohort_uses_source_scan_when_batch_id_is_absent(self):
 
         scan = {'id': 'scan-v3', 'identifier': 'GRM-V3', 'created_at': '2026-10-13T01:00:00Z',
