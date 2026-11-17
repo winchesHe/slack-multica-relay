@@ -171,9 +171,6 @@ def candidate_hash(ids):
     return queue.candidate_set_hash(ids)
 
 
-candidate_set_hash = candidate_hash
-
-
 def recursive_value(value, names):
     if isinstance(value, dict):
         for name in names:
@@ -214,8 +211,40 @@ def attachment_id(value):
 
 
 def permalink(value):
-    found = recursive_value(value, ("permalink", "url", "messageUrl", "message_url"))
-    return found if isinstance(found, str) and found.startswith(("http://", "https://")) else None
+    """只读取顶层或 message 层的 permalink 字段，避免误抓 blocks/attachments 中的业务 URL。"""
+    if not isinstance(value, dict):
+        return None
+    candidates = [value]
+    if isinstance(value.get("message"), dict):
+        candidates.append(value["message"])
+    for container in candidates:
+        for key in ("permalink", "messageUrl", "message_url"):
+            found = container.get(key)
+            if isinstance(found, str) and found.startswith(("http://", "https://")):
+                return found
+    return None
+
+
+def workspace_base_from_url(url):
+    if not isinstance(url, str) or "/archives/" not in url:
+        return None
+    idx = url.find("/archives/")
+    base = url[:idx].rstrip("/")
+    return base if base.startswith(("http://", "https://")) else None
+
+
+def compose_slack_permalink(workspace_base, channel_id, ts, thread_ts=None):
+    if not workspace_base or not channel_id or not ts:
+        return None
+    ts_str = str(ts).strip()
+    if "." not in ts_str:
+        return None
+    frag = ts_str.replace(".", "")
+    base = workspace_base.rstrip("/")
+    url = f"{base}/archives/{channel_id}/p{frag}"
+    if thread_ts and str(thread_ts).strip() != ts_str:
+        url = f"{url}?thread_ts={str(thread_ts).strip()}&cid={channel_id}"
+    return url
 
 
 def run_id_set(runs):
@@ -464,15 +493,53 @@ class Slack:
             args += ["--include-thread-replies"]
         return self.call(args, ambiguous=False)
 
+    def resolve_permalink(self, channel_id, ts, thread_ts=None, workspace_base=None):
+        """slack.py history 返回 permalink=None 时，通过已知 workspace_base 或 chat.getPermalink 还原链接。"""
+        composed = compose_slack_permalink(workspace_base, channel_id, ts, thread_ts)
+        if composed:
+            return composed
+        cli_dir = Path(self.cli).resolve().parent if self.cli else None
+        if not cli_dir or not (cli_dir / "sk").is_dir() or not channel_id or not ts:
+            return None
+        script = (
+            "import json, sys\n"
+            "from sk.actor import discover_contexts\n"
+            "from sk.config import Config\n"
+            "cfg = Config()\n"
+            "ctxs = discover_contexts(cfg, ('bot',))\n"
+            "ctx = ctxs.get('bot')\n"
+            "if not ctx:\n"
+            "    sys.exit(2)\n"
+            "res = ctx.read_client().call('chat.getPermalink', channel=sys.argv[1], message_ts=sys.argv[2])\n"
+            "print(json.dumps({'permalink': res.get('permalink'), 'workspace_url': ctx.identity.workspace_url}))\n"
+        )
+        try:
+            proc = self.runner(
+                [sys.executable, "-c", script, str(channel_id), str(ts)],
+                check=True, capture_output=True, text=True, timeout=self.timeout,
+                cwd=str(cli_dir),
+            )
+            payload = json.loads(proc.stdout or "{}")
+            link = payload.get("permalink")
+            if isinstance(link, str) and link.startswith(("http://", "https://")):
+                return link
+            return compose_slack_permalink(payload.get("workspace_url"), channel_id, ts, thread_ts)
+        except (OSError, subprocess.SubprocessError, json.JSONDecodeError, ValueError):
+            return None
+
 
 class Ops:
-    def __init__(self, native, slack=None, state_dir=None, now=None, agent_id=None, runtime_id=None):
+    def __init__(self, native, slack=None, state_dir=None, now=None, agent_id=None, runtime_id=None, workspace_id=None):
         self.native, self.slack = native, slack
         self.agent_id, self.runtime_id = agent_id, runtime_id
         self.now = now or utc_now()
         if runtime_id is not None:
             validate_id(runtime_id, "runtimeId")
-        self.state_dir = Path(state_dir or (Path.home() / ".config/moego/daily-bug-duty/ops" / (runtime_id or "unknown")))
+        if workspace_id is not None:
+            validate_id(workspace_id, "workspaceId")
+        scope = workspace_id or getattr(native, "workspace_id", None) or "default"
+        validate_id(scope, "workspaceId")
+        self.state_dir = Path(state_dir or (Path.home() / ".config/moego/daily-bug-duty/ops" / scope))
         self.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(self.state_dir, 0o700)
 
@@ -568,7 +635,7 @@ class Ops:
                 raise OpsError("同一扫描存在互相冲突的 manifest")
         return values[-1]
 
-    def _readback_attachment(self, result, local_file, expected_hash):
+    def _readback_attachment(self, result, expected_hash):
         aid = attachment_id(result)
         if not aid:
             raise OpsError("上传未返回真实 attachmentId")
@@ -603,7 +670,7 @@ class Ops:
         if any(metadata(scan, key) for key in legacy_keys):
             raise OpsError("已有轮次不是可迁移的 v3 现场")
         execution = metadata(scan, "dailyExecution")
-        expected = {"schemaVersion": 1, "protocolVersion": 3, "policy": POLICY, "laneCount": 2,
+        expected = {"schemaVersion": 1, "protocolVersion": 3, "policy": POLICY, "laneCount": LANE_COUNT,
                     "repairConcurrency": 1, "investigationFailurePolicy": FAILURE_POLICY,
                     "schedulerRevision": scheduler_revision, "runtimeId": runtime_id}
         if execution and execution != expected:
@@ -628,31 +695,31 @@ class Ops:
             self.native.metadata_set(scan_id, "dailyScan", daily_scan)
         return expected, daily_scan
 
-    def _ensure_lanes(self, scan, project_id, agent_id, target_date):
+    def _ensure_lanes(self, scan, project_id, target_date):
         issues = self.native.list_project(project_id) if hasattr(self.native, "list_project") else []
         lanes = [row for row in issues if (
             metadata(row, "dailyLane").get("roundId") == scan["id"]
             or (row.get("parent_issue_id") == scan["id"]
                 and "mode=investigate_lane" in (row.get("description") or "")
-                and re.search(r"工位\s+[12]/2", row.get("title") or "")))]
+                and re.search(rf"工位\s+[1-{LANE_COUNT}]/{LANE_COUNT}", row.get("title") or "")))]
 
         lanes.sort(key=lambda row: metadata(row, "dailyLane").get("lane", 0))
-        if len(lanes) > 2:
-            raise OpsError("v3 调查工位超过 2 张")
+        if len(lanes) > LANE_COUNT:
+            raise OpsError(f"v3 调查工位超过 {LANE_COUNT} 张")
         for row in lanes:
             lane_data = metadata(row, "dailyLane")
             if any(key in lane_data for key in ("state", "currentCandidateId", "failureHandoffCandidateId")):
                 raise OpsError("v3 调查工位包含 legacy 状态字段")
         def lane_number(row):
             value = metadata(row, "dailyLane").get("lane")
-            if value in (1, 2):
+            if value in range(1, LANE_COUNT + 1):
                 return value
-            match = re.search(r"工位\s+([12])/2", row.get("title") or "")
+            match = re.search(rf"工位\s+([1-{LANE_COUNT}])/{LANE_COUNT}", row.get("title") or "")
             return int(match.group(1)) if match else None
-        for number in range(1, 3):
+        for number in range(1, LANE_COUNT + 1):
             existing_lane = next((row for row in lanes if lane_number(row) == number), None)
             expected_lane = {"schemaVersion": 1, "protocolVersion": 3,
-                             "mode": "investigate_lane", "roundId": scan["id"], "lane": number, "laneCount": 2}
+                             "mode": "investigate_lane", "roundId": scan["id"], "lane": number, "laneCount": LANE_COUNT}
             if existing_lane:
                 current_lane = metadata(existing_lane, "dailyLane")
                 if any(current_lane.get(key) != val for key, val in expected_lane.items()):
@@ -662,7 +729,7 @@ class Ops:
                 continue
             if not hasattr(self.native, "create"):
                 raise OpsError("无法创建调查工位")
-            args = ["--project", project_id, "--title", f"反馈调查｜{target_date[5:]} 反馈｜工位 {number}/2",
+            args = ["--project", project_id, "--title", f"反馈调查｜{target_date[5:]} 反馈｜工位 {number}/{LANE_COUNT}",
                     "--description", f"mode=investigate_lane\nroundId={scan['id']}\n", "--parent", scan["id"]]
             result = self.native.create(args)
             lane_id = recursive_value(result, ("id", "issueId", "issue_id"))
@@ -677,7 +744,6 @@ class Ops:
     def init_scan_manifest(self, scan_id, manifest_file, *, target_date=None, scheduler_revision=None,
                            runtime_id=None, project_id=None, agent_id=None, sources=None, collected=None):
         raw = json_from_file(manifest_file)
-        scan = self.native.issue(scan_id)
         target_date = target_date or raw.get("feedbackDate")
         valid_manifest(raw, scan_id, target_date)
         runtime_id = runtime_id or self.runtime_id
@@ -699,23 +765,23 @@ class Ops:
                     raise OpsError("已登记的 manifest 未通过附件回读")
                 self._ensure_scan_metadata(scan_id, target_date, scheduler_revision, runtime_id, sources, collected)
                 if project_id:
-                    self._ensure_lanes(self.native.issue(scan_id), project_id, agent_id, target_date)
+                    self._ensure_lanes(self.native.issue(scan_id), project_id, target_date)
                 return {"status": "reused", "manifest": existing}
             self._ensure_scan_metadata(scan_id, target_date, scheduler_revision, runtime_id, sources, collected)
             if project_id:
-                self._ensure_lanes(self.native.issue(scan_id), project_id, agent_id, target_date)
+                self._ensure_lanes(self.native.issue(scan_id), project_id, target_date)
             state = self.state(scan_id)
             intent = state.setdefault("intent", {"kind": "manifest", "sha256": current_hash, "attempted": True})
             if intent.get("sha256") != current_hash:
                 raise OpsError("manifest intent 与当前文件冲突")
             aid = intent.get("attachmentId")
             if aid:
-                self._readback_attachment({"attachmentId": aid}, manifest_file, current_hash)
+                self._readback_attachment({"attachmentId": aid}, current_hash)
             else:
                 self.save_state(scan_id, state)
                 with self._write_content("准备登记清单") as content:
                     result = self.native.comment_add(scan_id, content, manifest_file)
-                aid = self._readback_attachment(result, manifest_file, current_hash)
+                aid = self._readback_attachment(result, current_hash)
                 intent["attachmentId"] = aid
                 intent["readbackHashVerified"] = True
                 self.save_state(scan_id, state)
@@ -725,7 +791,6 @@ class Ops:
             if not any(comment_json(c, MANIFEST_MARKER) == raw for c in self._fresh_comments(scan_id)):
                 raise OpsError("manifest 评论写后回读失败")
             state["manifest"] = raw
-            state.setdefault("intents", {}).pop("manifest", None)
             state.pop("intent", None)
             self.save_state(scan_id, state)
             return {"status": "created", "manifest": raw}
@@ -760,11 +825,12 @@ class Ops:
             if collected is not None:
                 if not isinstance(collected, dict) or any(type(value) is not int or value < 0 for value in collected.values()):
                     raise OpsError("collected 必须是非负整数对象")
-                data["collected"] = collected
+                # 按来源分次更新时保留此前已记录的来源计数，避免后写入覆盖先写入。
+                data["collected"] = {**(data.get("collected") or {}), **collected}
             if counts is not None:
                 if not isinstance(counts, dict) or any(type(value) is not int or value < 0 for value in counts.values()):
                     raise OpsError("counts 必须是非负整数对象")
-                data["counts"] = counts
+                data["counts"] = {**(data.get("counts") or {}), **counts}
             if coverage_complete is not None:
                 data["coverageComplete"] = bool(coverage_complete)
             self.native.metadata_set(scan_id, "dailyScan", data)
@@ -957,7 +1023,7 @@ class Ops:
                     raise OpsError("fencingToken 无效、租约已过期或已被更高 token 替换")
                 with self._write_content("调查报告附件") as content:
                     uploaded = self.native.comment_add(lane_id, content, report_file)
-                aid = self._readback_attachment(uploaded, report_file, report_hash)
+                aid = self._readback_attachment(uploaded, report_hash)
                 record["report"] = {"attachmentId": aid, "sha256": report_hash, "readbackVerified": True}
                 record.update(schemaVersion=1, protocolVersion=3, mode="investigate", roundId=scan_id,
                               sourceScanId=scan_id, candidateId=candidate_id, feedbackDate=entry["feedbackDate"],
@@ -998,6 +1064,28 @@ class Ops:
         latest = sorted(rows, key=lambda row: row.get("created_at") or "")[-1]
         return latest.get("details", {}).get("to") == "done" and latest.get("actor_type") == "agent" and latest.get("actor_id") == agent_id
 
+    def _clear_launch_intents(self, round_id, issue_id, *keys):
+        self._validate_id(issue_id, "issueId")
+        intent_path = None if round_id else self.state_dir / f"dispatch-{issue_id}.json"
+        if intent_path:
+            if not intent_path.exists():
+                return
+            state = json_from_file(intent_path)
+        else:
+            if not self._state_path(round_id).exists():
+                return
+            state = self.state(round_id)
+        intents = state.get("intents")
+        if not isinstance(intents, dict):
+            return
+        changed = False
+        for key in keys:
+            if key in intents:
+                intents.pop(key, None)
+                changed = True
+        if changed:
+            self._save_intent_state(round_id, intent_path, state)
+
     def _launch_if_idle_unlocked(self, issue_id, agent_id, *, allow_successor=False, round_id=None):
         issue = self.native.issue(issue_id)
         agent_id = agent_id or self.agent_id or issue.get("assignee_id")
@@ -1009,9 +1097,12 @@ class Ops:
             raise OpsError("任务存在其它 Agent 的活动运行")
         queued = [run for run in active if run.get("status") in {"queued", "dispatched", "waiting_local_directory"}]
         if queued:
+            keys = [f"dispatch:{issue_id}"] + ([f"parent-rerun:{round_id}"] if round_id == issue_id else [])
+            self._clear_launch_intents(round_id, issue_id, *keys)
             return {"status": "reused", "runId": queued[0].get("id"), "issueId": issue_id}
         running = [run for run in active if run.get("status") == "running"]
         if running and not allow_successor:
+            self._clear_launch_intents(round_id, issue_id, f"dispatch:{issue_id}")
             return {"status": "active", "issueId": issue_id, "runId": running[0].get("id")}
         if issue.get("status") in {"cancelled", "canceled"}:
             raise OpsError("任务已被取消，不自动恢复")
@@ -1048,14 +1139,22 @@ class Ops:
             current = self.native.runs(issue_id)
             found = [run for run in current if run.get("id") not in existing.get("beforeRunIds", [])]
             if len(found) > 1:
-                raise OpsError("intent 对应多个新运行")
+                in_flight_found = [run for run in found if run.get("status") in IN_FLIGHT]
+                if len(in_flight_found) > 1:
+                    raise OpsError("intent 对应多个新运行")
+                found = in_flight_found
             if len(found) == 1:
-                run_id = found[0].get("id")
+                run = found[0]
+                run_id = run.get("id")
                 intents.pop(key, None)
                 self._save_intent_state(round_id, intent_path, state)
-                if found[0].get("status") in IN_FLIGHT:
+                if allow_successor:
+                    # 后继请求只接受尚未开始且不在本次 before 快照中的新排队运行，避免把当前 running 当成后继而漏唤醒。
+                    if run.get("status") in {"queued", "dispatched", "waiting_local_directory"} and run_id not in before:
+                        return {"status": "reconciled", "runId": run_id, "issueId": issue_id}
+                elif run.get("status") in IN_FLIGHT:
                     return {"status": "reconciled", "runId": run_id, "issueId": issue_id}
-                # 原 run 已完成，继续走下方新 intent。
+                # 原 run 已完成或属于当前正在运行的实例，继续走下方新 intent。
             else:
                 if prepare and existing.get("prepared") is not True:
                     prepare()
@@ -1110,6 +1209,7 @@ class Ops:
         active = [run for run in runs if run.get("status") in IN_FLIGHT]
         queued = [run for run in active if run.get("status") in {"queued", "dispatched", "waiting_local_directory"}]
         if queued:
+            self._clear_launch_intents(round_id, round_id, f"parent-rerun:{round_id}", f"dispatch:{round_id}")
             return {"status": "reused", "runId": queued[0].get("id"), "issueId": round_id}
         running = [run for run in active if run.get("status") == "running"]
         if len(running) == 1:
@@ -1117,6 +1217,7 @@ class Ops:
             run = running[0]
             if (issue.get("status") in TERMINAL_ISSUE or issue.get("assignee_id") not in (None, agent_id)
                     or run.get("agent_id") not in (None, agent_id)):
+                self._clear_launch_intents(round_id, round_id, f"parent-rerun:{round_id}")
                 return {"status": "active", "issueId": round_id, "activeRunIds": sorted(run_id_set(active))}
             before = run_id_set(runs)
             key = f"parent-rerun:{round_id}"
@@ -1124,6 +1225,7 @@ class Ops:
             return self._launch_with_intent(round_id, agent_id, before, key, allow_successor=True, round_id=round_id)
         if not active:
             return self._launch_if_idle_unlocked(round_id, agent_id, round_id=round_id)
+        self._clear_launch_intents(round_id, round_id, f"parent-rerun:{round_id}")
         return {"status": "active", "issueId": round_id, "activeRunIds": sorted(run_id_set(active))}
 
     def rerun_parent_if_needed(self, round_id, *, agent_id=None):
@@ -1204,6 +1306,7 @@ class Ops:
             atomic_write(path, slot)
         wake = None
         if next_id:
+            # 锁序约定：先持久化并释放 global-repair-slot.lock，再获取 next_id 的 round 锁唤醒下一轮，禁止双锁嵌套死锁。
             with file_lock(self._lock_for_round(next_id)):
                 wake = self._launch_if_idle_unlocked(next_id, next_agent, round_id=next_id)
         return {"status": "released", "roundId": round_id, "wokenRoundId": next_id, "wake": wake}
@@ -1225,10 +1328,12 @@ class Ops:
         return parse_time(raw)
 
     def _slack_recover(self, channel, identifier, url, version=None, *, prs=None, thread_ts=None, created_at=None,
-                       require_identifier=True):
+                       require_identifier=True, workspace_base=None):
         if not self.slack:
             return None
         data = self.slack.history(channel, thread_ts=thread_ts) if thread_ts else self.slack.history(channel)
+        if isinstance(data, dict) and not workspace_base:
+            workspace_base = data.get("workspace_url") or data.get("workspace_base")
         messages = data.get("messages", data) if isinstance(data, dict) else data
         since = parse_time(created_at) if created_at else None
         pattern = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(str(identifier))}(?![A-Za-z0-9_])")
@@ -1256,14 +1361,26 @@ class Ops:
                 continue
             if version is not None and not re.search(rf"(?<!\d){re.escape(str(version))}(?!\d)", text):
                 continue
-            return permalink(message) or message.get("permalink")
+            link = permalink(message)
+            if not link:
+                channel_id = message.get("channel_id") or message.get("channel") or channel
+                if hasattr(self.slack, "resolve_permalink"):
+                    link = self.slack.resolve_permalink(channel_id, message.get("ts"), message.get("thread_ts"),
+                                                        workspace_base=workspace_base)
+                else:
+                    link = compose_slack_permalink(workspace_base, channel_id, message.get("ts"), message.get("thread_ts"))
+            if not link:
+                raise OpsError("Slack history 已发现已发送消息但缺少 permalink，已阻止重复发送")
+            return link
         return None
 
     def _send_slack_once(self, channel, text_file, blocks_file, thread_ts, identifier, url, version=None,
-                         *, prs=None, dry_run=False, recover_needed=False, created_at=None, require_identifier=True):
+                         *, prs=None, dry_run=False, recover_needed=False, created_at=None, require_identifier=True,
+                         workspace_base=None):
         if recover_needed:
             recovered = self._slack_recover(channel, identifier, url, version, prs=prs, thread_ts=thread_ts,
-                                            created_at=created_at, require_identifier=require_identifier)
+                                            created_at=created_at, require_identifier=require_identifier,
+                                            workspace_base=workspace_base)
             if recovered:
                 return recovered, True
         result = self.slack.send(channel, text_file, blocks_file, thread_ts, dry_run=dry_run)
@@ -1336,7 +1453,7 @@ class Ops:
             if not intent.get("evidenceAttachmentId"):
                 with self._write_content("扫描证据索引") as content:
                     result = self.native.comment_add(scan_id, content, evidence_file)
-                intent["evidenceAttachmentId"] = self._readback_attachment(result, evidence_file, evidence_hash)
+                intent["evidenceAttachmentId"] = self._readback_attachment(result, evidence_hash)
                 intent["evidenceReadbackVerified"] = True
                 self.save_state(scan_id, state)
             outcomes = {"confirmed": confirmed,
@@ -1362,6 +1479,7 @@ class Ops:
             if not intent.get("slackPermalink"):
                 if not self.slack or not channel:
                     raise OpsError("finish-scan 需要 Slack adapter 和 channel")
+                # 先读取历史发送标记再置 slackSendAttempted=True：首次发送不扫 history 防误匹配，失败/结果不明重试时才从 createdAt 窗口回查防重发。
                 recover_needed = bool(intent.get("slackSendAttempted") and not intent.get("slackPermalink"))
                 intent["slackSendAttempted"] = True
                 intent["createdAt"] = intent.get("createdAt") or iso(self.now)
@@ -1416,8 +1534,18 @@ class Ops:
                 if metadata(row, "dailyBug").get("candidateId") == entry["candidateId"] and row.get("parent_issue_id") == scan_id]
         if rows:
             return rows[0]
+        desc_lines = [
+            "mode=bug",
+            f"roundId={scan_id}",
+            f"candidateId={entry['candidateId']}",
+        ]
+        if entry.get("sourceUrl"):
+            desc_lines.append(f"sourceUrl={entry['sourceUrl']}")
+        summary = entry.get("summary") or ""
+        if summary:
+            desc_lines.extend(["", summary])
         result = self.native.create(["--project", project_id, "--title", "修复｜" + entry.get("summary", entry["candidateId"]),
-                                     "--description", entry.get("summary", ""), "--parent", scan_id])
+                                     "--description", "\n".join(desc_lines), "--parent", scan_id])
         bug_id = recursive_value(result, ("id", "issueId", "issue_id"))
         if not bug_id:
             raise OpsError("创建 Bug 子任务未返回 issue id")
@@ -1604,16 +1732,20 @@ class Ops:
             state = self.state(scan_id)
             intent = state.setdefault("intents", {}).setdefault(key, {"issueId": bug_id, "roundId": scan_id,
                                                                         "version": version})
+            if not blocked and intent.get("reportSha256") and intent["reportSha256"] != report_hash:
+                raise OpsError("delivery intent 与当前报告冲突")
             if not blocked and not intent.get("reportAttachmentId"):
+                # 先上传并回读报告附件；重入复用同一 reportAttachmentId 与 reportSha256，避免重复上传。
                 with self._write_content("交付 HTML 报告") as content:
                     result = self.native.comment_add(bug_id, content, report_file)
-                intent["reportAttachmentId"] = self._readback_attachment(result, report_file, report_hash)
+                intent["reportAttachmentId"] = self._readback_attachment(result, report_hash)
                 intent["reportSha256"] = report_hash
                 intent["reportReadbackVerified"] = True
                 self.save_state(scan_id, state)
             if not blocked and (currently_blocked or edit_blocked_url):
                 blocked_url = edit_blocked_url or latest[3].get("slack", {}).get("permalink")
                 if blocked_url and not intent.get("blockedEdited"):
+                    # 每个 intent 最多编辑一次原受阻消息，随后再发新的交付通知，保证断点续作幂等。
                     edit_text = edit_blocked_text_file or text_file
                     edit_blocks = None if edit_blocked_text_file else blocks_file
                     if not self.slack or not edit_text or not hasattr(self.slack, "edit"):
@@ -1634,15 +1766,19 @@ class Ops:
                 intent["slackSendAttempted"] = True
                 intent["createdAt"] = intent.get("createdAt") or iso(self.now)
                 self.save_state(scan_id, state)
+                known_base = workspace_base_from_url(
+                    edit_blocked_url or (latest[3].get("slack", {}).get("permalink") if latest else None)
+                )
                 link, _ = self._send_slack_once(
                     channel, text_file, blocks_file, thread_ts, bug.get("identifier") or bug_id,
                     daily_bug.get("sourceUrl"), version if (not blocked and version > 1) else None,
                     prs=prs, dry_run=False, recover_needed=recover_needed,
-                    created_at=intent.get("createdAt"))
+                    created_at=intent.get("createdAt"), workspace_base=known_base)
                 intent["slackPermalink"] = link
                 intent["slackReadbackVerified"] = True
                 # 先保存 permalink，再上传附件；附件失败时恢复不会重发顶层消息。
                 self.save_state(scan_id, state)
+            # 附件上传留在 slackPermalink 持久化之外，允许 Slack 发送成功但附件上传失败时在同一线程续传。
             if not blocked and report_file and not intent.get("slackAttachmentReadbackVerified"):
                 link = intent["slackPermalink"]
                 upload_thread_ts = self._upload_thread_ts(link, thread_ts, self.slack)
@@ -1707,20 +1843,54 @@ class Ops:
         records = {}
         if manifest:
             _, records = self._records(round_id, manifest, lanes, agent_id)
-        missing_receipts = [bug.get("id") for bug in bugs if bug.get("status") in {"in_review", "done", "cancelled", "canceled"}
-                            and not self._bug_receipt(bug["id"], DELIVERY_MARKER, agent_id=agent_id)
-                            and not self._bug_receipt(bug["id"], BLOCKED_MARKER, agent_id=agent_id)]
+        has_receipt_by_bug = {bug["id"]: bool(self._receipt_history(bug["id"], scan, agent_id)) for bug in bugs}
+        missing_receipts = [
+            bug.get("id") for bug in bugs
+            if bug.get("status") in {"in_review", "done", "cancelled", "canceled"}
+            and not has_receipt_by_bug[bug["id"]]
+        ]
         runs_by_issue = {row["id"]: self.native.runs(row["id"]) for row in [scan, *lanes, *bugs]}
-        child_active = any(any(run.get("issue_id") == row.get("id") and run.get("status") in IN_FLIGHT
-                               for run in runs_by_issue[row["id"]])
-                           for row in [*lanes, *bugs])
+        def is_active(row_id):
+            return any(
+                run.get("issue_id") == row_id
+                and run.get("status") in IN_FLIGHT
+                and (not agent_id or run.get("agent_id") == agent_id)
+                for run in runs_by_issue[row_id]
+            )
+        child_active = any(is_active(row["id"]) for row in [*lanes, *bugs])
+        investigation_open = manifest is None or len(records) < len(manifest["candidates"])
+        confirmed_count = sum(item.get("conclusion") == "confirmed" for item in records.values())
+        repair_open = len(bugs) < confirmed_count or any(not has_receipt_by_bug[bug["id"]] for bug in bugs)
+        scan_data = metadata(scan, "dailyScan")
+        sources = scan_data.get("sources") or {}
+        source_failed = isinstance(sources, dict) and any(
+            isinstance(value, dict) and value.get("status") in {"failed", "error"}
+            for value in sources.values()
+        )
+        has_finish = any(
+            comment_json(comment, FINISH_MARKER)
+            and comment.get("author_type") == "agent"
+            and (not agent_id or comment.get("author_id") == agent_id)
+            for comment in self._fresh_comments(round_id)
+        )
+        # 与 duty-progress 保持同一恢复口径：只恢复确有未完成工作、未结案工位或无回执 Bug 的 in_progress 任务。
+        scan_known_work = (
+            scan_data.get("coverageComplete") is not True
+            or source_failed
+            or investigation_open
+            or not has_finish
+            or repair_open
+        )
         needs = []
-        for row in [scan, *lanes, *bugs]:
-            if row.get("id") == round_id and child_active:
-                continue
-            if row.get("status") == "in_progress" and not any(run.get("issue_id") == row.get("id") and run.get("status") in IN_FLIGHT
-                                                               for run in runs_by_issue[row["id"]]):
-                needs.append(row["id"])
+        if scan.get("status") == "in_progress" and not child_active and not is_active(round_id) and scan_known_work:
+            needs.append(round_id)
+        if manifest is not None and len(records) < len(manifest["candidates"]):
+            for lane in lanes:
+                if lane.get("status") == "in_progress" and not is_active(lane["id"]):
+                    needs.append(lane["id"])
+        for bug in bugs:
+            if bug.get("status") == "in_progress" and not has_receipt_by_bug[bug["id"]] and not is_active(bug["id"]):
+                needs.append(bug["id"])
         slot_path = self.state_dir / "global-repair-slot.json"
         if slot_path.exists():
             try:
@@ -1732,7 +1902,7 @@ class Ops:
         return {"status": "ok", "roundId": round_id, "manifest": manifest,
                 "candidateCount": len(manifest["candidates"]) if manifest else None, "concluded": len(records),
                 "lanes": [{"id": row["id"], "metadata": metadata(row, "dailyLane")} for row in lanes],
-                "bugs": [{"id": row["id"], "status": row.get("status"), "hasReceipt": row["id"] not in missing_receipts} for row in bugs],
+                "bugs": [{"id": row["id"], "status": row.get("status"), "hasReceipt": has_receipt_by_bug[row["id"]]} for row in bugs],
                 "missingReceipt": missing_receipts, "needsRecovery": needs, "state": state, "globalRepairSlot": slot,
                 "advisoryNextStep": "recover" if needs or missing_receipts else "继续当前阶段"}
 
@@ -1825,16 +1995,17 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    runtime_id = args.runtime_id or "unknown"
+    runtime_id = args.runtime_id
     try:
-        for value, name in ((args.round_id, "roundId"), (args.runtime_id, "runtimeId"),
-                            (args.issue_id, "issueId"), (args.bug_id, "bugId"),
-                            (args.lane_issue_id, "laneIssueId")):
+        for value, name in ((args.workspace_id, "workspaceId"), (args.round_id, "roundId"),
+                            (args.runtime_id, "runtimeId"), (args.issue_id, "issueId"),
+                            (args.bug_id, "bugId"), (args.lane_issue_id, "laneIssueId")):
             if value:
                 validate_id(value, name)
         native = Native(args.server_url, args.workspace_id)
         slack = Slack(args.slack_cli) if args.command in {"finish-scan", "deliver-bug", "block-bug"} else None
-        ops = Ops(native, slack, args.state_dir, agent_id=args.agent_id, runtime_id=runtime_id)
+        ops = Ops(native, slack, args.state_dir, agent_id=args.agent_id,
+                  runtime_id=runtime_id, workspace_id=args.workspace_id)
         for value, name in ((args.round_id, "roundId"), (args.runtime_id, "runtimeId"),
                             (args.issue_id, "issueId"), (args.bug_id, "bugId"),
                             (args.lane_issue_id, "laneIssueId")):

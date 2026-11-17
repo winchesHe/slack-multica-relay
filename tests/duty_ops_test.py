@@ -7,6 +7,7 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 
 SPEC = importlib.util.spec_from_file_location("duty_ops", Path(__file__).parents[1] / "scripts" / "duty-ops.py")
@@ -101,7 +102,10 @@ class FakeNative:
             self.next_run += 1
             issue_id = f"created-{self.next_run}"
             parent = args[args.index("--parent") + 1]
+            title = args[args.index("--title") + 1] if "--title" in args else ""
+            description = args[args.index("--description") + 1] if "--description" in args else ""
             row = {"id": issue_id, "project_id": "project", "parent_issue_id": parent,
+                   "title": title, "description": description,
                    "status": "backlog", "assignee_id": None, "metadata": {}, "_comments": []}
             self.issues[issue_id] = row
             self.comments_by_issue[issue_id] = row["_comments"]
@@ -485,7 +489,7 @@ class OpsTests(unittest.TestCase):
         self.native.issues["orphan"] = orphan
         self.native.comments_by_issue["orphan"] = orphan["_comments"]
         self.native.runs_by_issue["orphan"] = []
-        lanes = self.ops._ensure_lanes(self.native.issue("scan"), "project", "agent", "2026-10-21")
+        lanes = self.ops._ensure_lanes(self.native.issue("scan"), "project", "2026-10-21")
         self.assertEqual(len(lanes), 2)
         self.assertEqual(self.native.issue("orphan")["metadata"]["dailyLane"]["lane"], 2)
 
@@ -832,7 +836,9 @@ out.write_text(json.dumps(payload), encoding="utf-8")
         calls_before = len(self.native.calls)
         res = self.ops.dispatch_if_issue_idle(bug["id"])
         self.assertEqual(res["status"], "started")
-        self.assertIn("dispatch:bug-auto-round", {**self.ops.state("scan").get("intents", {}), "dispatch:bug-auto-round": True})
+        self.assertNotIn("dispatch:bug-auto-round", self.ops.state("scan").get("intents", {}))
+        self.assertIn(("rerun", bug["id"]), self.native.calls[calls_before:])
+        self.assertTrue(any(run["id"] == res["runId"] for run in self.native.runs(bug["id"])))
         report = Path(self.temp.name) / "dry.html"; report.write_text("dry")
         text = Path(self.temp.name) / "dry.txt"; text.write_text("dry")
         before_snap = (copy.deepcopy(self.native.issues), len(self.slack.messages), len(self.native.attachments))
@@ -885,7 +891,7 @@ out.write_text(json.dumps(payload), encoding="utf-8")
                                     project_id="project", agent_id="agent")
         self.assertEqual(self.native.issue("lane-1")["metadata"]["dailyLane"]["protocolVersion"], 3)
         self.native.runs_by_issue["scan"] = []
-        self.native.runs_by_issue["lane-1"] = [{"id": "lane-run", "issue_id": "lane-1", "status": "running"}]
+        self.native.runs_by_issue["lane-1"] = [{"id": "lane-run", "issue_id": "lane-1", "agent_id": "agent", "status": "running"}]
         inspected = self.ops.inspect_round("scan", project_id="project")
         self.assertNotIn("scan", inspected["needsRecovery"])
         self.native.runs_by_issue["lane-1"] = []
@@ -898,10 +904,12 @@ out.write_text(json.dumps(payload), encoding="utf-8")
                               "--round-id", "scan", "--state-dir", str(isolated_dir)])
         self.assertEqual(rc, 1)
         self.assertFalse(isolated_dir.exists())
+        self.assertEqual(ops_module.main(["inspect-round", "--workspace-id", "../bad", "--round-id", "scan"]), 1)
         recorded = []
         class StubOps:
-            def __init__(self, native, slack, state_dir, agent_id=None, runtime_id=None):
+            def __init__(self, native, slack, state_dir, agent_id=None, runtime_id=None, workspace_id=None):
                 self.agent_id = agent_id
+                self.workspace_id = workspace_id
             def _validate_id(self, value, name="ID"):
                 return ops_module.validate_id(value, name)
             def update_scan_status(self, *args, **kwargs):
@@ -940,6 +948,205 @@ out.write_text(json.dumps(payload), encoding="utf-8")
         self.assertTrue(recorded[2][1]["dry_run"])
         self.assertEqual(recorded[2][1]["agent_id"], "ag")
         self.assertTrue(recorded[3][2]["apply"])
+
+    def test_default_state_dir_shared_across_runtime_and_omitted_runtime_id(self):
+        fake_home = Path(self.temp.name) / "fake_home"
+        fake_home.mkdir()
+        orig_native_cls = ops_module.Native
+        shared_native = self.native
+        class BoundNative:
+            def __init__(self, server_url, workspace_id):
+                self.workspace_id = workspace_id
+            def __getattr__(self, name):
+                return getattr(shared_native, name)
+        ops_module.Native = BoundNative
+        self.addCleanup(lambda: setattr(ops_module, "Native", orig_native_cls))
+        m_path = Path(self.temp.name) / "shared-manifest.json"
+        m_path.write_text(json.dumps(manifest(scan_id="scan-shared", count=2)), encoding="utf-8")
+        s_row = issue("scan-shared", identifier="GRM-888")
+        l1 = issue("ls-1", parent_issue_id="scan-shared", metadata={"dailyLane": {
+            "schemaVersion": 1, "protocolVersion": 3, "mode": "investigate_lane", "roundId": "scan-shared", "lane": 1, "laneCount": 2}})
+        l2 = issue("ls-2", parent_issue_id="scan-shared", metadata={"dailyLane": {
+            "schemaVersion": 1, "protocolVersion": 3, "mode": "investigate_lane", "roundId": "scan-shared", "lane": 2, "laneCount": 2}})
+        for row in (s_row, l1, l2):
+            self.native.issues[row["id"]] = row
+            self.native.comments_by_issue[row["id"]] = row["_comments"]
+            self.native.runs_by_issue[row["id"]] = []
+        with mock.patch.object(ops_module.Path, "home", return_value=fake_home):
+            self.assertEqual(ops_module.main([
+                "init-scan-manifest", "--workspace-id", "ws-shared", "--runtime-id", "12345678-1234-4234-8234-123456789abc",
+                "--round-id", "scan-shared", "--manifest-file", str(m_path), "--scheduler-revision", "a" * 40,
+                "--agent-id", "agent"]), 0)
+            self.assertEqual(ops_module.main([
+                "claim", "--workspace-id", "ws-shared", "--round-id", "scan-shared",
+                "--lane-issue-id", "ls-1", "--agent-id", "agent"]), 0)
+            self.assertEqual(ops_module.main([
+                "inspect-round", "--workspace-id", "ws-shared", "--round-id", "scan-shared",
+                "--agent-id", "agent"]), 0)
+        state_file = fake_home / ".config/moego/daily-bug-duty/ops/ws-shared/scan-shared.json"
+        self.assertTrue(state_file.exists())
+        persisted = json.loads(state_file.read_text(encoding="utf-8"))
+        self.assertIn("intercom:1", persisted["leases"])
+        self.assertFalse((fake_home / ".config/moego/daily-bug-duty/ops/unknown").exists())
+
+    def test_create_bug_if_needed_writes_mode_bug_description(self):
+        entry = {"candidateId": "intercom:99", "feedbackDate": "2026-10-21",
+                 "source": "intercom", "sourceUrl": "https://app.intercom.com/conversation/99",
+                 "summary": "付款页面崩溃"}
+        created = self.ops._create_bug_if_needed("scan", entry, project_id="project")
+        desc = created["description"]
+        self.assertTrue(desc.startswith("mode=bug\nroundId=scan\ncandidateId=intercom:99\n"))
+        self.assertIn("sourceUrl=https://app.intercom.com/conversation/99", desc)
+        self.assertEqual(created["metadata"]["dailyBug"]["mode"], "bug")
+
+    def test_update_scan_status_merges_collected_and_counts_across_calls(self):
+        self.ops.update_scan_status("scan", source="canny", source_status="success",
+                                    collected={"canny": 3}, counts={"nonBug": 1})
+        self.ops.update_scan_status("scan", source="facebook", source_status="success",
+                                    collected={"facebook": 2}, counts={"productDecision": 1})
+        saved = self.ops.update_scan_status("scan", source="intercom", source_status="success",
+                                            collected={"intercom": 4}, counts={"csFollowed": 2},
+                                            coverage_complete=True)
+        self.assertEqual(saved["collected"], {"canny": 3, "facebook": 2, "intercom": 4})
+        self.assertEqual(saved["counts"], {"nonBug": 1, "productDecision": 1, "csFollowed": 2})
+        self.assertTrue(saved["coverageComplete"])
+
+    def test_slack_recover_ignores_block_urls_resolves_none_permalink_and_fails_closed(self):
+        epoch = f"{int(self.now.timestamp())}.000100"
+        class HistorySlack(FakeSlack):
+            def __init__(self, payload):
+                super().__init__()
+                self.payload = payload
+            def history(self, channel, thread_ts=None):
+                return self.payload
+        # 1) permalink=None 且 blocks 里带业务 URL 时，不能误抓 blocks[*].url，应使用 workspace_url/workspace_base 构造真实 permalink。
+        payload_with_base = {
+            "workspace_url": "https://moego.slack.com",
+            "messages": [{
+                "ts": epoch, "channel_id": "C0", "author": {"is_bot": True},
+                "text": "GRM-12 https://app.intercom.com/conversation/1",
+                "permalink": None,
+                "blocks": [{"type": "section", "url": "https://app.intercom.com/should-not-pick"}],
+            }],
+        }
+        ops1 = ops_module.Ops(self.native, HistorySlack(payload_with_base), self.temp.name,
+                              now=self.now, agent_id="agent", runtime_id=self.ops.runtime_id)
+        found = ops1._slack_recover("C0", "GRM-12", "https://app.intercom.com/conversation/1")
+        self.assertEqual(found, f"https://moego.slack.com/archives/C0/p{epoch.replace('.', '')}")
+        # 2) permalink=None 且无法解析 workspace_base 时必须 fail-closed 报错，防止重复发消息。
+        payload_no_base = {
+            "messages": [{
+                "ts": epoch, "channel_id": "C0", "author": {"is_bot": True},
+                "text": "GRM-12 https://app.intercom.com/conversation/1",
+                "permalink": None,
+                "blocks": [{"type": "section", "url": "https://app.intercom.com/should-not-pick"}],
+            }],
+        }
+        ops2 = ops_module.Ops(self.native, HistorySlack(payload_no_base), self.temp.name,
+                              now=self.now, agent_id="agent", runtime_id=self.ops.runtime_id)
+        with self.assertRaises(ops_module.OpsError):
+            ops2._slack_recover("C0", "GRM-12", "https://app.intercom.com/conversation/1")
+
+    def test_stale_launch_intent_cleared_on_reused_and_successor_skips_active_running_run(self):
+        # 1) queued run 返回 reused 时应清理残留 dispatch/parent-rerun intent。
+        state = self.ops.state("scan")
+        state["intents"]["dispatch:scan"] = {"beforeRunIds": [], "createdAt": "2026-10-23T00:00:00Z"}
+        state["intents"]["parent-rerun:scan"] = {"beforeRunIds": [], "createdAt": "2026-10-23T00:00:00Z"}
+        self.ops.save_state("scan", state)
+        self.native.runs_by_issue["scan"] = [{"id": "q-1", "issue_id": "scan", "agent_id": "agent", "status": "queued"}]
+        reused = self.ops.rerun_parent_if_needed("scan", agent_id="agent")
+        self.assertEqual(reused["status"], "reused")
+        self.assertNotIn("parent-rerun:scan", self.ops.state("scan")["intents"])
+        self.assertNotIn("dispatch:scan", self.ops.state("scan")["intents"])
+        # 2) 旧 intent beforeRunIds=['r1']，现在场上只有 running 的 r2：allow_successor=True 不能误判 r2 已满足后继而漏排 r3。
+        state = self.ops.state("scan")
+        state["intents"]["parent-rerun:scan"] = {"beforeRunIds": ["r1"], "createdAt": "2026-10-23T00:00:00Z", "allowSuccessor": True}
+        self.ops.save_state("scan", state)
+        self.native.runs_by_issue["scan"] = [
+            {"id": "r1", "issue_id": "scan", "agent_id": "agent", "status": "completed"},
+            {"id": "r2", "issue_id": "scan", "agent_id": "agent", "status": "running"},
+        ]
+        res = self.ops.rerun_parent_if_needed("scan", agent_id="agent")
+        self.assertEqual(res["status"], "started")
+        self.assertNotEqual(res["runId"], "r2")
+        self.assertNotIn("parent-rerun:scan", self.ops.state("scan")["intents"])
+
+    def test_deliver_bug_rejects_report_sha256_mismatch_before_slack_or_edit(self):
+        bug = issue("bug-sha", parent_issue_id="scan", status="in_progress", metadata={"dailyBug": {
+            "schemaVersion": 1, "protocolVersion": 3, "mode": "bug", "batchId": "scan",
+            "sourceScanId": "scan", "candidateId": "intercom:1", "investigationRef": "scan:intercom:1",
+            "feedbackDate": "2026-10-21", "source": "intercom", "sourceUrl": "https://app.intercom.com/conversation/1"}})
+        self.native.issues[bug["id"]] = bug
+        self.native.comments_by_issue[bug["id"]] = bug["_comments"]
+        state = self.ops.state("scan")
+        state["intents"]["delivery:bug-sha:v1"] = {
+            "issueId": "bug-sha", "roundId": "scan", "version": 1,
+            "reportAttachmentId": "att-prev", "reportSha256": "0" * 64, "reportReadbackVerified": True,
+        }
+        self.ops.save_state("scan", state)
+        report = Path(self.temp.name) / "new.html"; report.write_text("new-content")
+        text = Path(self.temp.name) / "new.txt"; text.write_text("new-text")
+        with self.assertRaises(ops_module.OpsError):
+            self.ops.deliver_bug(bug_id="bug-sha", report_file=report, ledger_issue="GRM-664", channel="C0",
+                                 text_file=text, prs=["https://github.com/o/r/pull/1"], pr_heads=["a" * 40],
+                                 edit_blocked_url="https://moego.slack.com/archives/C0/p1761177600000100")
+        self.assertEqual(len(self.slack.messages), 0)
+        self.assertEqual(len(self.slack.edit_calls), 0)
+
+    def test_inspect_round_and_recover_apply_parity_and_agent_filter(self):
+        self.manifest_path.write_text(json.dumps(manifest(count=1)), encoding="utf-8")
+        scan = issue("scan-r", identifier="GRM-999", status="in_progress", created_at="2026-10-22T18:00:00Z")
+        lane = issue("lane-r1", parent_issue_id="scan-r", status="in_progress", metadata={"dailyLane": {
+            "schemaVersion": 1, "protocolVersion": 3, "mode": "investigate_lane", "roundId": "scan-r", "lane": 1, "laneCount": 2}})
+        bug_done = issue("bug-r1", parent_issue_id="scan-r", status="in_progress", metadata={"dailyBug": {
+            "schemaVersion": 1, "protocolVersion": 3, "mode": "bug", "batchId": "scan-r",
+            "sourceScanId": "scan-r", "candidateId": "intercom:1", "investigationRef": "scan-r:intercom:1",
+            "feedbackDate": "2026-10-21", "source": "intercom", "sourceUrl": "https://app.intercom.com/conversation/1"}})
+        for row in (scan, lane, bug_done):
+            self.native.issues[row["id"]] = row
+            self.native.comments_by_issue[row["id"]] = row["_comments"]
+            self.native.runs_by_issue[row["id"]] = []
+        r_manifest = Path(self.temp.name) / "manifest-r.json"
+        r_manifest.write_text(json.dumps(manifest(scan_id="scan-r", count=1)), encoding="utf-8")
+        self.ops.init_scan_manifest("scan-r", r_manifest, target_date="2026-10-21",
+                                    scheduler_revision="a" * 40, runtime_id=self.ops.runtime_id, agent_id="agent")
+        self.ops.update_scan_status("scan-r", source="intercom", source_status="success",
+                                    collected={"canny": 0, "facebook": 0, "intercom": 1}, coverage_complete=True)
+        c1 = self.ops.claim("scan-r", "lane-r1")
+        inv_html = Path(self.temp.name) / "r1.html"; inv_html.write_text("inv")
+        inv_rec = Path(self.temp.name) / "r1.json"
+        inv_rec.write_text(json.dumps({
+            "conclusion": "confirmed", "evidenceRevision": "intercom:1",
+            "verification": {"fixable": True, "productDecisionRequired": False,
+                             "expectedBehaviorRef": "e", "observedDeviationRef": "o", "dedupeRef": "d"}}))
+        self.ops.submit_investigation("scan-r", "lane-r1", c1["candidateId"], c1["fencingToken"], inv_rec, inv_html)
+        ev = Path(self.temp.name) / "ev-r.json"; ev.write_text("{}")
+        self.ops.finish_scan("scan-r", ev, ledger_issue="GRM-664", channel="C0")
+        # 其它 agent 的运行不会满足本 agent 的 active run 判定，且 recover --apply 安全拒绝抢占并记录 errors。
+        self.native.runs_by_issue["bug-r1"] = [{"id": "other-run", "issue_id": "bug-r1", "agent_id": "other-agent", "status": "running"}]
+        inspected = self.ops.inspect_round("scan-r", project_id="project")
+        self.assertNotIn("lane-r1", inspected["needsRecovery"])
+        self.assertIn("bug-r1", inspected["needsRecovery"])
+        blocked_apply = self.ops.recover("scan-r", project_id="project", apply=True)
+        self.assertTrue(any(err["issueId"] == "bug-r1" for err in blocked_apply.get("errors", [])))
+        self.assertFalse(any(call[:2] == ("rerun", "bug-r1") for call in self.native.calls))
+        # 空闲无运行时 recover --apply 真正派发 bug-r1 并置 mutated=True。
+        self.native.runs_by_issue["bug-r1"] = [{"id": "other-run", "issue_id": "bug-r1", "agent_id": "other-agent", "status": "completed"}]
+        applied = self.ops.recover("scan-r", project_id="project", apply=True)
+        self.assertTrue(applied["mutated"])
+        self.assertTrue(any(call[:2] == ("rerun", "bug-r1") for call in self.native.calls))
+        # bug-r1 已经有回执且 scan 已 finish 后，scan 和已结案工位均不再被标为 needsRecovery。
+        bug_rep = Path(self.temp.name) / "br1.html"; bug_rep.write_text("bug")
+        bug_txt = Path(self.temp.name) / "br1.txt"; bug_txt.write_text("bug")
+        self.ops.deliver_bug(bug_id="bug-r1", report_file=bug_rep, ledger_issue="GRM-664", channel="C0",
+                             text_file=bug_txt, prs=["https://github.com/o/r/pull/1"], pr_heads=["a" * 40])
+        self.native.issues["bug-r1"]["status"] = "in_progress"
+        self.native.runs_by_issue["bug-r1"] = []
+        self.native.runs_by_issue["scan-r"] = []
+        clean_inspect = self.ops.inspect_round("scan-r", project_id="project")
+        self.assertEqual(clean_inspect["needsRecovery"], [])
+        clean_recover = self.ops.recover("scan-r", project_id="project", apply=True)
+        self.assertFalse(clean_recover["mutated"])
 
 
 if __name__ == "__main__":
