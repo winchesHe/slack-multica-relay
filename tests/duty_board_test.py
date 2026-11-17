@@ -352,6 +352,72 @@ class SlackReadResilienceTests(unittest.TestCase):
 
 
 class BoardTests(unittest.TestCase):
+    def test_v3_missing_grm664_ledger_still_renders_funnel_bugs_progress_and_warnings(self):
+        scan = {'id': 'scan-v3', 'identifier': 'S1', 'title': '每日扫描',
+                'created_at': '2026-10-14T01:00:00Z', 'assignee_id': DUTY_AGENT, 'status': 'backlog',
+                'metadata': {'dailyScan': {'targetDate': '2026-10-13', 'coverageComplete': True,
+                    'collected': {'canny': 1, 'facebook': 1, 'intercom': 1},
+                    'counts': {'nonBug': 0, 'productDecision': 0, 'csFollowed': 0, 'suspected': 1}},
+                    'dailyExecution': {'protocolVersion': 3}}}
+        entries = [{'candidateId': 'intercom:1', 'feedbackDate': '2026-10-13', 'source': 'intercom',
+                    'sourceUrl': 'https://app.intercom.com/conversation/1', 'summary': '问题'}]
+        def structured(marker, body, at='2026-10-14T02:00:00Z'):
+            return {'author_type': 'agent', 'author_id': DUTY_AGENT, 'created_at': at,
+                    'content': f'<!-- {marker} v3 -->\n```json\n{json.dumps(body)}\n```'}
+        manifest = {'protocolVersion': 3, 'roundId': 'scan-v3', 'feedbackDate': '2026-10-13',
+                    'candidateCount': 1, 'candidateSetSha256': board_module.progress_module.queue.candidate_set_hash(['intercom:1']),
+                    'attachmentId': 'manifest', 'sha256': 'manifest-sha', 'readbackHashVerified': True,
+                    'candidates': entries}
+        scan['_comments'] = [structured('daily-round-manifest:v3', manifest)]
+        lanes = []
+        for number in (1, 2):
+            lanes.append({'id': f'lane-{number}', 'identifier': f'L{number}', 'title': f'工位 {number}',
+                          'parent_issue_id': 'scan-v3', 'assignee_id': None, 'status': 'backlog', '_comments': [],
+                          'metadata': {'dailyLane': {'schemaVersion': 1, 'protocolVersion': 3,
+                              'mode': 'investigate_lane', 'roundId': 'scan-v3', 'lane': number}}})
+        investigation = {'schemaVersion': 1, 'protocolVersion': 3, 'mode': 'investigate',
+                         'roundId': 'scan-v3', 'sourceScanId': 'scan-v3', 'candidateId': 'intercom:1',
+                         'feedbackDate': '2026-10-13', 'sourceUrl': entries[0]['sourceUrl'], 'fencingToken': 1,
+                         'conclusion': 'confirmed', 'evidenceRevision': 'intercom:1',
+                         'report': {'attachmentId': 'report', 'sha256': 'report-sha', 'readbackVerified': True},
+                         'verification': {'fixable': True, 'productDecisionRequired': False,
+                                          'expectedBehaviorRef': 'expected', 'observedDeviationRef': 'observed',
+                                          'dedupeRef': 'dedupe'}}
+        lanes[0]['_comments'] = [structured('daily-investigation:v3', investigation)]
+        bug = {'id': 'bug-v3', 'identifier': 'B1', 'title': '修复｜问题', 'created_at': '2026-10-14T02:00:00Z',
+               'parent_issue_id': 'scan-v3', 'status': 'done', '_comments': [],
+               'metadata': {'dailyBug': {'schemaVersion': 1, 'protocolVersion': 3, 'mode': 'bug',
+                   'batchId': 'scan-v3', 'sourceScanId': 'scan-v3', 'candidateId': 'intercom:1',
+                   'investigationRef': 'scan-v3:intercom:1', 'feedbackDate': '2026-10-13',
+                   'source': 'intercom', 'sourceUrl': entries[0]['sourceUrl']}}}
+        bug['_comments'] = [structured('daily-delivery:v3', {
+            'protocolVersion': 3, 'issueId': 'bug-v3', 'roundId': 'scan-v3', 'candidateId': 'intercom:1',
+            'deliveryVersion': 1, 'prs': ['https://github.com/o/r/pull/1'], 'prHeads': ['a' * 40],
+            'report': {'attachmentId': 'delivery', 'sha256': 'delivery-sha', 'readbackVerified': True},
+            'slack': {'permalink': 'https://slack/delivery', 'readbackVerified': True},
+            'ledger': {'issue': 'GRM-664', 'commentId': 'c1', 'readbackVerified': True}})]
+        issues = [scan, *lanes, bug]
+        args = SimpleNamespace(start='2026-10-13', today='2026-10-15', project='project', ledger_issue='GRM-664',
+                               issue_url_base='https://m/', reviewer=REVIEWER, duty_agent=DUTY_AGENT)
+        comments = {row['id']: row.get('_comments', []) for row in issues}
+        def query(command):
+            if 'agent' in command and 'tasks' in command:
+                return []
+            if 'comment' in command:
+                return comments.get(command[4], [])
+            return []
+        with patch.object(board_module, 'load_issues', return_value=issues), \
+             patch.object(board_module, 'run_json', side_effect=query), \
+             patch.object(board_module.GitHub, 'pr', return_value=pr('merged')):
+            scans, bugs, warnings = board_module.collect(args, NOW)
+        result = board_module.build_board(scans, bugs, dt.date(2026, 10, 13), dt.date(2026, 10, 15))
+        result['warnings'].extend(warnings)
+        self.assertEqual((result['rows'][0]['collected'], result['rows'][0]['confirmed'], len(result['bugs'])), (3, 1, 1))
+        self.assertEqual(result['rows'][0]['confirmedWithoutDetail'], 0)
+        self.assertIn('缺少 GRM-664', '\n'.join(result['warnings']))
+        self.assertIn('S1', board_module.render_markdown(result, NOW))
+        self.assertIn('B1', board_module.render_slack(result, NOW))
+
     def test_groups_by_batch_feedback_date_and_excludes_outside_window(self):
         scans = [
             {'identifier': 'S1', 'feedbackDate': '2026-10-12', 'createdAt': '2026-10-13T01:00:00Z', 'scanDate': '2026-10-13',
@@ -498,6 +564,32 @@ class BoardTests(unittest.TestCase):
         self.assertIn('- 已上线待回告 1：[N0](https://m/N0)', board_module.render_slack(board, NOW))
 
 
+class V3CohortTests(unittest.TestCase):
+    def test_v3_bug_cohort_uses_source_scan_when_batch_id_is_absent(self):
+
+        scan = {'id': 'scan-v3', 'identifier': 'GRM-V3', 'created_at': '2026-10-13T01:00:00Z',
+                'assignee_id': DUTY_AGENT, 'metadata': {'dailyScan': {
+                    'targetDate': '2026-10-12'}, 'dailyExecution': {'protocolVersion': 3}}}
+        bug = {'id': 'bug-v3', 'parent_issue_id': 'scan-v3', 'metadata': {'dailyBug': {
+            'schemaVersion': 1, 'protocolVersion': 3, 'mode': 'bug', 'sourceScanId': 'scan-v3'}}}
+        cohort = board_module.bug_cohort(bug, {'scan-v3': scan}, {})
+        self.assertEqual(cohort['scanId'], 'scan-v3')
+        self.assertEqual(cohort['feedbackDate'], '2026-10-12')
+
+    def test_v3_confirmed_issue_id_deduplicates_against_bug_sub_issue(self):
+        scan = {'id': 'scan-v3', 'identifier': 'S1', 'feedbackDate': '2026-10-13', 'createdAt': NOW.isoformat(),
+                'progress': {'investigation': {'confirmedIssueIds': ['scan-v3:intercom:1']}}}
+        bug = {**bug_module('B1', '2026-10-13', 'fixing'), 'investigationIssueId': 'scan-v3:intercom:1'}
+        result = board_module.build_board([scan], [bug], dt.date(2026, 10, 13), dt.date(2026, 10, 14))
+        self.assertEqual(result['rows'][0]['confirmedWithoutDetail'], 0)
+
+
+def bug_module(identifier, date, state):
+    return {'identifier': identifier, 'url': f'https://m/{identifier}', 'summary': identifier,
+            'feedbackDate': date, 'source': 'intercom', 'sourceUrl': 'https://app.intercom.com/conversation/1',
+            'deliveryPermalink': None, 'rejection': None, 'prs': [], 'state': state}
+
+
 class CohortTests(unittest.TestCase):
     def test_real_batch_attribution_excludes_older_batch_and_retains_rejected_confirmations(self):
         scans = [
@@ -601,7 +693,6 @@ class CohortTests(unittest.TestCase):
         board = board_module.build_board(scans, bugs, dt.date(2026, 10, 12), dt.date(2026, 10, 23))
         row = board['rows'][-1]
         self.assertEqual((row['date'], row['collected'], row['confirmed']), ('2026-10-22', 383, 1))
-
 
 
 class HtmlTests(unittest.TestCase):

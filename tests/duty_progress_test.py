@@ -31,11 +31,175 @@ def fixture(rows, complete=False):
     return scan, [scan, *rows]
 
 
+
+def v3_comment(marker, body, at='2026-10-22T01:00:00Z', author='agent'):
+    author_type = 'agent' if author == 'agent' else 'member'
+    return {'author_type': author_type, 'author_id': author, 'created_at': at,
+            'content': f'<!-- {marker} v3 -->\n```json\n{json.dumps(body, ensure_ascii=False)}\n```'}
+
+
+def v3_fixture(candidate_ids=('intercom:1',)):
+    scan = issue('scan', dailyScan={'targetDate': '2026-10-21', 'coverageComplete': True,
+                                    'collected': {'canny': 1, 'facebook': 1, 'intercom': len(candidate_ids)},
+                                    'counts': {'nonBug': 0, 'productDecision': 0, 'csFollowed': 0,
+                                               'suspected': len(candidate_ids)},
+                                    'sources': {}},
+                 dailyExecution={'protocolVersion': 3})
+    scan.update(identifier='GRM-V3', assignee_id='agent', workspace_id='workspace',
+                title='每日扫描', status='backlog')
+    entries = [{'candidateId': candidate_id, 'feedbackDate': '2026-10-21', 'source': 'intercom',
+                'sourceUrl': f'https://app.intercom.com/conversation/{candidate_id.split(":")[-1]}',
+                'summary': candidate_id} for candidate_id in candidate_ids]
+    scan['_comments'] = [v3_comment(progress.V3_MANIFEST_MARKER, {
+        'protocolVersion': 3, 'roundId': 'scan', 'feedbackDate': '2026-10-21',
+        'candidateCount': len(entries), 'candidateSetSha256': progress.queue.candidate_set_hash(list(candidate_ids)),
+        'attachmentId': 'manifest', 'sha256': 'manifest-sha', 'readbackHashVerified': True,
+        'candidates': entries})]
+    lanes = [{**issue(f'lane-{number}', dailyLane={
+        'schemaVersion': 1, 'protocolVersion': 3, 'mode': 'investigate_lane', 'roundId': 'scan', 'lane': number}),
+               'parent_issue_id': 'scan', 'identifier': f'GRM-L{number}',
+               'title': f'调查工位 {number}', '_comments': []} for number in (1, 2)]
+    bugs = []
+    for candidate_id in candidate_ids:
+        bugs.append({**issue('bug-' + candidate_id.split(':')[-1], dailyBug={
+            'schemaVersion': 1, 'protocolVersion': 3, 'mode': 'bug', 'batchId': 'scan',
+            'sourceScanId': 'scan', 'candidateId': candidate_id,
+            'investigationRef': f'scan:{candidate_id}', 'feedbackDate': '2026-10-21',
+            'source': 'intercom', 'sourceUrl': entries[len(bugs)]['sourceUrl']}),
+                     'parent_issue_id': 'scan', 'identifier': f'GRM-B{len(bugs) + 1}',
+                     'title': '修复｜' + candidate_id, '_comments': []})
+    return scan, lanes, bugs, entries
+
+
+def v3_investigation(entry, conclusion='confirmed', token=1, attachment='report'):
+    item = {'schemaVersion': 1, 'protocolVersion': 3, 'mode': 'investigate', 'roundId': 'scan',
+            'sourceScanId': 'scan', 'candidateId': entry['candidateId'], 'feedbackDate': entry['feedbackDate'],
+            'sourceUrl': entry['sourceUrl'], 'fencingToken': token, 'conclusion': conclusion,
+            'evidenceRevision': 'intercom:' + entry['candidateId'].split(':')[-1],
+            'report': {'attachmentId': attachment, 'sha256': 'report-sha', 'readbackVerified': True}}
+    if conclusion == 'confirmed':
+        item['verification'] = {'fixable': True, 'productDecisionRequired': False,
+                                'expectedBehaviorRef': 'expected', 'observedDeviationRef': 'observed',
+                                'dedupeRef': 'dedupe'}
+    elif conclusion in {'duplicate', 'excluded', 'cs_followed'}:
+        item['conclusionRef'] = 'conclusion'
+    elif conclusion == 'suspended_external':
+        item.update(blocker={'kind': 'external_evidence', 'missingEvidence': 'missing',
+                             'resumeCondition': 'resume', 'evidenceRevision': 'rev',
+                             'attempts': {'source': 's', 'implementation': 'i', 'data': 'd', 'verification': 'v'},
+                             'checkedAt': '2026-10-21T00:00:00Z', 'nextCheckAt': '2026-10-22T00:00:00Z'},
+                    evidenceRevision='rev')
+    return item
+
+
+def v3_delivery(bug, kind='delivery', at='2026-10-22T03:00:00Z'):
+    base = {'protocolVersion': 3, 'issueId': bug['id'], 'roundId': 'scan',
+            'candidateId': progress.queue.meta(bug, 'dailyBug')['candidateId']}
+    if kind == 'delivery':
+        base.update(deliveryVersion=1, prs=['https://github.com/o/r/pull/1'], prHeads=['a' * 40],
+                    report={'attachmentId': 'delivery-report', 'sha256': 'delivery-sha', 'readbackVerified': True},
+                    slack={'permalink': 'https://slack/delivery', 'readbackVerified': True},
+                    ledger={'issue': 'GRM-664', 'commentId': 'ledger-delivery', 'readbackVerified': True})
+        marker = 'daily-delivery:v3'
+    else:
+        base.update(blocker={'kind': 'permission', 'reason': '权限不足', 'resumeCondition': '补权限'},
+                    slack={'permalink': 'https://slack/blocked', 'readbackVerified': True},
+                    ledger={'issue': 'GRM-664', 'commentId': 'ledger-blocked', 'readbackVerified': True})
+        marker = 'daily-blocked:v3'
+    return v3_comment(marker, base, at)
+
+
 def snapshot(scan, issues, runs=None):
     return progress.snapshot(scan, issues, runs if runs is not None else [], NOW, BASE)
 
 
 class ProgressTests(unittest.TestCase):
+    def test_v3_moves_from_registering_to_investigating_repairing_and_completed(self):
+        scan, lanes, bugs, entries = v3_fixture(('intercom:1', 'intercom:2'))
+        issues = [scan, *lanes, *bugs]
+        scan['_comments'] = []
+        self.assertEqual(snapshot(scan, issues)['investigation']['state'], 'registering')
+        scan['_comments'] = [v3_comment(progress.V3_MANIFEST_MARKER, {
+            'protocolVersion': 3, 'roundId': 'scan', 'feedbackDate': '2026-10-21', 'candidateCount': 2,
+            'candidateSetSha256': progress.queue.candidate_set_hash(['intercom:1', 'intercom:2']),
+            'attachmentId': 'manifest', 'sha256': 'manifest-sha', 'readbackHashVerified': True,
+            'candidates': entries})]
+        lanes[0]['_comments'].append(v3_comment(progress.V3_INVESTIGATION_MARKER,
+                                                v3_investigation(entries[0], attachment='r1')))
+        self.assertEqual(snapshot(scan, issues)['investigation']['state'], 'investigating')
+        lanes[1]['_comments'].append(v3_comment(progress.V3_INVESTIGATION_MARKER,
+                                                v3_investigation(entries[1], attachment='r2')))
+        repairing = snapshot(scan, issues, [{'issue_id': bugs[0]['id'], 'agent_id': 'agent', 'status': 'running'}])
+        self.assertEqual((repairing['repair']['state'], repairing['repair']['completed']), ('repairing', 0))
+        for bug in bugs:
+            bug['status'] = 'done'
+            bug['_comments'].append(v3_delivery(bug))
+        completed = snapshot(scan, issues)
+        self.assertEqual((completed['repair']['state'], completed['repair']['completed']), ('completed', 2))
+        self.assertEqual(completed['investigation']['confirmedIssueIds'], ['scan:intercom:1', 'scan:intercom:2'])
+
+    def test_v3_blocked_receipt_is_superseded_by_later_delivery(self):
+        scan, lanes, bugs, entries = v3_fixture()
+        lanes[0]['_comments'].append(v3_comment(progress.V3_INVESTIGATION_MARKER, v3_investigation(entries[0])))
+        bug = bugs[0]
+        bug['_comments'].append(v3_delivery(bug, 'blocked', '2026-10-22T02:00:00Z'))
+        blocked = snapshot(scan, [scan, *lanes, bug])
+        self.assertEqual((blocked['repair']['state'], blocked['repair']['blocked']), ('completed_with_blocked', 1))
+        bug['_comments'].append(v3_delivery(bug, 'delivery', '2026-10-22T03:00:00Z'))
+        delivered = snapshot(scan, [scan, *lanes, bug])
+        self.assertEqual((delivered['repair']['state'], delivered['repair']['completed'], delivered['repair']['blocked']),
+                         ('completed', 1, 0))
+
+    def test_v3_in_review_without_delivery_needs_attention(self):
+        scan, lanes, bugs, entries = v3_fixture()
+        lanes[0]['_comments'].append(v3_comment(progress.V3_INVESTIGATION_MARKER, v3_investigation(entries[0])))
+        bugs[0]['status'] = 'in_review'
+        result = snapshot(scan, [scan, *lanes, *bugs])
+        self.assertEqual(result['repair']['state'], 'attention')
+        self.assertFalse(result['repair']['completed'])
+        self.assertIn('缺少有效 deliveryReceipt', '\n'.join(result['warnings']))
+        self.assertFalse(bugs[0].get('deliveryReceipt'))
+
+    def test_v3_in_progress_without_active_run_is_recovery_and_not_blocked(self):
+        scan, lanes, bugs, entries = v3_fixture()
+        lanes[0]['_comments'].append(v3_comment(progress.V3_INVESTIGATION_MARKER, v3_investigation(entries[0])))
+        bugs[0]['status'] = 'in_progress'
+        result = snapshot(scan, [scan, *lanes, *bugs], [])
+        self.assertEqual(result['repair']['state'], 'repairing')
+        self.assertEqual(result['repair']['blocked'], 0)
+        self.assertIn(bugs[0]['id'], result['repair']['needsRecovery'])
+        self.assertIn(bugs[0]['id'], result['needsRecovery'])
+        self.assertIn('等待 recover', '\n'.join(result['warnings']))
+
+    def test_v3_fencing_token_and_manual_override_precedence(self):
+        scan, lanes, bugs, entries = v3_fixture()
+        lanes[0]['_comments'] = [
+            v3_comment(progress.V3_INVESTIGATION_MARKER, v3_investigation(entries[0], 'confirmed', 1, 'r1'),
+                       '2026-10-22T02:00:00Z'),
+            v3_comment(progress.V3_INVESTIGATION_MARKER, v3_investigation(entries[0], 'duplicate', 2, 'r2'),
+                       '2026-10-22T03:00:00Z'),
+        ]
+        result = snapshot(scan, [scan, *lanes, *bugs])
+        self.assertEqual(result['investigation']['duplicate'], 1)
+        override = v3_investigation(entries[0], 'confirmed', attachment='r3')
+        override['manualOverride'] = True
+        lanes[1]['_comments'].append(v3_comment(progress.V3_INVESTIGATION_MARKER, override,
+                                                '2026-10-22T04:00:00Z', author='member'))
+        result = snapshot(scan, [scan, *lanes, *bugs])
+        self.assertEqual(result['investigation']['confirmedIssueIds'], ['scan:intercom:1'])
+
+    def test_v3_progress_text_does_not_render_none_queue_index(self):
+        progress_data = {'collection': {'state': 'completed', 'collected': {'canny': 1}, 'total': 1},
+                         'investigation': {'state': 'completed', 'completed': 1, 'total': 1, 'confirmed': 1,
+                                           'duplicate': 0, 'csFollowed': 0, 'excluded': 0},
+                         'repair': {'state': 'repairing', 'completed': 0, 'total': 1, 'index': None},
+                         'current': [], 'activityKnown': True, 'nextAction': 'recover'}
+        text = str(board.progress_rows(progress_data))
+        self.assertIn('串行修复中', text)
+        self.assertNotIn('None/1', text)
+
+
+class BoardStagesTests(unittest.TestCase):
     def test_lane_round_progress_counts_comment_records_and_shows_each_lane(self):
         scan, _ = fixture([])
         lanes = lane_freeze(scan, ['a', 'b', 'c'])
