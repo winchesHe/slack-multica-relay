@@ -157,7 +157,7 @@ def follow_up(source, notify, record, read, now):
 
 
 def bug_state(prs, rejected, blocked=False):
-    # 上线按关联 PR 全部 merged 判断；历史驳回标记不覆盖实际合并结果。
+    # PR 全部 merged 是上线事实，优先级高于历史驳回或当前受阻回执。
     if prs and all(pr['state'] == 'merged' for pr in prs):
         return 'released'
     if blocked:
@@ -179,7 +179,7 @@ def scan_warnings(scan):
     if total is not None and all(isinstance(value, int) for value in parts) and sum(parts) != total:
         warnings.append(f"{scan['identifier']} 分类合计 {sum(parts)} ≠ 采集 {total}")
     outcomes = scan.get('outcomes')
-    if isinstance(outcomes, dict) and isinstance(scan.get('suspected'), int):
+    if isinstance(outcomes, dict) and progress_module.count(scan.get('suspected')):
         values = [outcomes.get(key) for key in SCAN_OUTCOMES]
         if all(isinstance(value, int) for value in values) and sum(values) != scan['suspected']:
             warnings.append(f"{scan['identifier']} 候选去向合计 {sum(values)} ≠ 疑似候选 {scan['suspected']}")
@@ -193,7 +193,8 @@ def _layers(bugs):
         'blocked': sum(1 for bug in bugs if bug['state'] == 'blocked'),
         'rejected': sum(1 for bug in bugs if bug['state'] == 'rejected'),
         'shouldShip': len(alive),
-        'delivered': sum(1 for bug in bugs if bug['prs'] and bug['state'] != 'blocked'),
+        'delivered': sum((bool(bug.get('delivered')) if bug.get('v3') else bool(bug['prs']))
+                         and bug['state'] != 'blocked' for bug in bugs),
         'merged': sum(1 for bug in alive if bug['state'] == 'released'),
         'released': sum(1 for bug in alive if bug['state'] == 'released'),
         'notified': sum(1 for bug in alive if bug.get('notify') == 'sent'),
@@ -388,7 +389,7 @@ def progress_rows(progress):
                         'blocked', 'paused', 'cancelled'}:
         fix_text = f"完整交付 {fix['completed']}/{fix['total']}"
         if fix['state'] == 'repairing':
-            fix_text += f" · 固定队列第 {fix.get('index')}/{fix['total']} 项"
+            fix_text += f" · 串行修复中" if fix.get('index') is None else f" · 固定队列第 {fix.get('index')}/{fix['total']} 项"
         elif fix['state'] == 'completed_with_skips':
             fix_text += ' · 已结束，含真人授权跳过项'
         elif fix['state'] == 'completed':
@@ -415,7 +416,9 @@ def progress_lines(progress):
         for token in ('\\', '[', ']', '*', '_', '<', '>'):
             summary = summary.replace(token, '\\' + token)
         active.append(f"{item['phase']}{status} [{item['identifier']}]({item['url']}) {summary}")
-    current = '；'.join(active) or ('暂无在途运行' if progress['activityKnown'] else '运行状态读取失败，待核对')
+    current = '；'.join(active) or (
+        '有在途任务异常中断待恢复（详见看板警告）' if not active and progress.get('needsRecovery')
+        else '暂无在途运行' if progress['activityKnown'] else '运行状态读取失败，待核对')
     return lines + [f'- **当前处理**：{current}', f"- **下一步**：{progress['nextAction']}"]
 
 
@@ -544,6 +547,19 @@ def _meta(issue, key):
         return None
 
 
+def _is_v3_scan(issue):
+    """单个坏任务的 v3 metadata 不能中断整个项目看板。"""
+    try:
+        return progress_module.is_v3_scan(issue)
+    except progress_module.queue.QueueError:
+        return False
+
+
+def _meta_dict(issue, key):
+    value = _meta(issue, key)
+    return value if isinstance(value, dict) else {}
+
+
 class GitHub:
     def api(self, path):
         return run_json(['gh', 'api', path])
@@ -562,20 +578,26 @@ def scan_date(issue):
 
 
 def bug_cohort(issue, issues_by_id, ledger):
-    meta = _meta(issue, 'dailyBug') or {}
-    batch = issues_by_id.get(meta.get('batchId') or issue.get('parent_issue_id'))
+    meta = _meta_dict(issue, 'dailyBug')
+    batch_id = meta.get('batchId') or issue.get('parent_issue_id')
+    source_scan_id = meta.get('sourceScanId')
+    batch = issues_by_id.get(batch_id) or issues_by_id.get(source_scan_id)
     if not batch:
         return None
-    source = batch
-    repair = _meta(batch, 'dailyBatch') or {}
+    source = issues_by_id.get(source_scan_id) if source_scan_id else batch
+    source = source or batch
+    repair = _meta_dict(batch, 'dailyBatch')
     if repair.get('mode') == 'repair':
         source = issues_by_id.get(repair.get('sourceScanId'))
         if not source or batch.get('parent_issue_id') != source['id']:
             return None
-    scan = _meta(source, 'dailyScan') or {}
+    scan = _meta_dict(source, 'dailyScan')
     record = ledger.get((source['identifier'], 'scan')) or {}
     feedback = scan.get('targetDate') or record.get('feedbackDate')
     # 历史非扫描批次可识别为范围外，不猜它属于哪一个反馈日。
+    if _is_v3_scan(source):
+        return {'scanDate': scan_date(source), 'feedbackDate': feedback, 'batch': batch['identifier'],
+                'scanId': source['id'], 'agentId': source.get('assignee_id')}
     return {'scanDate': scan_date(source), 'feedbackDate': feedback, 'batch': batch['identifier'],
             'agentId': source.get('assignee_id')}
 
@@ -636,26 +658,26 @@ def collect(args, now):
     issues = load_issues(args.project)
     # 工位轮次的清单与逐条结论在评论里，读取后才能推导调查进度；读取失败只让该轮进度显示待核对。
     try:
-        progress_module.queue.attach_comments(issues, lambda issue_id: run_json(
+        progress_module.attach_comments(issues, lambda issue_id: run_json(
             ['multica', 'issue', 'comment', 'list', issue_id, '--full', '--compact', '--output', 'json']),
             include_finished=True)
-    except (subprocess.CalledProcessError, json.JSONDecodeError, OSError, progress_module.queue.QueueError):
+    except (subprocess.SubprocessError, json.JSONDecodeError, OSError, progress_module.queue.QueueError):
         warnings.append('调查工位评论读取失败，相关轮次的调查进度待核对')
     runs = []
     duty_agent = getattr(args, 'duty_agent', '387e0620-8a22-44f5-919c-4a3e6296fcfb')
-    if any(_meta(issue, 'dailyRound') for issue in issues):
+    if any(_meta_dict(issue, 'dailyRound') or _is_v3_scan(issue) for issue in issues):
         try:
             runs = run_json(['multica', 'agent', 'tasks', duty_agent, '--output', 'json'])
             if not isinstance(runs, list):
                 raise ValueError('运行列表无效')
-        except (subprocess.CalledProcessError, ValueError, OSError):
+        except (subprocess.SubprocessError, ValueError, OSError):
             runs = None
     issues_by_id = {issue['id']: issue for issue in issues}
     through = (dt.date.fromisoformat(args.today) if args.today else now.astimezone(TZ).date()) - dt.timedelta(days=1)
     for issue in issues:
-        is_bug = (_meta(issue, 'dailyBug') or {}).get('mode') == 'bug'
+        is_bug = _meta_dict(issue, 'dailyBug').get('mode') == 'bug'
         # 同一项目里可能有其它 Agent（如副本本机复跑）的同反馈日扫描；只统计值守 Agent 名下的扫描批次及其 Bug。
-        is_scan = (bool(_meta(issue, 'dailyScan')) and issue.get('assignee_id') == duty_agent
+        is_scan = ((bool(_meta_dict(issue, 'dailyScan')) and issue.get('assignee_id') == duty_agent)
                    and scan_date(issue) >= start.isoformat())
         if not (is_bug or is_scan):
             continue
@@ -670,14 +692,24 @@ def collect(args, now):
                 continue
         board = ledger.get((issue['identifier'], 'bug' if is_bug else 'scan'))
         if is_scan and not is_bug:
-            data = _meta(issue, 'dailyScan') or {}
+            data = _meta_dict(issue, 'dailyScan')
             feedback = data.get('targetDate') or (board or {}).get('feedbackDate')
             if not feedback or not start.isoformat() <= feedback <= through.isoformat():
                 continue
             if board and board.get('feedbackDate') != feedback:
                 warnings.append(f"{issue['identifier']} 台账反馈日与原扫描不一致，采用原扫描阶段事实")
                 board = None
-            counts = data.get('counts') or {}
+            counts = data.get('counts') if isinstance(data.get('counts'), dict) else {}
+            finish = manifest = None
+            if _is_v3_scan(issue):
+                try:
+                    finish = progress_module.v3_finish(issue, duty_agent)
+                except progress_module.queue.QueueError:
+                    pass
+                try:
+                    manifest = progress_module.v3_manifest(issue, duty_agent)
+                except progress_module.queue.QueueError:
+                    pass
             record = {**(board or {}), 'identifier': issue['identifier'], 'feedbackDate': feedback,
                       'createdAt': issue['created_at'], 'scanDate': scan_date(issue)}
             # 采集事实先于最终台账存在；逐阶段展示，不把“尚未汇总”误判为“未扫描”。
@@ -689,42 +721,82 @@ def collect(args, now):
             for key in SCAN_SPLIT:
                 if progress_module.count(counts.get(key)):
                     record[key] = counts[key]
-            if _meta(issue, 'dailyRound'):
+            if isinstance(data.get('outcomes'), dict):
+                record['outcomes'] = data['outcomes']
+            if progress_module.count(data.get('suspected')):
+                record['suspected'] = data['suspected']
+            if finish:
+                if (isinstance(finish.get('collected'), dict)
+                        and all(progress_module.count(value) for value in finish['collected'].values())):
+                    record['collected'] = finish['collected']
+                if isinstance(finish.get('counts'), dict):
+                    for key in SCAN_SPLIT:
+                        if progress_module.count(finish['counts'].get(key)):
+                            record[key] = finish['counts'][key]
+                if isinstance(finish.get('outcomes'), dict):
+                    record['outcomes'] = finish['outcomes']
+                if progress_module.count(finish.get('suspected')):
+                    record['suspected'] = finish['suspected']
+            if manifest and record.get('suspected') is None:
+                record['suspected'] = manifest.get('candidateCount')
+            if _is_v3_scan(issue) or _meta_dict(issue, 'dailyRound'):
                 record['progress'] = progress_module.snapshot(issue, issues, runs, now, args.issue_url_base, board)
-                record['collected'] = record['progress']['collection'].get('collected')
+                record['collected'] = record['progress']['collection'].get('collected') or record.get('collected')
                 warnings.extend(record['progress']['warnings'])
-            elif board is None:
+            if _is_v3_scan(issue) and board is None:
+                warnings.append(f"{issue['identifier']} 缺少 GRM-664 字段台账，已按扫描任务与评论事实展示")
+            elif board is None and not _meta_dict(issue, 'dailyRound'):
                 warnings.append(f"{issue['identifier']} 已有采集记录，最终分类或调查进度尚未登记")
             scans.append(record)
             continue
-        daily_bug = _meta(issue, 'dailyBug') or {}
+        daily_bug = _meta_dict(issue, 'dailyBug')
+        is_v3_bug = daily_bug.get('protocolVersion') == 3
+        source_scan = issues_by_id.get(cohort.get('scanId')) if cohort else None
+        receipt = progress_module.v3_latest_receipt(issue, source_scan) if is_v3_bug and source_scan else None
+        receipt_item = receipt[2] if receipt else {}
+        receipt_prs = receipt_item.get('prs') or ([receipt_item.get('pr')] if receipt_item.get('pr') else [])
         if board is None:
             # 台账是展示索引；漏登记不能抹去范围内已确认的任务与交付事实。
             urls = [item.get('url') if isinstance(item, dict) else item
                     for item in daily_bug.get('prs') or []]
             if daily_bug.get('pr'):
                 urls.append(daily_bug['pr'])
+            urls.extend(receipt_prs)
+            delivery_fallback = daily_bug.get('delivery') or daily_bug.get('blockNotice')
+            if receipt:
+                delivery_fallback = {'permalink': (receipt_item.get('slack') or {}).get('permalink')}
             board = {'prs': list(dict.fromkeys(url for url in urls if isinstance(url, str) and PR_URL.fullmatch(url))),
-                     'delivery': daily_bug.get('delivery') or daily_bug.get('blockNotice'),
+                     'delivery': delivery_fallback,
                      'source': daily_bug.get('source'), 'sourceUrl': daily_bug.get('sourceUrl')}
             warnings.append(f"{issue['identifier']} 缺少字段台账，已按任务记录纳入看板；来源等缺失字段待补齐")
+        if is_v3_bug and receipt_prs:
+            # v3 的交付回执是当前版本的唯一交付事实，台账中的旧 PR 列表只作兼容兜底。
+            board = {**board, 'prs': list(dict.fromkeys(url for url in receipt_prs
+                                                       if isinstance(url, str) and PR_URL.fullmatch(url)))}
         delivery = board.get('delivery')
+        if is_v3_bug and receipt:
+            delivery = {'permalink': (receipt_item.get('slack') or {}).get('permalink')}
         # 兼容历史台账直接保存 Slack permalink 的写法。
         if isinstance(delivery, str):
             delivery = {'permalink': delivery}
         bug = {'identifier': issue['identifier'], 'url': args.issue_url_base + issue['identifier'],
                'summary': issue['title'].split('｜')[-1], 'feedbackDate': cohort['feedbackDate'], 'scanDate': cohort['scanDate'],
-               'batch': cohort['batch'], 'sourceFeedbackDate': board.get('feedbackDate'),
-               'investigationIssueId': daily_bug.get('investigationIssueId'),
-               'source': board.get('source'), 'sourceUrl': board.get('sourceUrl'),
+               'batch': cohort['batch'], 'scanId': cohort.get('scanId'), 'sourceFeedbackDate': board.get('feedbackDate'),
+               'investigationIssueId': daily_bug.get('investigationIssueId') or daily_bug.get('investigationRef') or
+                                      (f"{cohort['scanId']}:{daily_bug['candidateId']}"
+                                       if cohort.get('scanId') and daily_bug.get('candidateId') else None),
+               'source': board.get('source') or daily_bug.get('source'),
+               'sourceUrl': board.get('sourceUrl') or daily_bug.get('sourceUrl'),
+               'v3': is_v3_bug,
                'deliveryPermalink': (delivery or {}).get('permalink'), 'rejection': None, 'notify': None,
-               'delivered': daily_bug.get('completeDelivery') is True}
+               'delivered': (bool(receipt and receipt[1] == 'delivered')) if is_v3_bug else daily_bug.get('completeDelivery') is True}
         bug['prs'] = [github.pr(url) for url in board.get('prs') or []]
-        blocked = daily_bug.get('state') == 'blocked'
+        blocked = bool(receipt and receipt[1] == 'blocked') if is_v3_bug else daily_bug.get('state') == 'blocked'
+        # blocked 只表达交付回执；bug_state 先判断 PR 是否全部合并，确保最终上线事实不被受阻历史覆盖。
         bug['state'] = bug_state(bug['prs'], False, blocked)
-        # 真实受阻单列，历史草稿 PR 不算交付；已合并仍按事实记上线，均不依赖旧 Slack 消息。
         if bug['state'] == 'blocked':
-            bug['blockedReason'] = (daily_bug.get('blocker') or {}).get('reason') or '修复受阻，保留现场'
+            bug['blockedReason'] = ((receipt_item.get('blocker') or {}).get('reason') if is_v3_bug and receipt
+                                    else (daily_bug.get('blocker') or {}).get('reason')) or '修复受阻，保留现场'
         elif bug['state'] != 'released' and bug['deliveryPermalink']:
             try:
                 bug['rejection'] = rejection(slack_thread(args.slack_cli, bug['deliveryPermalink']), args.reviewer)
@@ -1090,7 +1162,9 @@ def _html_progress(payload):
     current = '；'.join(
         _h(item['phase'] + ('执行中' if item['status'] in {'running', 'waiting_local_directory'} else '已排队'))
         + ' ' + _a(item['identifier'], item['url']) + ' ' + _h(item['summary']) for item in progress['current'])
-    current = current or ('暂无在途运行' if progress['activityKnown'] else '运行状态读取失败，待核对')
+    current = current or (
+        '有在途任务异常中断待恢复（详见看板警告）' if progress.get('needsRecovery')
+        else '暂无在途运行' if progress['activityKnown'] else '运行状态读取失败，待核对')
     return ('<section class="widget full"><div class="head"><h2>阶段结论与当前进度</h2>'
             f'<p>截至 {_h(payload["generatedAt"])}</p></div><div class="phase-cards">{stages}</div>'
             f'<p><b>当前处理：</b>{current}</p><p><b>下一步：</b>{_h(progress["nextAction"])}</p></section>')
