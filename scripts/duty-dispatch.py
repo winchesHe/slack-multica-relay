@@ -276,6 +276,12 @@ class Native:
             raise Error('运行历史响应不完整')
         return result
 
+    def timeline(self, issue_id):
+        result = self.call(['issue', 'timeline', issue_id])
+        if not isinstance(result, list):
+            raise Error('任务时间线响应不完整')
+        return result
+
     def snapshot(self, round_id=None):
         project = self.call(['project', 'get', self.project_id])
         if project.get('id') != self.project_id:
@@ -356,6 +362,77 @@ class Native:
             raise Error('任务状态写后回读不一致，保留现场')
 
 
+def agent_closed_done(native, issue_id, agent_id):
+    """仅当时间线最新状态变更为本 Agent 自身置为 done 时才允许自动恢复；真人或未知关闭保持停止。"""
+    try:
+        events = native.timeline(issue_id)
+    except Error:
+        return False
+    changes = [event for event in events
+               if isinstance(event, dict) and event.get('action') == 'status_changed'
+               and isinstance(event.get('details'), dict)]
+    if not changes:
+        return False
+    latest = sorted(changes, key=lambda event: event.get('created_at') or '')[-1]
+    return (latest.get('details', {}).get('to') == 'done'
+            and latest.get('actor_type') == 'agent'
+            and latest.get('actor_id') == agent_id)
+
+
+def recoverable_lane_done(row, agent_id):
+    lane = queue.meta(row, 'dailyLane')
+    return (row.get('status') == 'done'
+            and row.get('assignee_id') in (None, agent_id)
+            and lane.get('mode') == 'investigate_lane'
+            and lane.get('state') != 'done')
+
+
+def recoverable_round_done(row, agent_id):
+    info = queue.meta(row, 'dailyRound')
+    batch = queue.meta(row, 'dailyBatch')
+    return (row.get('status') == 'done'
+            and row.get('assignee_id') in (None, agent_id)
+            and bool(info) and info.get('state') != 'completed'
+            and batch.get('state') not in ('paused', 'cancelled'))
+
+
+def refresh_issue_in_snapshot(snapshot, issue_id, fresh):
+    for index, row in enumerate(snapshot['issues']):
+        if row['id'] == issue_id:
+            if '_comments' in row and '_comments' not in fresh:
+                fresh = {**fresh, '_comments': row['_comments']}
+            snapshot['issues'][index] = fresh
+            return fresh
+    return fresh
+
+
+def reopen_round_if_agent_done(native, snapshot, round_id, agent_id):
+    scan = next((row for row in snapshot['issues'] if row['id'] == round_id), None)
+    if scan and recoverable_round_done(scan, agent_id) and agent_closed_done(native, scan['id'], agent_id):
+        native.status(scan['id'], 'in_progress')
+        refresh_issue_in_snapshot(snapshot, scan['id'], native.issue(scan['id']))
+
+
+def reopen_verified_bug_if_agent_done(native, snapshot, scan, agent_id):
+    batch = queue.meta(scan, 'dailyBatch')
+    current_id = batch.get('currentIssueId')
+    if not current_id or batch.get('state') in ('paused', 'cancelled'):
+        return
+    current = next((row for row in snapshot['issues'] if row['id'] == current_id), None)
+    if (not current or current.get('status') != 'done'
+            or current.get('assignee_id') not in (None, agent_id)):
+        return
+    if queue.verified_delivery(batch, current):
+        target_status = 'in_review'
+    elif queue.verified_block(batch, current):
+        target_status = 'blocked'
+    else:
+        return
+    if agent_closed_done(native, current['id'], agent_id):
+        native.status(current['id'], target_status)
+        refresh_issue_in_snapshot(snapshot, current['id'], native.issue(current['id']))
+
+
 def launch(native, journal, issue_id, agent_id, runtime_id, *, successor=False, key=None):
     """保存启动前 run 集合；超时后只认实际新 run，未知结果不能重复启动。
     工位每领一条候选用独立 journal 键，后继排在执行中的同一工位之后。"""
@@ -384,6 +461,10 @@ def launch(native, journal, issue_id, agent_id, runtime_id, *, successor=False, 
     if reusable:
         return {'issueId': issue_id, 'runId': reusable[0]['id'], 'status': reusable[0]['status'], 'reused': True}
     row = native.issue(issue_id)
+    if ((recoverable_lane_done(row, agent_id) or recoverable_round_done(row, agent_id))
+            and agent_closed_done(native, issue_id, agent_id)):
+        native.status(issue_id, 'in_progress')
+        row = native.issue(issue_id)
     if row.get('status') in queue.STOPPED or row.get('assignee_id') not in (None, agent_id):
         raise Error('目标已关闭或转交，不能启动')
     if row.get('assignee_id') is None:
@@ -470,6 +551,7 @@ def lane_launch(native, journal, row, candidate, item, scope, *, failing=False, 
 
 def advance(native, journal, scope, now=None, *, recovering=False):
     snapshot = native.snapshot(round_id=scope['round_id'])
+    reopen_round_if_agent_done(native, snapshot, scope['round_id'], scope['agent_id'])
     result = plan(snapshot, handoff=True, recovering=recovering, **scope)
     if result['action'] in ('register_round', 'yield_to_finalizer'):
         return result
@@ -564,6 +646,10 @@ def advance(native, journal, scope, now=None, *, recovering=False):
 def repair_advance(native, journal, scope):
     """修复串行接续由代码持久化：交付或受阻通知齐全即越过，未知启动结果复用 journal。"""
     snapshot = native.snapshot(round_id=scope['round_id'])
+    reopen_round_if_agent_done(native, snapshot, scope['round_id'], scope['agent_id'])
+    scan = next((row for row in snapshot['issues'] if row['id'] == scope['round_id']), None)
+    if scan:
+        reopen_verified_bug_if_agent_done(native, snapshot, scan, scope['agent_id'])
     step = plan(snapshot, repairing=True, **scope)
     scan = next(row for row in snapshot['issues'] if row['id'] == scope['round_id'])
     batch = queue.meta(scan, 'dailyBatch')
@@ -620,6 +706,14 @@ def release_repair(native, journal, *, agent_id, runtime_id, project_id):
     """一条修复队列结束后，唤起最早一条已完成调查、等待修复名额的轮次去登记修复。"""
     snapshot = native.snapshot()
     issues = snapshot['issues']
+    for row in issues:
+        if (row.get('project_id') == project_id
+                and queue.meta(row, 'dailyExecution').get('policy') in (LANE_POLICY, ISSUE_POLICY)
+                and row.get('assignee_id') == agent_id
+                and recoverable_round_done(row, agent_id)
+                and agent_closed_done(native, row['id'], agent_id)):
+            native.status(row['id'], 'in_progress')
+            refresh_issue_in_snapshot(snapshot, row['id'], native.issue(row['id']))
     waiting = sorted((row for row in issues if queue.meta(row, 'dailyExecution').get('policy') in (LANE_POLICY, ISSUE_POLICY)
                       and queue.meta(row, 'dailyRound').get('state') not in (None, 'completed')
                       and row.get('status') not in queue.STOPPED),

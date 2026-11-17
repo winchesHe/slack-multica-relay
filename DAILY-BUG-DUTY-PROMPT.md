@@ -133,7 +133,7 @@ Multica 任务操作一律用原生 CLI：先看帮助，核对服务、GRM 工�
 每条报告上传后保存返回的真实 `attachmentId`，写入 `investigationRecord={attachmentId,evidenceRevision}`，`attachmentId` 必须为真实已上传附件 UUID（不能使用 `pending-upload` 等占位符），`evidenceRevision` 必须对应本次实际读取的材料版本并包含该候选的来源标识（如 `intercom:<会话 ID>` 或 `canny:<标识>`）；材料变化后不能复用旧报告结论，不同候选不得复用同一份调查报告附件 ID 或单一 Intercom 会话证据；不再下载附件重算或手抄 SHA-256。已确认、排除、重复、已有工单和外部缺证都必须有记录；报告文件存在或 Agent 自己声明完成不能替代上传后记录真实 `attachmentId`。
 
 - `confirmed`：保存 `verification={fixable:true,productDecisionRequired:false,expectedBehaviorRef,observedDeviationRef,dedupeRef,customerSymptomLinkRef}`，前三个引用指向实际依据、已验证偏差和最新查重结果，customerSymptomLinkRef 指向报告中“客户原话或现象 → 该偏差如何导致”的因果说明。说明不成立或缺失时不能判为 confirmed。只登记确认结论，暂不创建或启动修复。
-- `excluded / duplicate / cs_followed`：保存 conclusionRef，指向真实排除依据、重复任务/PR 或已回读工单。调查完成后可将任务置 done；已有工单按原规则停止扩展调查，解释未执行路径的原因。
+- `excluded / duplicate / cs_followed`：保存 conclusionRef，指向真实排除依据、重复任务/PR 或已回读工单。仅旧逐条调查任务（`mode=investigate`）可在结论回读后将该单条任务置 done；工位卡（`mode=investigate_lane`）与原扫描（`mode=scan`）不得因单条结论把任务状态置为 done 或 cancelled，工位卡状态只由原扫描在 `finalize_round_here` 时统一关闭。已有工单按原规则停止扩展调查，解释未执行路径的原因。
 - `suspended_external`：只有原来源、实现、数据、验证路径都有实际尝试记录，且剩余材料只能由外部提供时成立；保存下方 blocker。它是“已调查、等待外部证据”，不得混同未调查项。
 - `ready / investigating`：仍需调查。启用 investigationFailurePolicy=retry_2_then_skip_v1 的工位遇到可恢复故障时，先沿授权路径恢复或尝试替代取证；仍未形成有效结论，就保存 executionFailure={kind,error}、已做动作、现有报告与 nextAction，回读后立即调用 advance。调度器按候选保留首次运行及最多 2 次重试；仍失败则自动追加 skipped_failure 记录并接下一条。非此协议轮次仍保留原失败恢复规则。
 - `skipped_failure`：本轮执行失败已跳过，不是已验证、排除或外部缺证。调度器保存三次运行 ID、具体错误、恢复条件、跳过时间及已有调查报告；运行日志是崩溃或报告生成失败时的过程依据。不要求先补齐缺失报告才能释放工位。此项不进入修复、不计确认或排除，不自动回流本轮和下一轮，不等待人工重新调用才能处理其它项。未知启动结果、归属/版本冲突、人工取消不走失败跳过，必须先核对真实现场。
@@ -186,12 +186,12 @@ python3 <同一临时目录>/duty-dispatch.py advance \
 `plan` 与 `advance` 返回 protocolVersion=2。**开工 plan 只读核对，不派发、没有 receipts。工位收到 `investigate_candidate` 时只调查其中的 candidateId；收到 `settle_failure` 时仅调用 advance 留档并接续，不再执行调查；收到其它结果说明本工位没有在查的候选，直接 advance。**只有交接 advance 才执行真实写入并返回 receipts：
 
 - `register_round`：留在原扫描完成登记。
-- `dispatch`：调度器已为空闲工位和当前工位各领取一条未领候选（写入 `dailyLane.currentCandidateId`），并给当前工位排一个后继运行；清单已领完的工位标为 done。核对 receipts 后结束当前运行，不占着名额等待其它工位。当前候选没有有效结论但有具体失败记录时，调度器给同一候选排最多 2 次重试；耗尽后追加 skipped_failure 并释放工位领下一条。空闲工位上已结束却没有结论的运行也走相同有界恢复；不把 run completed 当成调查完成。
+- `dispatch`：调度器已为空闲工位和当前工位各领取一条未领候选（写入 `dailyLane.currentCandidateId`），并给当前工位排一个后继运行；清单已领完的工位由调度器将 metadata `dailyLane.state` 标为 done（工位卡任务状态保持 `in_progress`，不得手动置为 `done`）。核对 receipts 后结束当前运行，不占着名额等待其它工位。当前候选没有有效结论但有具体失败记录时，调度器给同一候选排最多 2 次重试；耗尽后追加 skipped_failure 并释放工位领下一条。空闲工位上已结束却没有结论的运行也走相同有界恢复；不把 run completed 当成调查完成。
 - `finalize_round`：全部候选已有结论，调度器为原扫描排入或复用唯一汇总后继；当前运行结束释放名额，不自行汇总或建修复队列。原扫描自己收到它时，说明仍有工位运行尚未退出，调度器已为原扫描再排一个后继，当前运行直接退出；后继开跑时再核对一次，直到工位全部退出。
 - `yield_to_finalizer`：原扫描已有汇总后继排队，当前运行直接退出，避免两次汇总。
 - `finalize_round_here`：原扫描是唯一活动运行且全部工位已退出：调度器已把两张工位卡标为 done 并把任务状态置为 done；当前运行核对全部候选证据与结论，统一生成、上传并回读完整索引、分类台账与扫描汇总，再按只读计划器进入固定修复流程。
 
-工位运行只写自己的结论记录与报告；不写父扫描的 dailyRound、dailyBatch、dailyDispatch、最终分类索引、台账或 Slack 汇总，所有共享调度由同 Runtime 的短锁串行执行。工位后继以每个候选首次加最多 2 次重试为上限；同一候选不清零重试计数，不是无限 rerun。原扫描**仅在调查交接阶段**准备退出前重新调用 advance；已经接管汇总、建立固定修复队列或排入首个 Bug 后，按串行修复接续退出，不再调用调查调度器。
+工位运行只写自己的结论记录与报告；不写父扫描的 dailyRound、dailyBatch、dailyDispatch、最终分类索引、台账或 Slack 汇总，也不得把未完结的工位卡、原扫描或正在交接中的 Bug 任务状态置为 `done / cancelled`（调度器仅在时间线最新 `status_changed` 证实由本 Agent 自身误置为 `done` 时自动重开接续，真人关闭或取消始终保持停止），所有共享调度由同 Runtime 的短锁串行执行。工位后继以每个候选首次加最多 2 次重试为上限；同一候选不清零重试计数，不是无限 rerun。原扫描**仅在调查交接阶段**准备退出前重新调用 advance；已经接管汇总、建立固定修复队列或排入首个 Bug 后，按串行修复接续退出，不再调用调查调度器。
 
 异常退出后如果另一个工位仍在运行，它的 advance 会回读并恢复空闲工位。两张工位都已退出时，在真人明确恢复该轮的授权下，导出该轮固定版本脚本，以同一作用域调用 `duty-dispatch.py recover --round-id <原扫描 UUID> --current-issue <无活动运行的工位 UUID>`，其余 server/workspace/project/agent/runtime/revision 参数同上，不传 current-run。recover 不采集、不重建清单，不接受仍有活动运行的目标工位，不清理 journal；只对已证实的结束运行安排剩余重试；三次调查均已结束时，仅排一次 settle_failure 交接运行，由 Agent 留档后接下一条，不再调查，也不以真人身份伪装结论作者。启动结果不明则保留 intent。恢复后由工位自身留档与交接，不新增周期巡检。
 

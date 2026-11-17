@@ -26,6 +26,12 @@ def run(issue_id, run_id=None, status='running'):
             'workspace_id': 'workspace', 'runtime_id': 'runtime', 'status': status}
 
 
+def status_event(to_status, *, actor_type='agent', actor_id='agent',
+                 created_at='2026-10-23T10:00:00Z', from_status='in_progress'):
+    return {'action': 'status_changed', 'actor_type': actor_type, 'actor_id': actor_id,
+            'created_at': created_at, 'details': {'from': from_status, 'to': to_status}}
+
+
 def snapshot(rows):
     scan = issue('scan', dailyScan={'coverageComplete': True}, dailyExecution={
         'schemaVersion': 1, 'policy': dispatch.ISSUE_POLICY, 'investigationConcurrency': 2,
@@ -55,6 +61,9 @@ class FakeNative:
 
     def history(self, key):
         return copy.deepcopy([r for r in self.data['runs'] if r['issue_id'] == key])
+
+    def timeline(self, key):
+        return copy.deepcopy(self.data.get('timelines', {}).get(key, []))
 
     def metadata(self, key, name, value):
         self.writes.append((key, name))
@@ -382,6 +391,62 @@ class RepairAdvanceTests(unittest.TestCase):
             )
 
         self.assertEqual(seen_rounds, ['scan', 'scan', 'scan'])
+
+    def test_agent_closed_scan_reopens_in_repair_while_member_closed_stays_stopped(self):
+        block(self.scan, self.bugs[0])
+        self.scan['status'] = 'done'
+        self.data['timelines'] = {'scan': [status_event('done', actor_type='agent', actor_id='agent')]}
+        result = self.advance()
+        self.assertEqual((result['action'], result['issueId']), ('dispatch_repair', self.bugs[1]['id']))
+        self.assertEqual(self.scan['status'], 'in_progress')
+
+        self.scan['status'] = 'done'
+        self.data['timelines']['scan'].append(
+            status_event('done', actor_type='member', actor_id='winches', created_at='2026-10-23T11:00:00Z'))
+        with self.assertRaises(dispatch.Error):
+            self.advance()
+        self.assertEqual(self.scan['status'], 'done')
+
+    def test_agent_closed_verified_bug_restores_status_and_unverified_or_human_stays_attention(self):
+        # 1. 已核验交付却被 Agent 误置 done -> 恢复为 in_review 并推进下一项。
+        batch = dispatch.queue.meta(self.scan, 'dailyBatch')
+        batch['completedDeliveries'] = [receipt(self.bugs[0])]
+        self.bugs[0]['status'] = 'done'
+        self.data['timelines'] = {self.bugs[0]['id']: [status_event('done')]}
+        first = self.advance()
+        self.assertEqual((first['action'], first['issueId']), ('dispatch_repair', self.bugs[1]['id']))
+        self.assertEqual(self.bugs[0]['status'], 'in_review')
+
+        # 2. 已核验受阻却被 Agent 误置 done -> 恢复为 blocked 并推进下一项。
+        block(self.scan, self.bugs[1])
+        self.bugs[1]['assignee_id'] = 'agent'
+        self.bugs[1]['status'] = 'done'
+        self.data['timelines'][self.bugs[1]['id']] = [status_event('done')]
+        self.data['runs'] = [run(self.bugs[1]['id'])]
+        second_scope = {**self.scope, 'current_issue': self.bugs[1]['id'],
+                        'current_run': self.data['runs'][0]['id']}
+        second = dispatch.repair_advance(self.native, self.journal, second_scope)
+        self.assertEqual((second['action'], second['issueId']), ('dispatch_repair', self.bugs[2]['id']))
+        self.assertEqual(self.bugs[1]['status'], 'blocked')
+
+        # 3. 尚未形成交付或受阻回执时被置 done -> 保持 attention，不伪造状态。
+        self.bugs[2]['assignee_id'] = 'agent'
+        self.bugs[2]['status'] = 'done'
+        self.data['timelines'][self.bugs[2]['id']] = [status_event('done')]
+        self.data['runs'] = [run(self.bugs[2]['id'])]
+        third_scope = {**self.scope, 'current_issue': self.bugs[2]['id'],
+                       'current_run': self.data['runs'][0]['id']}
+        third = dispatch.repair_advance(self.native, self.journal, third_scope)
+        self.assertEqual(third['action'], 'attention')
+        self.assertEqual(self.bugs[2]['status'], 'done')
+
+        # 4. 真人关闭已核验交付的任务 -> 保持 attention，不自动重开。
+        batch['completedDeliveries'].append(receipt(self.bugs[2]))
+        self.data['timelines'][self.bugs[2]['id']].append(
+            status_event('done', actor_type='member', actor_id='winches', created_at='2026-10-23T11:00:00Z'))
+        fourth = dispatch.repair_advance(self.native, self.journal, third_scope)
+        self.assertEqual(fourth['action'], 'attention')
+        self.assertEqual(self.bugs[2]['status'], 'done')
 
 
 class PlanTests(unittest.TestCase):
@@ -917,6 +982,84 @@ class LaneFailureTests(LaneDispatchTests):
         self.assertEqual(calls, [True, False])
         self.assertEqual(native.starts.count('lane-1'), 3)
 
+    def test_agent_closed_lane_reopens_on_advance_and_recover(self):
+        native = self.start(('a', 'b', 'c', 'd'))
+        # 1. lane-1 自己把工位卡误置为 done 后交接 -> advance 核验时间线后自动重开并继续领取 c。
+        scope1 = self.finish(native, 1, 'a')
+        self.lane(native, 1)['status'] = 'done'
+        native.data['timelines'] = {'lane-1': [status_event('done', actor_type='agent', actor_id='agent')]}
+        res1 = self.advance(native, scope1)
+        self.assertEqual(res1['action'], 'dispatch')
+        self.assertEqual(self.lane(native, 1)['status'], 'in_progress')
+        self.assertEqual(self.lane(native, 1)['metadata']['dailyLane']['currentCandidateId'], 'intercom:c')
+
+        # 2. lane-1 再次把工位卡误置 done 且运行退出后 -> recover 核验时间线后自动重开并重派 d。
+        for value in native.data['runs']:
+            if value['issue_id'] == 'lane-1':
+                value['status'] = 'completed'
+        conclude(self.lane(native, 1), 'c', 'excluded')
+        self.lane(native, 1)['status'] = 'done'
+        native.data['timelines']['lane-1'].append(
+            status_event('done', actor_type='agent', actor_id='agent', created_at='2026-10-23T10:30:00Z'))
+        rec = dispatch.advance(native, dispatch.Journal(self.root / 'journal.json'),
+                               {**SCOPE, 'current_issue': 'lane-1', 'current_run': None}, recovering=True)
+        self.assertEqual(rec['action'], 'dispatch')
+        self.assertEqual(self.lane(native, 1)['status'], 'in_progress')
+        self.assertEqual(self.lane(native, 1)['metadata']['dailyLane']['currentCandidateId'], 'intercom:d')
+
+    def test_member_closed_or_unverified_timeline_lane_stays_stopped(self):
+        cases = [
+            ('member_latest', [status_event('done', actor_type='agent', actor_id='agent', created_at='2026-10-23T09:00:00Z'),
+                               status_event('in_progress', actor_type='member', actor_id='winches', created_at='2026-10-23T09:30:00Z', from_status='done'),
+                               status_event('done', actor_type='member', actor_id='winches', created_at='2026-10-23T10:00:00Z')]),
+            ('other_agent', [status_event('done', actor_type='agent', actor_id='other-agent')]),
+            ('empty_timeline', []),
+        ]
+        prev_root = self.root
+        try:
+            for label, events in cases:
+                with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                    self.root = Path(tmp)
+                    native = self.start(('a', 'b', 'c'))
+                    scope = self.finish(native, 1, 'a')
+                    self.lane(native, 1)['status'] = 'done'
+                    native.data['timelines'] = {'lane-1': events}
+                    res = self.advance(native, scope)
+                    self.assertEqual(res['action'], 'attention')
+                    self.assertEqual(self.lane(native, 1)['status'], 'done')
+                    self.assertEqual(native.starts.count('lane-1'), 1)
+
+            # timeline CLI 查询失败同样 fail-closed。
+            with tempfile.TemporaryDirectory() as tmp:
+                self.root = Path(tmp)
+                native = self.start(('a', 'b', 'c'))
+                scope = self.finish(native, 1, 'a')
+                self.lane(native, 1)['status'] = 'done'
+                with patch.object(native, 'timeline', side_effect=dispatch.Error('timeline unavailable')):
+                    res = self.advance(native, scope)
+                self.assertEqual(res['action'], 'attention')
+                self.assertEqual(self.lane(native, 1)['status'], 'done')
+        finally:
+            self.root = prev_root
+
+    def test_agent_closed_scan_reopens_on_advance_while_member_closed_stays_stopped(self):
+        native = self.start(('a', 'b'))
+        s1 = self.finish(native, 1, 'a')
+        self.advance(native, s1)
+        s2 = self.finish(native, 2, 'b')
+        native.data['issues'][0]['status'] = 'done'
+        native.data['timelines'] = {'scan': [status_event('done', actor_type='agent', actor_id='agent')]}
+        res = self.advance(native, s2)
+        self.assertEqual(res['action'], 'finalize_round')
+        self.assertEqual(native.issue('scan')['status'], 'in_progress')
+
+        # 真人关闭 scan 时即使触发 advance 也保持停止。
+        native.data['issues'][0]['status'] = 'done'
+        native.data['timelines']['scan'].append(
+            status_event('done', actor_type='member', actor_id='winches', created_at='2026-10-23T11:00:00Z'))
+        with self.assertRaises(dispatch.Error):
+            self.advance(native)
+        self.assertEqual(native.issue('scan')['status'], 'done')
 
 
 class ReleaseRepairTests(unittest.TestCase):
@@ -938,6 +1081,25 @@ class ReleaseRepairTests(unittest.TestCase):
         old['metadata']['dailyBatch']['state'] = 'completed'
         result = dispatch.release_repair(native, journal, **kwargs)
         self.assertEqual((result['action'], native.starts), ('released', ['scan']))
+
+    def test_agent_closed_waiting_round_reopens_in_release_repair_while_member_closed_stays_skipped(self):
+        data = lane_snapshot(['a'])
+        scan, lanes = data['issues'][0], data['issues'][1:3]
+        lane_freeze(scan, ['a'], complete=True)
+        conclude(lanes[0], 'a', 'confirmed')
+        scan['status'] = 'done'
+        data['timelines'] = {'scan': [status_event('done', actor_type='member', actor_id='winches')]}
+        native = FakeNative(data)
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        kwargs = dict(agent_id='agent', runtime_id='runtime', project_id='project')
+        idle = dispatch.release_repair(native, dispatch.Journal(Path(temp.name) / 'release1.json'), **kwargs)
+        self.assertEqual((idle['action'], scan['status'], native.starts), ('idle', 'done', []))
+
+        data['timelines']['scan'].append(
+            status_event('done', actor_type='agent', actor_id='agent', created_at='2026-10-23T11:00:00Z'))
+        released = dispatch.release_repair(native, dispatch.Journal(Path(temp.name) / 'release2.json'), **kwargs)
+        self.assertEqual((released['action'], scan['status'], native.starts), ('released', 'in_progress', ['scan']))
 
 
 class NativeTests(unittest.TestCase):
@@ -973,6 +1135,16 @@ class NativeTests(unittest.TestCase):
                           {'issues': [], 'offset': 0, 'total': 1, 'has_more': False}]):
             with self.assertRaises(dispatch.Error):
                 native.snapshot()
+
+    def test_timeline_calls_issue_timeline_and_requires_list_response(self):
+        native = dispatch.Native(['multica'], 'project', 'agent')
+        events = [status_event('done')]
+        with patch.object(native, 'call', return_value=events) as call:
+            self.assertEqual(native.timeline('lane-1'), events)
+        self.assertEqual(call.call_args.args[0], ['issue', 'timeline', 'lane-1'])
+        with patch.object(native, 'call', return_value={'unexpected': True}):
+            with self.assertRaises(dispatch.Error):
+                native.timeline('lane-1')
 
 
 if __name__ == '__main__':
