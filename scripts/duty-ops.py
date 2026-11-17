@@ -123,6 +123,14 @@ def file_lock(path, timeout=60):
             os.close(fd)
 
 
+def validate_id(value, name="ID"):
+    if not isinstance(value, str) or not value or any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        raise OpsError(f"{name} 无效")
+    if any(token in value for token in ("/", "\\", "..")):
+        raise OpsError(f"{name} 无效")
+    return value
+
+
 def json_from_file(path):
     try:
         value = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -130,20 +138,6 @@ def json_from_file(path):
         raise OpsError("JSON 文件不可读") from error
     if not isinstance(value, dict):
         raise OpsError("JSON 根节点必须是对象")
-    return value
-
-
-def metadata(issue, key):
-    value = (issue.get("metadata") or {}).get(key)
-    if value is None:
-        return {}
-    if isinstance(value, str):
-        try:
-            value = json.loads(value)
-        except json.JSONDecodeError as error:
-            raise OpsError(f"{key} metadata 无法解析") from error
-    if not isinstance(value, dict):
-        raise OpsError(f"{key} metadata 必须是对象")
     return value
 
 
@@ -265,7 +259,7 @@ valid_failure_skip = queue.valid_failure_skip
 source_tokens = queue.source_tokens
 
 
-def valid_investigation(value, entry, lane_id=None):
+def valid_investigation(value, entry, lane_id=None, *, agent_record=True):
     required = {"schemaVersion": 1, "protocolVersion": 3, "mode": "investigate",
                 "roundId": entry["_roundId"], "sourceScanId": entry["_roundId"],
                 "candidateId": entry["candidateId"], "feedbackDate": entry["feedbackDate"]}
@@ -278,7 +272,9 @@ def valid_investigation(value, entry, lane_id=None):
     if not queue.valid_source_anchor(value, entry):
         return False
     conclusion = value.get("conclusion")
-    if conclusion not in CONCLUSIONS or type(value.get("fencingToken")) is not int or value["fencingToken"] < 1:
+    if conclusion not in CONCLUSIONS:
+        return False
+    if agent_record and (type(value.get("fencingToken")) is not int or value["fencingToken"] < 1):
         return False
     if conclusion == "skipped_failure":
         return valid_failure_skip(value)
@@ -294,7 +290,7 @@ def valid_investigation(value, entry, lane_id=None):
         return False
     if conclusion == "suspended_external" and not valid_external_block(value):
         return False
-    if conclusion in {"duplicate", "excluded", "cs_followed"} and not isinstance(value.get("conclusionRef"), str):
+    if conclusion in {"duplicate", "excluded", "cs_followed"} and not queue.text(value.get("conclusionRef")):
         return False
     return True
 
@@ -429,14 +425,13 @@ class Slack:
             args += ["--blocks-file", str(blocks_file)]
         if thread_ts:
             args += ["--thread-ts", thread_ts]
-        preview = self.call(args, dry_run=dry_run)
+        preview = self.call(args, dry_run=True, ambiguous=False)
         if dry_run:
-            digest = recursive_value(preview, ("preview_digest", "previewDigest"))
-            if not digest:
-                raise OpsError("Slack dry-run 未返回 preview_digest")
-            args += ["--confirm-preview", str(digest)]
-            return self.call(args)
-        return preview
+            return preview
+        digest = recursive_value(preview, ("preview_digest", "previewDigest"))
+        if not digest:
+            raise OpsError("Slack dry-run 未返回 preview_digest")
+        return self.call([*args, "--confirm-preview", str(digest)], dry_run=False, ambiguous=True)
 
     def upload(self, channel, file_path, digest, message, thread_ts=None):
         args = ["files_upload", "--channel", channel]
@@ -449,14 +444,13 @@ class Slack:
         args = ["edit", "--url", url, "--text-file", str(text_file)]
         if blocks_file:
             args += ["--blocks-file", str(blocks_file)]
-        preview = self.call(args, dry_run=dry_run)
+        preview = self.call(args, dry_run=True, ambiguous=False)
         if dry_run:
-            digest = recursive_value(preview, ("preview_digest", "previewDigest"))
-            if not digest:
-                raise OpsError("Slack edit dry-run 未返回 preview_digest")
-            args += ["--confirm-preview", str(digest)]
-            return self.call(args)
-        return preview
+            return preview
+        digest = recursive_value(preview, ("preview_digest", "previewDigest"))
+        if not digest:
+            raise OpsError("Slack edit dry-run 未返回 preview_digest")
+        return self.call([*args, "--confirm-preview", str(digest)], dry_run=False, ambiguous=True)
 
     def get(self, url):
         return self.call(["get", "--url", url], ambiguous=False)
@@ -467,7 +461,7 @@ class Slack:
     def history(self, channel, limit=200, thread_ts=None):
         args = ["history", "--channel", channel, "--limit", str(limit)]
         if thread_ts:
-            args += ["--include-thread-replies", "--thread-ts", thread_ts]
+            args += ["--include-thread-replies"]
         return self.call(args, ambiguous=False)
 
 
@@ -476,13 +470,14 @@ class Ops:
         self.native, self.slack = native, slack
         self.agent_id, self.runtime_id = agent_id, runtime_id
         self.now = now or utc_now()
+        if runtime_id is not None:
+            validate_id(runtime_id, "runtimeId")
         self.state_dir = Path(state_dir or (Path.home() / ".config/moego/daily-bug-duty/ops" / (runtime_id or "unknown")))
         self.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(self.state_dir, 0o700)
 
     def _validate_id(self, value, name="ID"):
-        if not isinstance(value, str) or not value or "/" in value or ".." in value:
-            raise OpsError(f"{name} 无效")
+        validate_id(value, name)
         path = self._state_path_unchecked(value)
         try:
             inside = path.resolve().is_relative_to(self.state_dir.resolve())
@@ -495,9 +490,12 @@ class Ops:
     def _state_path_unchecked(self, round_id):
         return self.state_dir / f"{round_id}.json"
 
-    def _lock_for_round(self, round_id):
+    def _lock_for_round(self, round_id, *, issue_id=None):
         # 每轮独立短锁只保护本轮状态；dispatch 无 round 时使用 issue 专属持久锁。
         if round_id is None:
+            if issue_id:
+                self._validate_id(issue_id, "issueId")
+                return self.state_dir / "locks" / f"dispatch-{issue_id}.lock"
             return self.state_dir / "locks" / "dispatch.lock"
         self._validate_id(round_id, "roundId")
         return self.state_dir / "locks" / f"{round_id}.lock"
@@ -626,7 +624,8 @@ class Ops:
             daily_scan["collected"] = collected
         else:
             daily_scan.pop("collected", None)
-        self.native.metadata_set(scan_id, "dailyScan", daily_scan)
+        if daily_scan != scan_data:
+            self.native.metadata_set(scan_id, "dailyScan", daily_scan)
         return expected, daily_scan
 
     def _ensure_lanes(self, scan, project_id, agent_id, target_date):
@@ -652,12 +651,14 @@ class Ops:
             return int(match.group(1)) if match else None
         for number in range(1, 3):
             existing_lane = next((row for row in lanes if lane_number(row) == number), None)
+            expected_lane = {"schemaVersion": 1, "protocolVersion": 3,
+                             "mode": "investigate_lane", "roundId": scan["id"], "lane": number, "laneCount": 2}
             if existing_lane:
-                if not metadata(existing_lane, "dailyLane"):
-                    lane_data = {"schemaVersion": 1, "protocolVersion": 3,
-                                 "mode": "investigate_lane", "roundId": scan["id"], "lane": number, "laneCount": 2}
-                    self.native.metadata_set(existing_lane["id"], "dailyLane", lane_data)
-                    existing_lane.setdefault("metadata", {})["dailyLane"] = lane_data
+                current_lane = metadata(existing_lane, "dailyLane")
+                if any(current_lane.get(key) != val for key, val in expected_lane.items()):
+                    merged_lane = {**current_lane, **expected_lane}
+                    self.native.metadata_set(existing_lane["id"], "dailyLane", merged_lane)
+                    existing_lane.setdefault("metadata", {})["dailyLane"] = merged_lane
                 continue
             if not hasattr(self.native, "create"):
                 raise OpsError("无法创建调查工位")
@@ -668,10 +669,8 @@ class Ops:
             if not lane_id:
                 raise OpsError("创建调查工位未返回 issue id")
             lane = self.native.issue(lane_id)
-            lane_data = {"schemaVersion": 1, "protocolVersion": 3,
-                         "mode": "investigate_lane", "roundId": scan["id"], "lane": number, "laneCount": 2}
-            self.native.metadata_set(lane_id, "dailyLane", lane_data)
-            lane.setdefault("metadata", {})["dailyLane"] = lane_data
+            self.native.metadata_set(lane_id, "dailyLane", expected_lane)
+            lane.setdefault("metadata", {})["dailyLane"] = expected_lane
             lanes.append(lane)
         return lanes
 
@@ -698,6 +697,9 @@ class Ops:
                     raise OpsError("已登记的 manifest 与输入冲突")
                 if existing.get("readbackHashVerified") is not True:
                     raise OpsError("已登记的 manifest 未通过附件回读")
+                self._ensure_scan_metadata(scan_id, target_date, scheduler_revision, runtime_id, sources, collected)
+                if project_id:
+                    self._ensure_lanes(self.native.issue(scan_id), project_id, agent_id, target_date)
                 return {"status": "reused", "manifest": existing}
             self._ensure_scan_metadata(scan_id, target_date, scheduler_revision, runtime_id, sources, collected)
             if project_id:
@@ -728,12 +730,18 @@ class Ops:
             self.save_state(scan_id, state)
             return {"status": "created", "manifest": raw}
 
-    def update_scan_status(self, scan_id, *, source=None, source_url=None, collected=None, counts=None,
-                           coverage_complete=None):
+    def update_scan_status(self, scan_id, *, target_date=None, source=None, source_url=None, source_status=None,
+                           collected=None, counts=None, coverage_complete=None):
         """阶段 1 采集事实统一走写后回读，避免其它 CLI 绕过 v3 状态边界。"""
         with file_lock(self._lock_for_round(scan_id)):
             scan = self.native.issue(scan_id)
             data = metadata(scan, "dailyScan")
+            if target_date is not None:
+                if not DATE_RE.fullmatch(target_date):
+                    raise OpsError("targetDate 必须是 YYYY-MM-DD")
+                if data.get("targetDate") and data.get("targetDate") != target_date:
+                    raise OpsError("dailyScan.targetDate 已冻结，不能覆盖")
+                data["targetDate"] = target_date
             if source:
                 if source not in SOURCE_NAMES:
                     raise OpsError("source 无效")
@@ -741,8 +749,14 @@ class Ops:
                 source_data = dict(sources.get(source) or {})
                 if source_url:
                     source_data["sourceUrl"] = source_url
+                if source_status is not None:
+                    if source_status not in {"success", "failed", "error"}:
+                        raise OpsError("sourceStatus 无效")
+                    source_data["status"] = source_status
                 sources[source] = source_data
                 data["sources"] = sources
+            elif source_status is not None or source_url is not None:
+                raise OpsError("设置 source-url 或 source-status 时必须指定 --source")
             if collected is not None:
                 if not isinstance(collected, dict) or any(type(value) is not int or value < 0 for value in collected.values()):
                     raise OpsError("collected 必须是非负整数对象")
@@ -778,22 +792,37 @@ class Ops:
 
     def _records(self, scan_id, manifest, lanes, agent_id):
         entries = {item["candidateId"]: {**item, "_roundId": scan_id} for item in manifest["candidates"]}
-        values = []
+        by_candidate = {}
+        utc_min = dt.datetime.min.replace(tzinfo=dt.timezone.utc)
         for issue in lanes + [self.native.issue(scan_id)]:
             comments = issue.get("_comments") if "_comments" in issue else self._fresh_comments(issue["id"])
-            for comment in comments:
+            for index, comment in enumerate(comments):
                 item = comment_json(comment, INVESTIGATION_MARKER)
-                if (item is not None and
-                        ((comment.get("author_type") == "agent" and (not agent_id or comment.get("author_id") == agent_id))
-                         or (comment.get("author_type") == "member" and item.get("manualOverride") is True))):
-                    entry = entries.get(item.get("candidateId"))
-                    if entry and valid_investigation(item, entry):
-                        values.append(item)
+                if item is None:
+                    continue
+                is_agent = comment.get("author_type") == "agent" and (not agent_id or comment.get("author_id") == agent_id)
+                is_override = comment.get("author_type") == "member" and item.get("manualOverride") is True
+                if not (is_agent or is_override):
+                    continue
+                entry = entries.get(item.get("candidateId"))
+                if not entry or not valid_investigation(item, entry, agent_record=is_agent):
+                    continue
+                try:
+                    created_ts = parse_time(comment.get("created_at"))
+                except (OpsError, queue.QueueError):
+                    created_ts = utc_min
+                group = by_candidate.setdefault(item["candidateId"], {"manual": [], "agent": []})
+                group["manual" if is_override else "agent"].append((created_ts, index, item))
         selected = {}
-        for item in values:
-            old = selected.get(item["candidateId"])
-            if old is None or item["fencingToken"] >= old["fencingToken"]:
-                selected[item["candidateId"]] = item
+        for cid, group in by_candidate.items():
+            if group["manual"]:
+                manual = max(group["manual"], key=lambda pair: (pair[0], pair[1]))
+                latest_agent = max(group["agent"], key=lambda pair: (pair[0], pair[1]), default=None)
+                if latest_agent is None or manual[0] >= latest_agent[0]:
+                    selected[cid] = manual[2]
+                    continue
+            if group["agent"]:
+                selected[cid] = max(group["agent"], key=lambda pair: (pair[2].get("fencingToken"), pair[0], pair[1]))[2]
         attachments, intercom = set(), set()
         for item in selected.values():
             if item.get("conclusion") == "skipped_failure":
@@ -879,7 +908,8 @@ class Ops:
             token = int(state.get("nextFencingToken", 0)) + 1
             state["nextFencingToken"] = token
             run_history = self.native.runs(lane_id)
-            active = [run for run in run_history if run.get("status") in IN_FLIGHT]
+            active = sorted((run for run in run_history if run.get("status") in IN_FLIGHT),
+                            key=lambda run: run.get("status") != "running")
             lease = {"candidateId": available["candidateId"], "laneIssueId": lane_id, "workerId": worker_id,
                      "fencingToken": token, "issuedAt": iso(self.now),
                      "expiresAt": iso(self.now + dt.timedelta(seconds=ttl_seconds)),
@@ -909,7 +939,7 @@ class Ops:
             raise OpsError("调查报告上传前缺少 evidenceRevision")
         if conclusion == "confirmed" and not valid_confirmation(record):
             raise OpsError("调查报告上传前 confirmed 证据不完整")
-        if conclusion in {"duplicate", "excluded", "cs_followed"} and not isinstance(record.get("conclusionRef"), str):
+        if conclusion in {"duplicate", "excluded", "cs_followed"} and not queue.text(record.get("conclusionRef")):
             raise OpsError("调查报告上传前缺少 conclusionRef")
         if conclusion == "suspended_external" and not valid_external_block(record):
             raise OpsError("调查报告上传前 external blocker 不完整")
@@ -1020,25 +1050,18 @@ class Ops:
             if len(found) > 1:
                 raise OpsError("intent 对应多个新运行")
             if len(found) == 1:
-                existing["runId"] = found[0].get("id")
-                if found[0].get("status") not in IN_FLIGHT:
-                    intents.pop(key, None)
-                else:
-                    self._save_intent_state(round_id, intent_path, state)
-                    return {"status": "reconciled", "runId": found[0].get("id"), "issueId": issue_id}
-            if prepare and existing.get("prepared") is not True:
-                prepare()
-                existing["prepared"] = True
-            if not found:
+                run_id = found[0].get("id")
+                intents.pop(key, None)
+                self._save_intent_state(round_id, intent_path, state)
+                if found[0].get("status") in IN_FLIGHT:
+                    return {"status": "reconciled", "runId": run_id, "issueId": issue_id}
+                # 原 run 已完成，继续走下方新 intent。
+            else:
+                if prepare and existing.get("prepared") is not True:
+                    prepare()
+                    existing["prepared"] = True
                 existing["beforeRunIds"] = sorted(before)
                 self._save_intent_state(round_id, intent_path, state)
-            elif not intents.get(key):
-                self._save_intent_state(round_id, intent_path, state)
-                # 原 run 已完成，继续走下方新 intent。
-                existing = None
-            else:
-                self._save_intent_state(round_id, intent_path, state)
-                return {"status": "pending", "issueId": issue_id, "beforeRunIds": existing["beforeRunIds"]}
         intent = {"beforeRunIds": sorted(before), "createdAt": iso(self.now), "allowSuccessor": allow_successor}
         intents[key] = intent
         self._save_intent_state(round_id, intent_path, state)
@@ -1054,9 +1077,10 @@ class Ops:
         found = [run for run in after if run.get("id") not in intent["beforeRunIds"]]
         if len(found) != 1:
             raise AmbiguousWrite("rerun 结果不明，保留 beforeRunIds")
-        intent["runId"] = found[0].get("id")
+        run_id = found[0].get("id")
+        intents.pop(key, None)
         self._save_intent_state(round_id, intent_path, state)
-        return {"status": "started", "runId": intent["runId"], "issueId": issue_id}
+        return {"status": "started", "runId": run_id, "issueId": issue_id}
 
     def _save_intent_state(self, round_id, intent_path, state):
         if intent_path:
@@ -1069,7 +1093,11 @@ class Ops:
         agent_id = agent_id or self.agent_id or issue.get("assignee_id")
         if not agent_id:
             raise OpsError("缺少 agent-id 且任务没有 assignee_id")
-        with file_lock(self._lock_for_round(round_id)):
+        if round_id is None:
+            round_id = (metadata(issue, "dailyBug").get("sourceScanId")
+                        or metadata(issue, "dailyLane").get("roundId")
+                        or (issue.get("id") if metadata(issue, "dailyExecution").get("protocolVersion") == 3 else None))
+        with file_lock(self._lock_for_round(round_id, issue_id=issue_id)):
             result = self._launch_if_idle_unlocked(issue_id, agent_id, round_id=round_id)
             return result
 
@@ -1105,9 +1133,9 @@ class Ops:
 
     def _round_terminal(self, round_id):
         scan = self.native.issue(round_id)
-        if scan.get("status") in {"in_review", "done", "cancelled", "canceled"}:
+        if scan.get("status") in TERMINAL_ISSUE:
             return True
-        if hasattr(self.native, "list_project"):
+        if hasattr(self.native, "list_project") and scan.get("project_id"):
             bugs = [row for row in self.native.list_project(scan.get("project_id"))
                     if row.get("parent_issue_id") == round_id and metadata(row, "dailyBug").get("protocolVersion") == 3]
             if bugs:
@@ -1115,7 +1143,7 @@ class Ops:
                     if not self._has_receipt(bug["id"], round_id):
                         return False
                 return True
-        return False
+        return scan.get("status") == "in_review"
 
     def _has_receipt(self, bug_id, round_id):
         bug = self.native.issue(bug_id)
@@ -1149,14 +1177,17 @@ class Ops:
     def release_global_repair_slot(self, round_id, *, agent_id=None):
         agent_id = agent_id or self.agent_id
         path = self.state_dir / "global-repair-slot.json"
+        next_id = None
+        next_agent = None
         with file_lock(self._repair_lock()):
             if not path.exists():
                 return {"status": "idle", "roundId": round_id}
-            slot = json.loads(path.read_text(encoding="utf-8"))
+            try:
+                slot = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as error:
+                raise OpsError("全局修复槽状态损坏") from error
             if (slot.get("holder") or {}).get("roundId") != round_id:
                 return {"status": "not_holder", "roundId": round_id}
-            next_id = None
-            next_agent = None
             remaining = []
             for candidate in slot.get("waitQueue", []):
                 candidate_issue = self.native.issue(candidate)
@@ -1171,10 +1202,11 @@ class Ops:
             slot["holder"] = {"roundId": next_id, "acquiredAt": iso(self.now)} if next_id else None
             slot["waitQueue"] = remaining
             atomic_write(path, slot)
-            wake = None
-            if next_id:
+        wake = None
+        if next_id:
+            with file_lock(self._lock_for_round(next_id)):
                 wake = self._launch_if_idle_unlocked(next_id, next_agent, round_id=next_id)
-            return {"status": "released", "roundId": round_id, "wokenRoundId": next_id, "wake": wake}
+        return {"status": "released", "roundId": round_id, "wokenRoundId": next_id, "wake": wake}
 
     def _ledger(self, ledger_issue, item):
         # 台账写入可能返回 AmbiguousWrite；先回读同一 payload，避免重复登记。
@@ -1183,7 +1215,16 @@ class Ops:
                 return comment.get("id") or "comment-readback"
         return self._post_and_verify(ledger_issue, BOARD_MARKER, item)
 
-    def _slack_recover(self, channel, identifier, url, version=None, *, thread_ts=None, created_at=None,
+    @staticmethod
+    def _slack_message_time(msg_ts):
+        if msg_ts is None or msg_ts == "":
+            return None
+        raw = str(msg_ts).strip()
+        if re.fullmatch(r"\d+(?:\.\d+)?", raw):
+            return dt.datetime.fromtimestamp(float(raw), tz=dt.timezone.utc)
+        return parse_time(raw)
+
+    def _slack_recover(self, channel, identifier, url, version=None, *, prs=None, thread_ts=None, created_at=None,
                        require_identifier=True):
         if not self.slack:
             return None
@@ -1191,25 +1232,27 @@ class Ops:
         messages = data.get("messages", data) if isinstance(data, dict) else data
         since = parse_time(created_at) if created_at else None
         pattern = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(str(identifier))}(?![A-Za-z0-9_])")
+        prs = list(prs or [])
         for message in messages if isinstance(messages, list) else []:
             if not isinstance(message, dict):
                 continue
             author = message.get("author") or message.get("user") or {}
-            if author.get("bot") is False or message.get("bot") is False:
+            if author.get("is_bot") is False or author.get("bot") is False or message.get("bot") is False:
                 continue
             msg_ts = message.get("ts") or message.get("timestamp") or message.get("created_at")
             if since and msg_ts:
                 try:
-                    if parse_time(str(msg_ts)) < since:
+                    parsed_ts = self._slack_message_time(msg_ts)
+                    if parsed_ts is not None and parsed_ts < since - dt.timedelta(seconds=2):
                         continue
-                except (OpsError, queue.QueueError):
+                except (OpsError, queue.QueueError, ValueError, OSError):
                     pass
             if thread_ts and message.get("thread_ts") not in (None, thread_ts) and message.get("ts") != thread_ts:
                 continue
-            text = " ".join(str(message.get(key, "")) for key in ("text", "text_raw", "message", "fallback"))
+            text = " ".join(str(message.get(key, "")) for key in ("text", "text_rendered", "text_raw", "message", "fallback"))
             if require_identifier and not pattern.search(text):
                 continue
-            if url and url not in text:
+            if (url or prs) and not ((url and url in text) or any(pr in text for pr in prs)):
                 continue
             if version is not None and not re.search(rf"(?<!\d){re.escape(str(version))}(?!\d)", text):
                 continue
@@ -1217,9 +1260,9 @@ class Ops:
         return None
 
     def _send_slack_once(self, channel, text_file, blocks_file, thread_ts, identifier, url, version=None,
-                         dry_run=False, recover_needed=False, created_at=None, require_identifier=True):
+                         *, prs=None, dry_run=False, recover_needed=False, created_at=None, require_identifier=True):
         if recover_needed:
-            recovered = self._slack_recover(channel, identifier, url, version, thread_ts=thread_ts,
+            recovered = self._slack_recover(channel, identifier, url, version, prs=prs, thread_ts=thread_ts,
                                             created_at=created_at, require_identifier=require_identifier)
             if recovered:
                 return recovered, True
@@ -1258,13 +1301,35 @@ class Ops:
                 raise OpsError("仍有候选没有终态调查结论")
             if scan_data.get("coverageComplete") is not True:
                 raise OpsError("三源 coverageComplete 未完成")
+            evidence_hash = sha256_file(evidence_file)
+            confirmed = sum(item.get("conclusion") == "confirmed" for item in records.values())
+            inv_cs_followed = sum(item.get("conclusion") == "cs_followed" for item in records.values())
+            skipped_failure = sum(item.get("conclusion") == "skipped_failure" for item in records.values())
+            counts = {**(scan_data.get("counts") or {}), **(scheduler_counts or {})}
+            cs_followed_total = int(counts.get("csFollowed", 0)) + inv_cs_followed
+            suspected_count = len(manifest["candidates"]) - inv_cs_followed
+            scan_ident = scan.get("identifier") or scan_id
+            collected_map = scan_data.get("collected") or {}
+            collected_total = sum(collected_map.values()) if isinstance(collected_map, dict) else 0
+            default_summary = (
+                f"{scan_ident} 每日 Bug 值守｜{scan_data.get('targetDate')} 反馈扫描完成\n"
+                f"采集 {collected_total} 条｜疑似候选 {suspected_count} 个｜确认可修 {confirmed} 个。"
+            )
+            if dry_run:
+                if not self.slack or not channel:
+                    raise OpsError("finish-scan 需要 Slack adapter 和 channel")
+                if text_file:
+                    preview = self.slack.send(channel, text_file, None, None, dry_run=True)
+                else:
+                    with self._write_content(default_summary) as generated:
+                        preview = self.slack.send(channel, generated, None, None, dry_run=True)
+                return {"status": "dry_run", "roundId": scan_id, "slackPreview": preview}
             if hasattr(self.native, "list_project") and scan.get("project_id"):
                 for candidate in manifest["candidates"]:
                     record = records.get(candidate["candidateId"])
                     if record and record.get("conclusion") == "confirmed":
                         self._create_bug_if_needed(scan_id, candidate, project_id=scan.get("project_id"))
             state = self.state(scan_id)
-            evidence_hash = sha256_file(evidence_file)
             intent = state.setdefault("intents", {}).setdefault("finish", {"evidenceSha256": evidence_hash})
             if intent.get("evidenceSha256") != evidence_hash:
                 raise OpsError("finish intent 与当前证据冲突")
@@ -1274,17 +1339,20 @@ class Ops:
                 intent["evidenceAttachmentId"] = self._readback_attachment(result, evidence_file, evidence_hash)
                 intent["evidenceReadbackVerified"] = True
                 self.save_state(scan_id, state)
-            confirmed = sum(item.get("conclusion") == "confirmed" for item in records.values())
-            counts = {**(scan_data.get("counts") or {}), **(scheduler_counts or {})}
-            outcomes = {"confirmed": confirmed, "duplicate": sum(item.get("conclusion") == "duplicate" for item in records.values()),
+            outcomes = {"confirmed": confirmed,
+                        "duplicate": sum(item.get("conclusion") == "duplicate" for item in records.values()),
                         "verificationBlocked": sum(item.get("conclusion") == "suspended_external" for item in records.values()),
                         "excludedAfterInvestigation": sum(item.get("conclusion") == "excluded" for item in records.values())}
+            if inv_cs_followed:
+                outcomes["csFollowed"] = inv_cs_followed
+            if skipped_failure:
+                outcomes["skippedFailure"] = skipped_failure
             scan_date = dt.datetime.fromisoformat((scan.get("created_at") or iso(self.now)).replace("Z", "+00:00")).astimezone(ZoneInfo("Asia/Shanghai")).date().isoformat()
-            ledger_item = {"issue": scan.get("identifier") or scan_id, "kind": "scan", "feedbackDate": scan_data.get("targetDate"),
+            ledger_item = {"issue": scan_ident, "kind": "scan", "feedbackDate": scan_data.get("targetDate"),
                            "scanDate": scan_date, "collected": scan_data.get("collected"),
-                           "coverageComplete": True, "suspected": len(manifest["candidates"]),
+                           "coverageComplete": True, "suspected": suspected_count,
                            "nonBug": int(counts.get("nonBug", 0)), "productDecision": int(counts.get("productDecision", 0)),
-                           "csFollowed": int(counts.get("csFollowed", 0)), "outcomes": outcomes}
+                           "csFollowed": cs_followed_total, "outcomes": outcomes}
             ledger_id = intent.get("ledgerCommentId")
             if not ledger_id:
                 ledger_id = self._ledger(ledger_issue, ledger_item)
@@ -1292,30 +1360,29 @@ class Ops:
                 intent["ledgerReadbackVerified"] = True
                 self.save_state(scan_id, state)
             if not intent.get("slackPermalink"):
-                if not self.slack:
-                    raise OpsError("finish-scan 需要 Slack adapter")
+                if not self.slack or not channel:
+                    raise OpsError("finish-scan 需要 Slack adapter 和 channel")
+                recover_needed = bool(intent.get("slackSendAttempted") and not intent.get("slackPermalink"))
                 intent["slackSendAttempted"] = True
                 intent["createdAt"] = intent.get("createdAt") or iso(self.now)
                 self.save_state(scan_id, state)
                 if text_file:
-                    link, _ = self._send_slack_once(channel, text_file, None, None, scan.get("identifier") or scan_id,
-                                                     None, dry_run=dry_run,
-                                                     recover_needed=bool(intent.get("slackSendAttempted") and not intent.get("slackPermalink")),
-                                                     created_at=intent.get("createdAt"), require_identifier=False)
+                    link, _ = self._send_slack_once(channel, text_file, None, None, scan_ident,
+                                                     None, dry_run=False, recover_needed=recover_needed,
+                                                     created_at=intent.get("createdAt"), require_identifier=True)
                 else:
-                    with self._write_content(f"每日 Bug 值守｜{scan_data.get('targetDate')} 反馈扫描完成\n\n新增可修 {confirmed} 个。") as generated:
-                        link, _ = self._send_slack_once(channel, generated, None, None, scan.get("identifier") or scan_id,
-                                                         None, dry_run=dry_run,
-                                                         recover_needed=bool(intent.get("slackSendAttempted") and not intent.get("slackPermalink")),
-                                                         created_at=intent.get("createdAt"), require_identifier=False)
+                    with self._write_content(default_summary) as generated:
+                        link, _ = self._send_slack_once(channel, generated, None, None, scan_ident,
+                                                         None, dry_run=False, recover_needed=recover_needed,
+                                                         created_at=intent.get("createdAt"), require_identifier=True)
                 intent["slackPermalink"] = link
                 intent["slackReadbackVerified"] = True
                 self.save_state(scan_id, state)
             finish = {"protocolVersion": 3, "roundId": scan_id, "collected": scan_data.get("collected") or {},
-                      "nonBug": counts.get("nonBug", 0), "productDecision": counts.get("productDecision", 0),
-                      "csFollowed": counts.get("csFollowed", 0),
+                      "nonBug": int(counts.get("nonBug", 0)), "productDecision": int(counts.get("productDecision", 0)),
+                      "csFollowed": cs_followed_total,
                       "counts": {"nonBug": int(counts.get("nonBug", 0)), "productDecision": int(counts.get("productDecision", 0)),
-                                 "csFollowed": int(counts.get("csFollowed", 0))}, "suspected": len(manifest["candidates"]),
+                                 "csFollowed": cs_followed_total}, "suspected": suspected_count,
                       "outcomes": outcomes, "evidenceIndex": {"attachmentId": intent["evidenceAttachmentId"],
                       "sha256": evidence_hash, "readbackVerified": True},
                       "ledger": {"issue": ledger_issue, "commentId": ledger_id, "readbackVerified": True},
@@ -1422,16 +1489,45 @@ class Ops:
         return checked.get("thread_ts") or checked.get("ts") if isinstance(checked, dict) else None
 
     @staticmethod
-    def _attachment_in_replies(value, digest, upload_result=None):
-        upload_id = recursive_value(upload_result, ("file_id", "fileId", "id")) if upload_result else None
-        def walk(item):
+    def _uploaded_file_ids(upload_result):
+        ids = set()
+        if not isinstance(upload_result, dict):
+            return ids
+        for key in ("uploaded", "files"):
+            items = upload_result.get(key)
+            if isinstance(items, list):
+                for entry in items:
+                    if isinstance(entry, dict):
+                        for id_key in ("id", "file_id", "fileId"):
+                            if isinstance(entry.get(id_key), str) and entry[id_key]:
+                                ids.add(entry[id_key])
+        if isinstance(upload_result.get("file"), dict):
+            for id_key in ("id", "file_id", "fileId"):
+                if isinstance(upload_result["file"].get(id_key), str) and upload_result["file"][id_key]:
+                    ids.add(upload_result["file"][id_key])
+        for id_key in ("file_id", "fileId"):
+            if isinstance(upload_result.get(id_key), str) and upload_result[id_key]:
+                ids.add(upload_result[id_key])
+        if not ids and "channel" not in upload_result and isinstance(upload_result.get("id"), str) and upload_result["id"]:
+            ids.add(upload_result["id"])
+        return ids
+
+    @classmethod
+    def _attachment_in_replies(cls, value, digest, upload_result=None):
+        upload_ids = cls._uploaded_file_ids(upload_result)
+        def walk(item, in_file_list=False):
             if isinstance(item, dict):
-                if ((upload_id and any(item.get(key) == upload_id for key in ("id", "file_id", "fileId")))
-                        or item.get("sha256") == digest or item.get("sha256Hash") == digest):
+                if item.get("sha256") == digest or item.get("sha256Hash") == digest:
                     return True
-                return any(walk(child) for child in item.values())
+                if upload_ids and (in_file_list or any(k in item for k in ("file_id", "fileId", "url_private", "mimetype"))):
+                    if any(item.get(key) in upload_ids for key in ("id", "file_id", "fileId")):
+                        return True
+                for list_key in ("files", "attachments"):
+                    if isinstance(item.get(list_key), list) and walk(item[list_key], True):
+                        return True
+                return any(walk(child, False) for key, child in item.items() if key not in ("files", "attachments", "channel"))
             if isinstance(item, list):
-                return any(walk(child) for child in item)
+                return any(walk(child, in_file_list) for child in item)
             return False
         return walk(value)
 
@@ -1466,11 +1562,14 @@ class Ops:
             # delivery/blocked 是同一条按时间排序的状态机；新版本必须使用新 intent key。
             history = self._receipt_history(bug_id, scan, agent_id)
             latest = history[-1] if history else None
-            latest_blocked = next((row for row in reversed(history) if row[2] == "blocked"), None)
+            currently_blocked = bool(latest and latest[2] == "blocked")
             max_version = max((row[3].get("deliveryVersion", 0) for row in history if row[2] == "delivered"), default=0)
+            block_version = sum(1 for row in history if row[2] == "blocked") + 1
             if blocked and latest and latest[2] == "blocked":
                 old = latest[3]
                 if old.get("blocker") == blocker and old.get("ledger", {}).get("issue") == ledger_issue:
+                    if dry_run:
+                        return {"status": "dry_run", "issueId": bug_id, "roundId": scan_id, "idempotent": True}
                     self.native.status(bug_id, "blocked")
                     self._rerun_parent_if_needed_unlocked(scan_id, agent_id)
                     return old
@@ -1479,11 +1578,29 @@ class Ops:
                 if (old.get("prs") == prs and old.get("prHeads") == pr_heads
                         and old.get("report", {}).get("sha256") == report_hash
                         and old.get("ledger", {}).get("issue") == ledger_issue):
+                    if dry_run:
+                        return {"status": "dry_run", "issueId": bug_id, "roundId": scan_id, "idempotent": True}
                     self.native.status(bug_id, "in_review")
                     self._rerun_parent_if_needed_unlocked(scan_id, agent_id)
                     return old
             version = max_version + 1
-            key = f"blocked:{bug_id}" if blocked else f"delivery:{bug_id}:v{version}"
+            if dry_run:
+                if not self.slack or not channel or not text_file:
+                    raise OpsError("交付需要 Slack channel 和 text-file")
+                edit_preview = None
+                if not blocked and (currently_blocked or edit_blocked_url):
+                    blocked_url = edit_blocked_url or latest[3].get("slack", {}).get("permalink")
+                    if blocked_url:
+                        edit_text = edit_blocked_text_file or text_file
+                        edit_blocks = None if edit_blocked_text_file else blocks_file
+                        try:
+                            edit_preview = self.slack.edit(blocked_url, edit_text, edit_blocks, dry_run=True)
+                        except TypeError:
+                            edit_preview = self.slack.edit(blocked_url, edit_text, edit_blocks)
+                send_preview = self.slack.send(channel, text_file, blocks_file, thread_ts, dry_run=True)
+                return {"status": "dry_run", "issueId": bug_id, "roundId": scan_id, "version": version,
+                        "slackPreview": send_preview, **({"editPreview": edit_preview} if edit_preview else {})}
+            key = f"blocked:{bug_id}:v{block_version}" if blocked else f"delivery:{bug_id}:v{version}"
             state = self.state(scan_id)
             intent = state.setdefault("intents", {}).setdefault(key, {"issueId": bug_id, "roundId": scan_id,
                                                                         "version": version})
@@ -1494,16 +1611,17 @@ class Ops:
                 intent["reportSha256"] = report_hash
                 intent["reportReadbackVerified"] = True
                 self.save_state(scan_id, state)
-            if not blocked and (latest_blocked or edit_blocked_url):
-                blocked_url = edit_blocked_url or latest_blocked[3].get("slack", {}).get("permalink")
+            if not blocked and (currently_blocked or edit_blocked_url):
+                blocked_url = edit_blocked_url or latest[3].get("slack", {}).get("permalink")
                 if blocked_url and not intent.get("blockedEdited"):
                     edit_text = edit_blocked_text_file or text_file
+                    edit_blocks = None if edit_blocked_text_file else blocks_file
                     if not self.slack or not edit_text or not hasattr(self.slack, "edit"):
                         raise OpsError("受阻恢复缺少 Slack 编辑材料")
                     try:
-                        self.slack.edit(blocked_url, edit_text, blocks_file, dry_run=dry_run)
+                        self.slack.edit(blocked_url, edit_text, edit_blocks, dry_run=False)
                     except TypeError:
-                        self.slack.edit(blocked_url, edit_text, blocks_file)
+                        self.slack.edit(blocked_url, edit_text, edit_blocks)
                     checked = self.slack.get(blocked_url)
                     if isinstance(checked, dict) and checked.get("ok") is False:
                         raise OpsError("原受阻 Slack 顶层消息编辑回读失败")
@@ -1512,26 +1630,28 @@ class Ops:
             if not intent.get("slackPermalink"):
                 if not self.slack or not channel or not text_file:
                     raise OpsError("交付需要 Slack channel 和 text-file")
+                recover_needed = bool(intent.get("slackSendAttempted") and not intent.get("slackPermalink"))
                 intent["slackSendAttempted"] = True
                 intent["createdAt"] = intent.get("createdAt") or iso(self.now)
                 self.save_state(scan_id, state)
                 link, _ = self._send_slack_once(
                     channel, text_file, blocks_file, thread_ts, bug.get("identifier") or bug_id,
-                    daily_bug.get("sourceUrl"), version if not blocked else None, dry_run=dry_run,
-                    recover_needed=bool(intent.get("slackSendAttempted") and not intent.get("slackPermalink")),
+                    daily_bug.get("sourceUrl"), version if (not blocked and version > 1) else None,
+                    prs=prs, dry_run=False, recover_needed=recover_needed,
                     created_at=intent.get("createdAt"))
                 intent["slackPermalink"] = link
                 intent["slackReadbackVerified"] = True
                 # 先保存 permalink，再上传附件；附件失败时恢复不会重发顶层消息。
                 self.save_state(scan_id, state)
-                if not blocked and report_file and not intent.get("slackAttachmentReadbackVerified"):
-                    upload_thread_ts = self._upload_thread_ts(link, thread_ts, self.slack)
-                    upload = self.slack.upload(channel, report_file, intent["reportSha256"], "完整 HTML 交付报告",
-                                               thread_ts=upload_thread_ts)
-                    replies = self.slack.replies(link)
-                    if not self._attachment_in_replies(replies, intent["reportSha256"], upload):
-                        raise OpsError("Slack 交付附件未在 thread 回读")
-                    intent["slackAttachmentReadbackVerified"] = True
+            if not blocked and report_file and not intent.get("slackAttachmentReadbackVerified"):
+                link = intent["slackPermalink"]
+                upload_thread_ts = self._upload_thread_ts(link, thread_ts, self.slack)
+                upload = self.slack.upload(channel, report_file, intent["reportSha256"], "完整 HTML 交付报告",
+                                           thread_ts=upload_thread_ts)
+                replies = self.slack.replies(link)
+                if not self._attachment_in_replies(replies, intent["reportSha256"], upload):
+                    raise OpsError("Slack 交付附件未在 thread 回读")
+                intent["slackAttachmentReadbackVerified"] = True
                 self.save_state(scan_id, state)
             if blocked:
                 ledger_item = {"issue": bug.get("identifier") or bug_id, "kind": "bug", "state": "blocked",
@@ -1588,14 +1708,27 @@ class Ops:
         if manifest:
             _, records = self._records(round_id, manifest, lanes, agent_id)
         missing_receipts = [bug.get("id") for bug in bugs if bug.get("status") in {"in_review", "done", "cancelled", "canceled"}
-                            and not self._bug_receipt(bug["id"], DELIVERY_MARKER) and not self._bug_receipt(bug["id"], BLOCKED_MARKER)]
+                            and not self._bug_receipt(bug["id"], DELIVERY_MARKER, agent_id=agent_id)
+                            and not self._bug_receipt(bug["id"], BLOCKED_MARKER, agent_id=agent_id)]
+        runs_by_issue = {row["id"]: self.native.runs(row["id"]) for row in [scan, *lanes, *bugs]}
+        child_active = any(any(run.get("issue_id") == row.get("id") and run.get("status") in IN_FLIGHT
+                               for run in runs_by_issue[row["id"]])
+                           for row in [*lanes, *bugs])
         needs = []
         for row in [scan, *lanes, *bugs]:
+            if row.get("id") == round_id and child_active:
+                continue
             if row.get("status") == "in_progress" and not any(run.get("issue_id") == row.get("id") and run.get("status") in IN_FLIGHT
-                                                               for run in self.native.runs(row["id"])):
+                                                               for run in runs_by_issue[row["id"]]):
                 needs.append(row["id"])
         slot_path = self.state_dir / "global-repair-slot.json"
-        slot = json.loads(slot_path.read_text(encoding="utf-8")) if slot_path.exists() else {"holder": None, "waitQueue": []}
+        if slot_path.exists():
+            try:
+                slot = json.loads(slot_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as error:
+                raise OpsError("全局修复槽状态损坏") from error
+        else:
+            slot = {"holder": None, "waitQueue": []}
         return {"status": "ok", "roundId": round_id, "manifest": manifest,
                 "candidateCount": len(manifest["candidates"]) if manifest else None, "concluded": len(records),
                 "lanes": [{"id": row["id"], "metadata": metadata(row, "dailyLane")} for row in lanes],
@@ -1628,6 +1761,17 @@ class Ops:
                     except OpsError as error:
                         report.setdefault("errors", []).append({"issueId": issue_id, "reason": str(error)})
             return report
+
+
+def _parse_bool_arg(value):
+    if value is None or isinstance(value, bool):
+        return value
+    norm = str(value).strip().lower()
+    if norm in {"true", "1", "yes"}:
+        return True
+    if norm in {"false", "0", "no"}:
+        return False
+    raise OpsError("--coverage-complete 必须是 true 或 false")
 
 
 def build_parser():
@@ -1665,6 +1809,7 @@ def build_parser():
     parser.add_argument("--target-status")
     parser.add_argument("--source")
     parser.add_argument("--source-url")
+    parser.add_argument("--source-status")
     parser.add_argument("--blocker-file")
     parser.add_argument("--prs", nargs="*", default=[])
     parser.add_argument("--pr-heads", nargs="*", default=[])
@@ -1674,17 +1819,22 @@ def build_parser():
     parser.add_argument("--edit-blocked-text-file")
     parser.add_argument("--collected")
     parser.add_argument("--counts")
-    parser.add_argument("--coverage-complete", action="store_true", default=None)
+    parser.add_argument("--coverage-complete", nargs="?", const="true", default=None)
     return parser
 
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
     runtime_id = args.runtime_id or "unknown"
-    native = Native(args.server_url, args.workspace_id)
-    slack = Slack(args.slack_cli) if args.command in {"finish-scan", "deliver-bug", "block-bug"} else None
-    ops = Ops(native, slack, args.state_dir, agent_id=args.agent_id, runtime_id=runtime_id)
     try:
+        for value, name in ((args.round_id, "roundId"), (args.runtime_id, "runtimeId"),
+                            (args.issue_id, "issueId"), (args.bug_id, "bugId"),
+                            (args.lane_issue_id, "laneIssueId")):
+            if value:
+                validate_id(value, name)
+        native = Native(args.server_url, args.workspace_id)
+        slack = Slack(args.slack_cli) if args.command in {"finish-scan", "deliver-bug", "block-bug"} else None
+        ops = Ops(native, slack, args.state_dir, agent_id=args.agent_id, runtime_id=runtime_id)
         for value, name in ((args.round_id, "roundId"), (args.runtime_id, "runtimeId"),
                             (args.issue_id, "issueId"), (args.bug_id, "bugId"),
                             (args.lane_issue_id, "laneIssueId")):
@@ -1712,10 +1862,11 @@ def main(argv=None):
             result = ops.release_global_repair_slot(args.round_id, agent_id=args.agent_id)
         elif args.command == "update-scan-status":
             result = ops.update_scan_status(
-                args.round_id, source=args.source, source_url=args.source_url,
+                args.round_id, target_date=args.target_date, source=args.source, source_url=args.source_url,
+                source_status=args.source_status,
                 collected=json.loads(args.collected) if args.collected else None,
                 counts=json.loads(args.counts) if args.counts else None,
-                coverage_complete=args.coverage_complete)
+                coverage_complete=_parse_bool_arg(args.coverage_complete))
         elif args.command == "finish-scan":
             result = ops.finish_scan(args.round_id, args.evidence_file, ledger_issue=args.ledger_issue,
                                      channel=args.channel, text_file=args.text_file, target_status=args.target_status,
@@ -1723,13 +1874,14 @@ def main(argv=None):
         elif args.command == "deliver-bug":
             result = ops.deliver_bug(bug_id=args.bug_id, report_file=args.report_file, ledger_issue=args.ledger_issue,
                                      channel=args.channel, text_file=args.text_file, blocks_file=args.blocks_file,
-                                     thread_ts=args.thread_ts, prs=args.prs, pr_heads=args.pr_heads, dry_run=args.dry_run,
+                                     thread_ts=args.thread_ts, prs=args.prs, pr_heads=args.pr_heads,
+                                     agent_id=args.agent_id, dry_run=args.dry_run,
                                      edit_blocked_url=args.edit_blocked_url, edit_blocked_text_file=args.edit_blocked_text_file)
         elif args.command == "block-bug":
             blocker = json_from_file(args.blocker_file) if args.blocker_file else None
             result = ops.block_bug(bug_id=args.bug_id, blocker=blocker, ledger_issue=args.ledger_issue,
                                    channel=args.channel, text_file=args.text_file, blocks_file=args.blocks_file,
-                                   thread_ts=args.thread_ts, dry_run=args.dry_run)
+                                   thread_ts=args.thread_ts, agent_id=args.agent_id, dry_run=args.dry_run)
         elif args.command == "inspect-round":
             result = ops.inspect_round(args.round_id, project_id=args.project_id, agent_id=args.agent_id)
         else:

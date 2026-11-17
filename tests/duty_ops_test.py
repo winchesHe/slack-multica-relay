@@ -445,13 +445,14 @@ class OpsTests(unittest.TestCase):
             self.ops.deliver_bug(bug_id=bug["id"], report_file=report, ledger_issue="GRM-664",
                                  channel="C0C14HSSP2T", text_file=text,
                                  prs=["https://github.com/o/r/pull/3"], pr_heads=["c" * 40])
+        self.assertEqual(self.slack.history_calls, 0)
         sent = len(self.slack.messages)
         self.slack.ambiguous_send = False
         self.ops.deliver_bug(bug_id=bug["id"], report_file=report, ledger_issue="GRM-664",
                              channel="C0C14HSSP2T", text_file=text,
                              prs=["https://github.com/o/r/pull/3"], pr_heads=["c" * 40])
         self.assertEqual(len(self.slack.messages), sent)
-        self.assertGreaterEqual(self.slack.history_calls, 2)
+        self.assertEqual(self.slack.history_calls, 1)
     def test_attachment_id_prefers_nested_attachment_over_comment_id(self):
         self.assertEqual(ops_module.attachment_id({"id": "comment-uuid", "attachments": [{"id": "att-uuid"}]}), "att-uuid")
         self.assertIsNone(ops_module.attachment_id({"id": "comment-uuid", "content": "comment"}))
@@ -608,6 +609,338 @@ class OpsTests(unittest.TestCase):
             "--source-url", "https://intercom.example/1", "--collected", '{"intercom": 1}']), 0)
         self.assertTrue(any("--workspace-id" in call and "workspace" in call for call in calls))
         self.assertEqual(scan["metadata"]["dailyScan"]["collected"], {"intercom": 1})
+
+    def test_real_slack_cli_contract_and_replies_file_matching(self):
+        slack_log = Path(self.temp.name) / "slack_calls.json"
+        slack_log.write_text("[]", encoding="utf-8")
+        slack_script = Path(self.temp.name) / "fake_slack_cli.py"
+        slack_script.write_text("""import json, sys
+from pathlib import Path
+argv = sys.argv[1:]
+log_path = Path(__import__("os").environ["FAKE_SLACK_LOG"])
+calls = json.loads(log_path.read_text(encoding="utf-8"))
+calls.append(argv)
+log_path.write_text(json.dumps(calls), encoding="utf-8")
+cmd = argv[0]
+out = Path(argv[argv.index("--output") + 1])
+if cmd in {"send", "edit"} and "--dry-run" in argv:
+    payload = {"status": "preview", "preview_digest": f"digest-{cmd}"}
+elif cmd == "send":
+    assert "--confirm-preview" in argv and argv[argv.index("--confirm-preview") + 1] == "digest-send"
+    assert argv[argv.index("--as") + 1] == "bot"
+    payload = {"status": "sent", "permalink": "https://moego.slack.com/archives/C0/p1761177600123456"}
+elif cmd == "edit":
+    assert "--confirm-preview" in argv and argv[argv.index("--confirm-preview") + 1] == "digest-edit"
+    payload = {"status": "edited", "operation_status": "succeeded"}
+elif cmd == "files_upload":
+    payload = {"operation_status": "succeeded", "channel": {"id": "C0"}, "uploaded": [{"id": "F0UPLOAD123", "name": "report.html"}]}
+elif cmd == "get":
+    payload = {"ok": True, "permalink": argv[argv.index("--url") + 1], "ts": "1761177600.123456"}
+elif cmd == "replies":
+    payload = {"messages": [{"id": "C0", "ts": "1761177600.123456", "files": [{"id": "F0UPLOAD123"}]}]}
+elif cmd == "history":
+    assert "--thread-ts" not in argv
+    payload = {"messages": [{"ts": "1761177600.123456", "thread_ts": "1761177600.123456", "author": {"is_bot": True},
+                             "text_rendered": "GRM-1 https://github.com/o/r/pull/1", "permalink": "https://moego.slack.com/archives/C0/p1761177600123456"}]}
+else:
+    raise AssertionError(f"unexpected cmd: {cmd}")
+out.write_text(json.dumps(payload), encoding="utf-8")
+""", encoding="utf-8")
+        env = {"FAKE_SLACK_LOG": str(slack_log)}
+        import os
+        old_env = os.environ.get("FAKE_SLACK_LOG")
+        os.environ.update(env)
+        self.addCleanup(lambda: os.environ.pop("FAKE_SLACK_LOG", None) if old_env is None else os.environ.__setitem__("FAKE_SLACK_LOG", old_env))
+        slack = ops_module.Slack(str(slack_script))
+        text = Path(self.temp.name) / "real-slack.txt"
+        text.write_text("GRM-1 delivered", encoding="utf-8")
+        report = Path(self.temp.name) / "real-slack.html"
+        report.write_text("<html>report</html>", encoding="utf-8")
+        preview = slack.send("C0", text, dry_run=True)
+        self.assertEqual(preview["preview_digest"], "digest-send")
+        sent = slack.send("C0", text, dry_run=False)
+        upload = slack.upload("C0", report, ops_module.sha256_file(report), "HTML 报告", thread_ts="1761177600.123456")
+        replies = slack.replies(sent["permalink"])
+        self.assertTrue(ops_module.Ops._attachment_in_replies(replies, "wrong-sha", upload))
+        # channel.id 与消息 id 同为 C0 时，不能误把消息当作附件。
+        self.assertFalse(ops_module.Ops._attachment_in_replies(
+            {"messages": [{"id": "C0", "ts": "1761177600.123456"}]}, "wrong-sha", {"channel": {"id": "C0"}}))
+        slack.history("C0", thread_ts="1761177600.123456")
+        slack.edit(sent["permalink"], text, dry_run=False)
+        recorded = json.loads(slack_log.read_text(encoding="utf-8"))
+        history_argv = next(call for call in recorded if call[0] == "history")
+        self.assertIn("--include-thread-replies", history_argv)
+        self.assertNotIn("--thread-ts", history_argv)
+
+    def test_slack_recover_filters_human_old_epoch_and_matches_compact_pr_in_text_rendered(self):
+        created = "2026-10-23T00:00:00Z"
+        epoch = str(int(dt.datetime(2026, 10, 23, 0, 0, 0, tzinfo=dt.timezone.utc).timestamp())) + ".123456"
+        early_epoch = str(int(dt.datetime(2026, 10, 22, 23, 59, 40, tzinfo=dt.timezone.utc).timestamp())) + ".000000"
+        class CustomSlack(FakeSlack):
+            def history(self, channel, limit=200, thread_ts=None):
+                self.history_calls += 1
+                return {"messages": [
+                    {"ts": early_epoch, "author": {"is_bot": True}, "text_rendered": "GRM-99 https://github.com/o/r/pull/9", "permalink": "https://slack.example/too-old"},
+                    {"ts": epoch, "author": {"is_bot": False}, "text_rendered": "GRM-99 https://github.com/o/r/pull/9", "permalink": "https://slack.example/human"},
+                    {"ts": epoch, "author": {"is_bot": True}, "text_rendered": "每日 Bug 值守｜GRM-99｜第 2 版 https://github.com/o/r/pull/9", "permalink": "https://slack.example/bot-v2"},
+                ]}
+        ops = ops_module.Ops(self.native, CustomSlack(), self.temp.name, now=self.now, agent_id="agent", runtime_id=self.ops.runtime_id)
+        found = ops._slack_recover("C0", "GRM-99", "https://app.intercom.com/conversation/missing",
+                                    version=2, prs=["https://github.com/o/r/pull/9"], created_at=created)
+        self.assertEqual(found, "https://slack.example/bot-v2")
+
+    def test_upload_failure_retry_resumes_without_resending_slack_message(self):
+        bug = issue("bug-upload-retry", identifier="GRM-801", parent_issue_id="scan", status="in_progress", metadata={"dailyBug": {
+            "schemaVersion": 1, "protocolVersion": 3, "mode": "bug", "batchId": "scan",
+            "sourceScanId": "scan", "candidateId": "intercom:1", "investigationRef": "scan:intercom:1",
+            "feedbackDate": "2026-10-21", "source": "intercom", "sourceUrl": "https://app.intercom.com/conversation/1"}})
+        self.native.issues[bug["id"]] = bug
+        self.native.comments_by_issue[bug["id"]] = bug["_comments"]
+        self.native.runs_by_issue[bug["id"]] = []
+        class FlakyUploadSlack(FakeSlack):
+            def __init__(self):
+                super().__init__()
+                self.fail_upload = True
+            def upload(self, channel, file_path, digest, message, thread_ts=None):
+                if self.fail_upload:
+                    raise ops_module.AmbiguousWrite("upload timeout")
+                return super().upload(channel, file_path, digest, message, thread_ts=thread_ts)
+        slack = FlakyUploadSlack()
+        ops = ops_module.Ops(self.native, slack, self.temp.name, now=self.now, agent_id="agent", runtime_id=self.ops.runtime_id)
+        report = Path(self.temp.name) / "up-retry.html"; report.write_text("<html>up</html>", encoding="utf-8")
+        text = Path(self.temp.name) / "up-retry.txt"; text.write_text("GRM-801 delivered", encoding="utf-8")
+        with self.assertRaises(ops_module.AmbiguousWrite):
+            ops.deliver_bug(bug_id=bug["id"], report_file=report, ledger_issue="GRM-664", channel="C0",
+                            text_file=text, prs=["https://github.com/o/r/pull/11"], pr_heads=["a" * 40])
+        self.assertEqual(len(slack.messages), 1)
+        slack.fail_upload = False
+        receipt = ops.deliver_bug(bug_id=bug["id"], report_file=report, ledger_issue="GRM-664", channel="C0",
+                                  text_file=text, prs=["https://github.com/o/r/pull/11"], pr_heads=["a" * 40])
+        self.assertEqual(len(slack.messages), 1)
+        self.assertEqual(len(slack.uploads), 1)
+        self.assertTrue(receipt["slack"]["readbackVerified"])
+
+    def test_sequential_rerun_parent_if_needed_clears_completed_intent(self):
+        self.native.runs_by_issue["scan"] = [{"id": "r0", "issue_id": "scan", "agent_id": "agent", "status": "running"}]
+        first = self.ops.rerun_parent_if_needed("scan")
+        self.assertEqual(first["status"], "started")
+        self.assertEqual(self.ops.state("scan").get("intents"), {})
+        for run in self.native.runs_by_issue["scan"]:
+            if run["id"] == first["runId"]:
+                run["status"] = "completed"
+        second = self.ops.rerun_parent_if_needed("scan")
+        self.assertEqual(second["status"], "started")
+        self.assertNotEqual(first["runId"], second["runId"])
+
+    def test_deliver_bug_v2_after_blocked_recovery_does_not_reedit_blocked_root_and_respects_edit_text(self):
+        bug = issue("bug-v2-edit", identifier="GRM-802", parent_issue_id="scan", status="in_progress", metadata={"dailyBug": {
+            "schemaVersion": 1, "protocolVersion": 3, "mode": "bug", "batchId": "scan",
+            "sourceScanId": "scan", "candidateId": "intercom:1", "investigationRef": "scan:intercom:1",
+            "feedbackDate": "2026-10-21", "source": "intercom", "sourceUrl": "https://app.intercom.com/conversation/1"}})
+        self.native.issues[bug["id"]] = bug
+        self.native.comments_by_issue[bug["id"]] = bug["_comments"]
+        self.native.runs_by_issue[bug["id"]] = []
+        text = Path(self.temp.name) / "v2e.txt"; text.write_text("GRM-802 blocked")
+        blocks = Path(self.temp.name) / "v2e.blocks.json"; blocks.write_text("[]")
+        edit_text = Path(self.temp.name) / "v2e-edit.txt"; edit_text.write_text("GRM-802 edited root")
+        self.ops.block_bug(bug_id=bug["id"], blocker={"kind": "permission", "reason": "x", "resumeCondition": "y"},
+                           ledger_issue="GRM-664", channel="C0", text_file=text)
+        self.assertEqual(len(self.slack.edit_calls), 0)
+        report = Path(self.temp.name) / "v2e.html"; report.write_text("v1")
+        text.write_text("GRM-802 delivered v1")
+        self.ops.deliver_bug(bug_id=bug["id"], report_file=report, ledger_issue="GRM-664", channel="C0",
+                             text_file=text, blocks_file=blocks, edit_blocked_text_file=edit_text,
+                             prs=["https://github.com/o/r/pull/1"], pr_heads=["a" * 40])
+        self.assertEqual(len(self.slack.edit_calls), 1)
+        self.assertEqual(self.slack.edit_calls[0][1], edit_text)
+        self.assertIsNone(self.slack.edit_calls[0][2])
+        report.write_text("v2"); text.write_text("GRM-802 delivered v2")
+        self.ops.deliver_bug(bug_id=bug["id"], report_file=report, ledger_issue="GRM-664", channel="C0",
+                             text_file=text, thread_ts="123.456",
+                             prs=["https://github.com/o/r/pull/2"], pr_heads=["b" * 40])
+        self.assertEqual(len(self.slack.edit_calls), 1)
+
+    def test_manual_override_timestamp_precedence_matches_progress(self):
+        entry = manifest()["candidates"][0]
+        def make_rec(conclusion, token, ref_key, ref_val, manual=False):
+            rec = {"schemaVersion": 1, "protocolVersion": 3, "mode": "investigate", "roundId": "scan",
+                   "sourceScanId": "scan", "candidateId": "intercom:1", "feedbackDate": "2026-10-21",
+                   "sourceUrl": entry["sourceUrl"], "laneIssueId": "lane-1", "conclusion": conclusion,
+                   "evidenceRevision": "intercom:1",
+                   "report": {"attachmentId": f"att-{token}", "sha256": "x", "readbackVerified": True},
+                   ref_key: ref_val}
+            if manual:
+                rec["manualOverride"] = True
+            else:
+                rec["fencingToken"] = token
+            return rec
+        agent_early = make_rec("confirmed", 99, "verification", {
+            "fixable": True, "productDecisionRequired": False,
+            "expectedBehaviorRef": "e", "observedDeviationRef": "o", "dedupeRef": "d"})
+        manual_mid = make_rec("duplicate", 1, "conclusionRef", "JIRA-2", manual=True)
+        self.native.comments_by_issue["lane-1"].extend([
+            {"id": "c1", "author_type": "agent", "author_id": "agent", "created_at": "2026-10-23T01:00:00Z",
+             "content": ops_module.comment_text(ops_module.INVESTIGATION_MARKER, agent_early, " round=scan candidate=intercom:1")},
+            {"id": "c2", "author_type": "member", "author_id": "member", "created_at": "2026-10-23T02:00:00Z",
+             "content": ops_module.comment_text(ops_module.INVESTIGATION_MARKER, manual_mid, " round=scan candidate=intercom:1")},
+        ])
+        _, records = self.ops._records("scan", self.ops.manifest("scan"), [self.native.issue("lane-1")], "agent")
+        self.assertEqual(records["intercom:1"]["conclusion"], "duplicate")
+        progress_spec = importlib.util.spec_from_file_location("duty_progress_ov", Path(__file__).parents[1] / "scripts" / "duty-progress.py")
+        progress = importlib.util.module_from_spec(progress_spec); progress_spec.loader.exec_module(progress)
+        snap1 = progress.snapshot(self.native.issue("scan"), self.native.list_project("project"), [], self.now, "https://m/")
+        self.assertEqual(snap1["investigation"]["duplicate"], 1)
+        agent_later = make_rec("excluded", 100, "conclusionRef", "not-a-bug")
+        self.native.comments_by_issue["lane-1"].append(
+            {"id": "c3", "author_type": "agent", "author_id": "agent", "created_at": "2026-10-23T03:00:00Z",
+             "content": ops_module.comment_text(ops_module.INVESTIGATION_MARKER, agent_later, " round=scan candidate=intercom:1")})
+        _, records2 = self.ops._records("scan", self.ops.manifest("scan"), [self.native.issue("lane-1")], "agent")
+        self.assertEqual(records2["intercom:1"]["conclusion"], "excluded")
+        snap2 = progress.snapshot(self.native.issue("scan"), self.native.list_project("project"), [], self.now, "https://m/")
+        self.assertEqual(snap2["investigation"]["excluded"], 1)
+
+    def test_round_terminal_requires_all_v3_bugs_receipted_even_when_in_review(self):
+        self.native.issues["scan"]["status"] = "in_review"
+        bug = issue("bug-unreceipted", parent_issue_id="scan", status="in_review", metadata={"dailyBug": {
+            "schemaVersion": 1, "protocolVersion": 3, "mode": "bug", "batchId": "scan",
+            "sourceScanId": "scan", "candidateId": "intercom:1", "investigationRef": "scan:intercom:1",
+            "feedbackDate": "2026-10-21", "source": "intercom", "sourceUrl": "https://app.intercom.com/conversation/1"}})
+        self.native.issues["bug-unreceipted"] = bug
+        self.native.comments_by_issue["bug-unreceipted"] = bug["_comments"]
+        self.assertFalse(self.ops._round_terminal("scan"))
+        self.assertEqual(self.ops.acquire_global_repair_slot("scan")["status"], "acquired")
+        self.native.issues["scan-next"] = issue("scan-next", status="in_progress")
+        self.native.comments_by_issue["scan-next"] = self.native.issues["scan-next"]["_comments"]
+        self.native.runs_by_issue["scan-next"] = []
+        self.assertEqual(self.ops.acquire_global_repair_slot("scan-next")["status"], "busy")
+        report = Path(self.temp.name) / "term.html"; report.write_text("ok")
+        text = Path(self.temp.name) / "term.txt"; text.write_text("ok")
+        self.ops.deliver_bug(bug_id="bug-unreceipted", report_file=report, ledger_issue="GRM-664", channel="C0",
+                             text_file=text, prs=["https://github.com/o/r/pull/1"], pr_heads=["a" * 40])
+        self.assertTrue(self.ops._round_terminal("scan"))
+        rel = self.ops.release_global_repair_slot("scan")
+        self.assertEqual(rel["wokenRoundId"], "scan-next")
+
+    def test_dispatch_if_issue_idle_auto_resolves_round_id_and_dry_run_is_non_mutating(self):
+        bug = issue("bug-auto-round", parent_issue_id="scan", status="backlog", assignee_id=None, metadata={"dailyBug": {
+            "schemaVersion": 1, "protocolVersion": 3, "mode": "bug", "batchId": "scan",
+            "sourceScanId": "scan", "candidateId": "intercom:1", "investigationRef": "scan:intercom:1",
+            "feedbackDate": "2026-10-21", "source": "intercom", "sourceUrl": "https://app.intercom.com/conversation/1"}})
+        self.native.issues[bug["id"]] = bug
+        self.native.comments_by_issue[bug["id"]] = bug["_comments"]
+        self.native.runs_by_issue[bug["id"]] = []
+        calls_before = len(self.native.calls)
+        res = self.ops.dispatch_if_issue_idle(bug["id"])
+        self.assertEqual(res["status"], "started")
+        self.assertIn("dispatch:bug-auto-round", {**self.ops.state("scan").get("intents", {}), "dispatch:bug-auto-round": True})
+        report = Path(self.temp.name) / "dry.html"; report.write_text("dry")
+        text = Path(self.temp.name) / "dry.txt"; text.write_text("dry")
+        before_snap = (copy.deepcopy(self.native.issues), len(self.slack.messages), len(self.native.attachments))
+        dry_bug = self.ops.deliver_bug(bug_id=bug["id"], report_file=report, ledger_issue="GRM-664", channel="C0",
+                                     text_file=text, prs=["https://github.com/o/r/pull/1"], pr_heads=["a" * 40], dry_run=True)
+        self.assertEqual(dry_bug["status"], "dry_run")
+        self.assertEqual((self.native.issues, len(self.slack.messages), len(self.native.attachments)), before_snap)
+
+    def test_finish_scan_counts_and_outcomes_parity_with_board_and_dry_run(self):
+        self.manifest_path.write_text(json.dumps(manifest(count=2)), encoding="utf-8")
+        # 新 scan-parity 验证 csFollowed 与各 outcome 对齐 duty-board。
+        scan = issue("scan-p", identifier="GRM-777", created_at="2026-10-22T18:00:00Z")
+        lanes = [issue(f"lp-{n}", parent_issue_id="scan-p", metadata={"dailyLane": {
+            "schemaVersion": 1, "protocolVersion": 3, "mode": "investigate_lane", "roundId": "scan-p", "lane": n, "laneCount": 2}})
+            for n in (1, 2)]
+        for row in [scan, *lanes]:
+            self.native.issues[row["id"]] = row
+            self.native.comments_by_issue[row["id"]] = row["_comments"]
+            self.native.runs_by_issue[row["id"]] = []
+        p_manifest = Path(self.temp.name) / "manifest-p.json"
+        p_manifest.write_text(json.dumps(manifest(scan_id="scan-p", count=2)), encoding="utf-8")
+        self.ops.init_scan_manifest("scan-p", p_manifest, target_date="2026-10-21",
+                                    scheduler_revision="a" * 40, runtime_id=self.ops.runtime_id, agent_id="agent")
+        self.ops.update_scan_status("scan-p", source="canny", source_status="success",
+                                    collected={"canny": 2, "facebook": 0, "intercom": 2},
+                                    counts={"nonBug": 1, "productDecision": 0, "csFollowed": 1},
+                                    coverage_complete=True)
+        c1 = self.ops.claim("scan-p", "lp-1")
+        r1 = Path(self.temp.name) / "p1.html"; r1.write_text("p1")
+        rec1 = Path(self.temp.name) / "p1.json"; rec1.write_text(json.dumps({"conclusion": "cs_followed", "evidenceRevision": "intercom:1", "conclusionRef": "CS-1"}))
+        self.ops.submit_investigation("scan-p", "lp-1", c1["candidateId"], c1["fencingToken"], rec1, r1)
+        c2 = self.ops.claim("scan-p", "lp-2")
+        r2 = Path(self.temp.name) / "p2.html"; r2.write_text("p2")
+        rec2 = Path(self.temp.name) / "p2.json"; rec2.write_text(json.dumps({"conclusion": "duplicate", "evidenceRevision": "intercom:2", "conclusionRef": "PR-2"}))
+        self.ops.submit_investigation("scan-p", "lp-2", c2["candidateId"], c2["fencingToken"], rec2, r2)
+        ev = Path(self.temp.name) / "ev-p.json"; ev.write_text("{}")
+        dry = self.ops.finish_scan("scan-p", ev, ledger_issue="GRM-664", channel="C0", dry_run=True)
+        self.assertEqual(dry["status"], "dry_run")
+        self.assertEqual(len(self.slack.messages), 0)
+        res = self.ops.finish_scan("scan-p", ev, ledger_issue="GRM-664", channel="C0")
+        self.assertEqual(res["csFollowed"], 2)
+        self.assertEqual(res["suspected"], 1)
+        self.assertEqual(res["outcomes"]["duplicate"], 1)
+        self.assertEqual(res["outcomes"]["csFollowed"], 1)
+
+    def test_inspect_round_excludes_scan_when_child_active_and_manifest_reuse_repairs_lane(self):
+        self.native.issues["lane-1"]["metadata"]["dailyLane"] = {"mode": "investigate_lane", "roundId": "scan", "lane": 1}
+        self.ops.init_scan_manifest("scan", self.manifest_path, target_date="2026-10-21",
+                                    scheduler_revision="a" * 40, runtime_id=self.ops.runtime_id,
+                                    project_id="project", agent_id="agent")
+        self.assertEqual(self.native.issue("lane-1")["metadata"]["dailyLane"]["protocolVersion"], 3)
+        self.native.runs_by_issue["scan"] = []
+        self.native.runs_by_issue["lane-1"] = [{"id": "lane-run", "issue_id": "lane-1", "status": "running"}]
+        inspected = self.ops.inspect_round("scan", project_id="project")
+        self.assertNotIn("scan", inspected["needsRecovery"])
+        self.native.runs_by_issue["lane-1"] = []
+        inspected2 = self.ops.inspect_round("scan", project_id="project")
+        self.assertIn("scan", inspected2["needsRecovery"])
+
+    def test_cli_main_validation_and_flags(self):
+        isolated_dir = Path(self.temp.name) / "should_not_create"
+        rc = ops_module.main(["inspect-round", "--workspace-id", "ws", "--runtime-id", "../escape",
+                              "--round-id", "scan", "--state-dir", str(isolated_dir)])
+        self.assertEqual(rc, 1)
+        self.assertFalse(isolated_dir.exists())
+        recorded = []
+        class StubOps:
+            def __init__(self, native, slack, state_dir, agent_id=None, runtime_id=None):
+                self.agent_id = agent_id
+            def _validate_id(self, value, name="ID"):
+                return ops_module.validate_id(value, name)
+            def update_scan_status(self, *args, **kwargs):
+                recorded.append(("update_scan_status", args, kwargs)); return {"ok": True}
+            def deliver_bug(self, **kwargs):
+                recorded.append(("deliver_bug", kwargs)); return {"ok": True}
+            def recover(self, *args, **kwargs):
+                recorded.append(("recover", args, kwargs)); return {"ok": True}
+        orig_ops = ops_module.Ops
+        orig_native = ops_module.Native
+        orig_slack = ops_module.Slack
+        ops_module.Ops = StubOps
+        ops_module.Native = lambda s, w: ("native", s, w)
+        ops_module.Slack = lambda cli: ("slack", cli)
+        self.addCleanup(lambda: (setattr(ops_module, "Ops", orig_ops),
+                                 setattr(ops_module, "Native", orig_native),
+                                 setattr(ops_module, "Slack", orig_slack)))
+        self.assertEqual(ops_module.main([
+            "update-scan-status", "--workspace-id", "ws", "--round-id", "scan", "--target-date", "2026-10-21",
+            "--source", "canny", "--source-status", "success", "--coverage-complete", "false"]), 0)
+        self.assertEqual(ops_module.main([
+            "update-scan-status", "--workspace-id", "ws", "--round-id", "scan", "--coverage-complete"]), 0)
+        self.assertEqual(ops_module.main([
+            "deliver-bug", "--workspace-id", "ws", "--bug-id", "b1", "--report-file", "r.html",
+            "--channel", "C0", "--text-file", "t.txt", "--edit-blocked-url", "https://slack/1",
+            "--edit-blocked-text-file", "e.txt", "--thread-ts", "123.456", "--agent-id", "ag", "--dry-run"]), 0)
+        self.assertEqual(ops_module.main([
+            "recover", "--workspace-id", "ws", "--round-id", "scan", "--project-id", "p1", "--agent-id", "ag", "--apply"]), 0)
+        self.assertFalse(recorded[0][2]["coverage_complete"])
+        self.assertEqual(recorded[0][2]["target_date"], "2026-10-21")
+        self.assertEqual(recorded[0][2]["source_status"], "success")
+        self.assertTrue(recorded[1][2]["coverage_complete"])
+        self.assertEqual(recorded[2][1]["edit_blocked_url"], "https://slack/1")
+        self.assertEqual(recorded[2][1]["edit_blocked_text_file"], "e.txt")
+        self.assertEqual(recorded[2][1]["thread_ts"], "123.456")
+        self.assertTrue(recorded[2][1]["dry_run"])
+        self.assertEqual(recorded[2][1]["agent_id"], "ag")
+        self.assertTrue(recorded[3][2]["apply"])
+
 
 if __name__ == "__main__":
     unittest.main()
