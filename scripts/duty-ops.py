@@ -406,7 +406,13 @@ class Native:
         return self.call(args, ambiguous=True)
 
     def attachment_download(self, attachment, directory):
-        return self.call(["attachment", "download", attachment, "-o", str(directory)])
+        # multica attachment download 不支持 --output json 且输出纯文本状态。
+        command = self.base + ["attachment", "download", attachment, "-o", str(directory)]
+        try:
+            self.runner(command, check=True, capture_output=True, text=True, timeout=self.timeout)
+        except (OSError, subprocess.SubprocessError) as error:
+            raise OpsError("Multica 附件下载失败") from error
+        return {"ok": True}
 
     def assign(self, issue_id, agent_id):
         return self.call(["issue", "assign", issue_id, "--to-id", agent_id, "--no-start"], ambiguous=True)

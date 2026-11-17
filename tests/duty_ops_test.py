@@ -613,6 +613,16 @@ class OpsTests(unittest.TestCase):
             "--source-url", "https://intercom.example/1", "--collected", '{"intercom": 1}']), 0)
         self.assertTrue(any("--workspace-id" in call and "workspace" in call for call in calls))
         self.assertEqual(scan["metadata"]["dailyScan"]["collected"], {"intercom": 1})
+        dl_calls = []
+        def dl_runner(command, **kwargs):
+            dl_calls.append(command)
+            class Result:
+                stdout = "Downloaded file to ./evidence.html\n"
+            return Result()
+        dl_native = original_native("https://multica.example", "workspace", runner=dl_runner)
+        self.assertEqual(dl_native.attachment_download("att-123", self.temp.name), {"ok": True})
+        self.assertNotIn("--output", dl_calls[0])
+        self.assertIn("-o", dl_calls[0])
 
     def test_real_slack_cli_contract_and_replies_file_matching(self):
         slack_log = Path(self.temp.name) / "slack_calls.json"
