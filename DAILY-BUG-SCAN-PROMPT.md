@@ -1,34 +1,119 @@
-<!-- 交付频道 ID 使用占位符，线上同步前替换为已核对的真实值。 -->
+<!-- GRM 每日 Bug 值守扫描入口：Closed Loop B / v3 -->
 
 mode=scan
-executionPolicy=lane_investigation_serial_repair_v2
+protocolVersion=3
+policy=lightweight_agent_driven_v3
 schedulerRevision=<调度器提交 SHA>
-investigationFailurePolicy=retry_2_then_skip_v1
 
-# 每日三源采集、全轮调查与修复
+# 每日三源采集与 v3 Agent 驱动闭环
 
-每天北京时间 02:00，由「GRM 每日 Bug 值守」按当前 instructions 执行固定顺序：三源采集 → 本轮清单完整登记 → 两张调查工位卡并行把本轮候选全部留档 → 汇总结论 → 固定修复队列（全局一次一项） → 逐条验收交付。只保留现有值守与看板两个 Agent；由同一个值守 Agent 完成调查和修复，不派生或转派其它 Agent。看板 Agent 的配置与 10:00 定时保持原样。
+每天北京时间 02:00 触发「GRM 每日 Bug 值守」新扫描。只使用现有值守 Agent 和看板 Agent，不派生子 Agent。流程固定为：Intercom/Canny/Facebook 三源采集 → 冻结本轮 manifest → 两张调查 lane 并行 → 全部调查结论回读 → 全局修复槽串行 → 逐项交付。PR merge、生产发布、生产业务数据写入和其它不可逆动作仍需明确授权。全程中文；不得修改本仓库源文件、本机 Skill、其它 Prompt、Multica 配置或环境变量。
 
-## 入口与采集
+## 入口和历史隔离
 
-1. 回读当前 Issue、真实运行、Agent 与项目。Agent 为 `387e0620-8a22-44f5-919c-4a3e6296fcfb`，项目为 `724dce94-a8b9-44e7-8390-9c3cbdac7bc0`，GRM 工作区为 `1b6d114a-8407-4ba8-adea-d31209caabe5`。缺少 metadata 时按 Agent 规则初始化 dailyBatch 和 dailyRound，有现场则恢复，不覆盖。仅新扫描按正文 executionPolicy、schedulerRevision、investigationFailurePolicy 和真实 Runtime 初始化 dailyExecution；已有旧轮不迁移。任何阶段都不修改 Agent 并发；其它轮次仍在调查或修复时本轮照常开始。
-2. 按实际运行时间计算 Asia/Shanghai 前一个完整自然日；开始采集前先保存并回读 dailyScan.targetDate、sources 初始状态及 coverageComplete=false，恢复时复用已保存目标日。每来源成功或失败后立即保存真实状态、已知 collected 数量与回执，未知或失败不填成 0。每来源首次只采昨天，后续从该来源最后成功日期的次日补到昨天；成功覆盖的窗口复用，失败只补缺失来源。任务标题的 UTC 日期不代替反馈窗口。
-3. 使用已合并稳定的 moe-feedback-collector SKILL.md 与 collect-daily CLI，沿用 DAILY_BUG_COLLECTOR_SCRIPT、DAILY_BUG_OUTPUT_ROOT 和 Canny account-ref 协议。独立采集 Canny、Facebook、Intercom，各业务均覆盖；不从 CS 起采，不扩大为历史扫描。Facebook、Intercom 已成功日期与 run 不重复采集。
+先回读 scan Issue、真实 project/workspace、Agent、Runtime、metadata、评论和运行历史。新扫描初始化的 `dailyExecution` 必须精确为：
 
-采集与初筛完成后立即保存现有 dailyScan 的来源覆盖、数量、初筛分类和 scan-evidence-index.json 回执，供 10:00 看板读取阶段快照；调查和修复仍按原协议分别留档，最终扫描台账待全轮调查结束统一写入。阶段展示不推进队列，也不把当前轮迁移到新调度版本。
+```json
+{"schemaVersion":1,"protocolVersion":3,"policy":"lightweight_agent_driven_v3","laneCount":2,"repairConcurrency":1,"investigationFailurePolicy":"retry_2_then_skip_v1","schedulerRevision":"<40位调度器提交 SHA>","runtimeId":"<真实 Runtime UUID>"}
+```
 
-## 本轮全部调查完成门槛
+v3 scan metadata 不得包含 `dailyRound`、`dailyBatch` 或 `dailyDispatch`。已有 v1/v2 扫描、调查和修复继续使用各自固定 schedulerRevision 的 `duty-queue.py`/`duty-dispatch.py`，不可迁移或接管。`recover`/`inspect-round` 发现旧协议时只返回 `legacy_round_delegate`，不写状态、不补评论、不重采来源。
 
-1. 初筛、归并和查重后固定本轮疑似 Bug 清单，上传真实附件，保存 dailyRound 的候选数量与候选清单真实附件 `attachmentId` 回执（不需计算或写入 `candidateSetSha256`、`sha256`、`readbackHashVerified`）。只登记本轮反馈，不导入旧 pending-candidates、旧 needs_evidence 或历史调查队列；用户已停止的历史任务不恢复。
-2. 不为候选逐条建任务：在原扫描追加清单评论（candidateId、原反馈日、摘要、sourceUrl），回读后核对候选数量与唯一身份；再在原扫描下建两张调查工位卡（工位 1/2、2/2），回读后写入 dailyRound 的 investigationStore 与 laneIssueIds，才设置 registrationComplete。完整登记和三源覆盖回读后，只通过固定版本 duty-dispatch.py advance 给两个工位各领取一条候选并启动；工位每条结论回读后再次 advance 领取下一条并排后继，不手工启动、不依赖人工再次调用；工位卡和原扫描在调查与交接期间保持 `in_progress`，不得因单条 `excluded / duplicate / cs_followed` 结论把工位卡或原扫描置为 `done / cancelled`（工位卡只由原扫描在 `finalize_round_here` 统一关闭）；扫描与调查入口不修改业务实现。
-3. 每条调查主动补读原讨论、核对正确行为、定位实现，按需查询真实商家和窗口的数据或日志，在授权测试环境验证。保存步骤、实际观察、版本和证据，上传报告并保存返回的真实 `attachmentId`（`investigationRecord={attachmentId,evidenceRevision}`），把含 `investigationRecord`、`sourceUrl` 及来源证据标识的结论记录以评论追加到工位卡并回读；不同候选不得复用同一调查报告附件 ID 或会话证据，不再下载重算或手抄 SHA-256。确认、排除、重复、已有工单与真正外部缺证均须有依据。可恢复故障先恢复或替代补证；仍失败保存 executionFailure={kind,error}、过程与 nextAction，回读后立即 advance。调度器保留首次运行及最多 2 次重试，耗尽则留档为 skipped_failure 并释放工位接下一条，不阻塞其它调查。
-4. 确认一个 Bug 时只记录 confirmed，继续调查本轮其它项。全部候选均有依据结论或有界重试后已留档跳过后，由最后退出的工位经统一调度器唯一交接回原扫描。仅原扫描汇总并回读完整调查索引、最终分类与扫描消息，保存 investigationComplete 和 ready_repair，才允许建立固定修复队列。ready、investigating 和未留档技术失败都不能算本轮处理结束；有界重试耗尽且已留档的 skipped_failure 可结束本轮调度，但不计确认、排除或验证通过，不进修复队列；不能把未调查项留在候选内容区后发送“扫描完成”。
-5. 真正外部缺证须具备 Agent 规定的四条取证路径尝试、缺失材料、恢复条件、证据版本和检查时间，完整保存后可作为本轮已调查结论，不阻塞其它调查与本轮后续修复；不得用其掩盖执行失败。历史外部挂起项也不自动带入新轮次。
+扫描、租约、fencing token、运行 intent、附件/评论/Slack 回读和恢复只通过 `scripts/duty-ops.py`；只读阶段可使用 `duty-progress.py`、`duty-board.py`。所有 Multica 写入必须 `--output json`，写后按同一 ID 回读；错误或超时按前后 run ID 差集核对，不能盲目重试。
 
-## 修复与交付
+## 三源采集
 
-1. 新轮调查使用 dailyExecution 固定版本的 duty-dispatch.py（protocolVersion=2），采集、汇总与修复使用同版本 duty-queue.py（protocolVersion=2，必须带 --round-id）。旧轮继续各自固定版本，不迁移或重采。只读计划不等于真实启动。按 Agent 的 collect_sources、register_round、investigate_lanes、finalize_round、prepare_round_repair、wait_repair_slot、resume_repair、advance_after_block、complete_round 等动作执行；任何矛盾先核对，不旁路全轮调查门槛。
-2. 全轮调查完成、三源覆盖完整且无其它真实修复队列在途后，在原扫描登记唯一固定修复批次，仅纳入 confirmed 项；其它轮次的修复队列未结束时返回 wait_repair_slot，保留现场结束运行，等其结束后由 release-repair 唤起。沿用值守 Agent 当前修复能力：有构建/部署流水线的仓库保留目标分支 CI、真实部署版本、动态 Case、最终完整 HTML、PR 和交付回读要求；经核实无 PR 构建或环境自动部署流水线的纯 SQL / 数仓视图仓库改在授权只读库完成修复前后 SQL 对真实业务样本的 Before/After 实测对比，并保留最终完整 HTML、PR 和交付回读要求，不因无 PR 部署 CI 判为受阻；不参考其它 Agent 的专属规则。
-3. 只将首项指派自身，回读真实 queued/dispatched/running 后结束当前运行释放唯一名额。每项完整交付后，或真实受阻并按 Agent 模板在交付频道发出、回读受阻结果后，自动接下一修复；修复期间原扫描若因 Multica 的 `child.attention` / `issue_wakeup` 被系统唤醒，只允许只读核对队列回执并在子任务退出前未完成交接时按固定调度器推进下一项（无活动运行时 `repair-advance` 可省略 `--current-run` 重入）后立即退出，严禁替子任务补测试数据、执行动态验收、改写受阻结论或代发子任务 Slack 回复；尚未全部合并的受阻项单列“受阻”，不计应上线或已交付 PR；保留现场与证据，确认受阻后不再新建 PR，不自动补验收、催办解除或回流队列，已有 PR 仅作为历史证据保留，仅真人明确要求恢复时续作。已回读的历史 Slack 消息被删除后不补发、不要求重新点 🚫。最后一项的消息写明本批次结果，不另发批次汇总；结束本轮后执行一次 release-repair 唤起等待修复的轮次；不返回历史调查队列，不等待逐项人工确认。PR 合并和生产发布仍需明确授权。
-4. 三源缺失、调查未完成、报告缺口或执行失败必须保留现场和具体恢复动作，不能伪造完成或无 Bug。零项合格也须有完整调查与分类证据。保存来源覆盖、scan-evidence-index.json、完整调查索引、真实交接和交付回执。
-5. 全轮调查完成后，按 Agent 模板向指定频道 <交付频道 ID> 发送一次扫描结果并回读；明确调查完成数、确认可修数及下一步。外部缺证的过程、数量、材料缺口和恢复条件保留在任务、完整报告与分类台账，不在值守 Agent 的 Slack 汇总中单列，也不另发通知。执行失败跳过数量在阶段结论中明确标出，过程与恢复条件留在任务和完整索引；含跳过项不能声称全部验证通过。尚在调查时只报告实际阶段，不发完成通知；重跑复用回执，避免重复发送。
+目标日为 Asia/Shanghai 前一个完整自然日，第一次写入后冻结。逐项检查 `DAILY_BUG_COLLECTOR_SCRIPT`、`DAILY_BUG_OUTPUT_ROOT`、`DAILY_BUG_CANNY_ACCOUNT_REF` 是否存在，只输出变量名和布尔值。使用稳定 `collect-daily` CLI：Canny 传 `--account-ref`，按 period-created-posts/page-visible 读取目标日帖子及可见评论，不使用 vote/Quick Win 过滤；Facebook 读取既有 Slack 汇总，不直接抓 Facebook；Intercom 一会话一 evidence，`inWindow=true` 的客户消息作为目标反馈，其余仅作上下文。保留 `csTickets`；只有用 jira skill 回读确认存在的研发工单 key 才计 `jiraKeys`/`cs_followed`。
+
+覆盖所有 domain 和业务，按稳定来源身份归并重复反馈，保存 sourceUrl、现象、正确行为依据、影响、平台、版本、查重和验收目标。附件先检查再查看：Intercom 用 `list-attachments`，按用户/lead 下载截图和录屏，录屏用 ffmpeg 抽帧；失败按错误码重试并记录，不把未查看写成无附件。生产数据只能用 redshift 只读副本，Datadog/Sentry 作为补充；不能 impersonate 客户。每来源成功或失败立即保存来源状态、窗口、runArtifact、evidenceArtifacts、collected 数和覆盖缺口；失败不填 0，恢复只补缺失窗口，不读周报、不扫描历史。
+
+初筛保存 `nonBug`、`productDecision`、`csFollowed`、`suspected`；最终去向保存 confirmed、duplicate、verificationBlocked、excludedAfterInvestigation。完整证据索引固定为 `scan-evidence-index.json`；零候选、缺源和字段台账失败都必须有真实记录。
+
+## 固定 manifest 与两张 lane
+
+采集和初筛完成后，只冻结当前反馈日候选，不能导入历史 pending、旧 needs_evidence 或停止任务。调用：
+
+```bash
+python3 scripts/duty-ops.py init-scan-manifest \
+  --scan-id <scan UUID> --manifest-file <manifest.json> \
+  --target-date <YYYY-MM-DD> --scheduler-revision <40位 SHA> \
+  --runtime-id <Runtime UUID> --workspace-id <workspace UUID>
+```
+
+评论首行必须是：
+
+```text
+<!-- daily-round-manifest:v3 round=<scan_id> -->
+```
+
+JSON 必须有 `protocolVersion=3`、`roundId`、`feedbackDate`、`candidateCount`、候选数组、`candidateSetSha256`（等于 `duty_queue.candidate_set_hash(ids)`）、真实附件 UUID、附件 SHA-256、`readbackHashVerified=true`。每个 candidate 的 `feedbackDate` 等于目标日、candidateId 唯一、sourceUrl 非空。manifest 冲突时停止，不覆盖；重跑复用已验证回执。
+
+原 scan 下必须正好两张 lane，metadata 精确为 `dailyLane={schemaVersion:1,protocolVersion:3,mode:"investigate_lane",roundId,lane:1|2,laneCount:2}`，不得写 `state`、`currentCandidateId`、`failureHandoffCandidateId`。lane 只由 Agent 自身运行，不能手工提前指派全部候选。候选由 claim 租约动态分配，不写 lane 游标。
+
+## 调查结论与受限重试
+
+每次 `claim` 在 Runtime `fcntl.flock` 下读取 manifest、已验证 records 和 lease，发放单调递增 fencingToken 与 TTL（默认 3600 秒）。租约过期或运行结束无结论时记录 failedRuns；同候选首次加两次重试，第三次仍无有效结论则自动追加 `skipped_failure`，保存三次 runId、具体 reason、resumeCondition、skippedAt，不计确认/排除，不阻塞其它候选。
+
+每项调查使用自己的 worktree、报告目录、浏览器 tab 和测试数据，不覆盖另一 lane。必须补读原讨论、历史、附件、实现、数据和日志，并在授权测试环境动态验证。结论追加到 lane：
+
+```text
+<!-- daily-investigation:v3 round=<scan_id> candidate=<candidateId> -->
+```
+
+JSON 必须包含 schemaVersion、protocolVersion、mode、roundId、sourceScanId、candidateId、feedbackDate、匹配 sourceUrl、laneIssueId、fencingToken、conclusion。除 skipped_failure 外必须上传唯一报告，保存 `report.attachmentId`、sha256、readbackVerified 和 evidenceRevision；confirmed 的 intercom token 不能跨候选复用。
+
+- confirmed：`verification.fixable=true`、`productDecisionRequired=false`、expectedBehaviorRef、observedDeviationRef、dedupeRef，且能解释客户原现象。
+- duplicate/excluded/cs_followed：非空 conclusionRef。
+- suspended_external：必须真实尝试 source、implementation、data、verification 四条路径，使用 external_evidence blocker、缺失材料、恢复条件、evidenceRevision、checkedAt、至少 24 小时后的 nextCheckAt。
+
+提交前和重新加锁后都检查 fencingToken；TTL 过期或被更高 token 取代时拒绝旧 Worker。调查未全部结论、coverageComplete 未完成或 evidence index 未回读，不能创建 Bug、不能修复、不能发“扫描完成”。
+
+## 修复、交付和唤醒
+
+全轮调查完成后才为 confirmed 候选创建 Bug 子卡。每个 `dailyBug` 精确保存 schemaVersion、protocolVersion=3、mode=bug、batchId/sourceScanId、candidateId、investigationRef、feedbackDate、source、sourceUrl；禁止 state/index/total/completeDelivery/deliveryVersion/reviewState。全局修复槽一次只准一个 scan，FIFO 等待；holder 只有全部 Bug 有 terminal receipt 或 scan 为 in_review/done/cancelled/canceled 才能回收。修复按一项一项执行，`repairConcurrency=1`。
+
+有 Go/TS/应用 CI 的修复必须等待目标提交构建/部署并 ready，再按 `moe-acceptance/references/repair-and-retest.md` 做动态 Case；`--maxWorkers=2`，不能因一次 `gh pr checks --watch` 超时就结束。纯 SQL/数仓仓库必须在授权只读副本用原问题样本、核心筛选和相邻回归场景完成 Before/After 查询验证。PR 描述使用 review-brief，最终有完整 HTML 报告。未获授权不得 merge、生产发布或写入线上。
+
+交付频道为 `C0C14HSSP2T`，Winches 为 `U06GM8PAFEX`。使用 Slack Bot `U0C1NTX8P8R`/`B0C1K25KSMC` 的 `--as bot`，负责人按 Feishu Bitable + Sheet、Slack email lookup 核对；Block Kit 用 rich_text user mention。完整交付可 @已核实模块 Owner；受阻只 @ Winches 一次；不发私信、不 @here/@channel/@everyone。受阻恢复必须 `slack.py edit --as bot` 原 blocked 顶层消息。
+
+`deliver-bug` 和 `block-bug` 都必须保存 intent。Slack 发送成功但 GRM-664 ledger 失败时重跑从 intent 继续，不重复 Slack；`slackSendAttempted=true` 且 permalink 缺失时先 history/replies 按 Bug 标识、来源 URL、版本找回，不能直接重发。所有附件、Slack、ledger 都完成回读后才写 receipt、改 Bug 状态、唤醒父任务。
+
+完整交付评论：
+
+```text
+<!-- daily-delivery:v3 round=<scan_id> issue=<bug_id> version=<v> -->
+```
+
+包含 protocolVersion、issueId、roundId、candidateId、deliveryVersion、合法 PR URL、7–40 位 prHeads、报告 attachment/SHA/readback、Slack permalink/readback、ledger issue/commentId/readback；随后 Bug `in_review --no-start`。
+
+受阻评论：
+
+```text
+<!-- daily-blocked:v3 round=<scan_id> issue=<bug_id> -->
+```
+
+包含 blocker.kind/reason/resumeCondition、Slack permalink/readback、ledger issue/commentId/readback；随后 Bug `blocked --no-start`，不计已交付。两个 lane 近同时结束或父 finalizer 提前退出时，必须用 `rerun-parent-if-needed`，按 beforeRunIds/afterRuns 差集至多排一个后继，避免漏唤醒和重复 run。
+
+## CLI、检查与硬中断恢复
+
+核心命令：
+
+```text
+claim
+submit-investigation
+finish-scan
+dispatch-if-issue-idle
+rerun-parent-if-needed
+acquire-global-repair-slot
+release-global-repair-slot
+deliver-bug
+block-bug
+inspect-round
+recover [--apply]
+```
+
+所有输出为 `protocolVersion=3` JSON。运行启动前保存 intent 的 beforeRunIds；`issue assign <id> --to-id <agent> --no-start`、`issue rerun <id>`、`issue status <id> <status> --no-start` 后必须按 ID 回读。意外 timeout/error 只读回现场，不能根据退出码重复 rerun。
+
+退出前核对：三源覆盖、manifest 哈希和附件回读；两 lane 恰为 2 且无废弃字段；每项有结论和唯一证据；租约释放；没有调查未完就创建 Bug；修复槽 holder/waitQueue 正确；Slack/ledger/receipt 全部 readbackVerified；没有客户原文和凭据进入输出；父任务有可回读 wakeup intent。
+
+CI 等待、部署等待、上下文耗尽或进程硬中断时，先执行只读 `inspect-round` 和 `recover --round-id <id>`。`in_progress` 无 active run 且无 terminal receipt 是 `needsRecovery`，不能当 blocked；in_review/done/cancelled 缺 receipt 只报警、不能计 delivered。只有已授权恢复才加 `--apply`；按 intent、运行差集、Slack history/replies 和 ledger 回读继续，成功步骤不重做。`mode=gate_test` 始终隔离测试，使用 `GRM-664` `<!-- duty-board:v1 -->` fixture 验证 v3 scan/manifest/investigation/delivery/blocked，而不触发真实业务操作。
