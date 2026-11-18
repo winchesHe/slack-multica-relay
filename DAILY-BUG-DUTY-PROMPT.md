@@ -20,9 +20,21 @@ schedulerRevision=<调度器提交 SHA>
 
 扫描任务的 `dailyExecution` metadata 必须精确包含且仅包含以下字段：`schemaVersion=1`、`protocolVersion=3`、`policy=lightweight_agent_driven_v3`、`laneCount=2`、`repairConcurrency=1`、`investigationFailurePolicy=retry_2_then_skip_v1`、`schedulerRevision=<40位调度器提交 SHA>`、`runtimeId=<真实 Runtime UUID>`。
 
-- **v3 禁止历史字段**：v3 scan 绝不写入 `dailyRound`、`dailyBatch`、`dailyDispatch`；v3 `dailyLane` 绝不写入 `state`、`currentCandidateId`、`failureHandoffCandidateId`；v3 `dailyBug` 绝不写入 `state`、`index`、`total`、`completeDelivery`、`deliveryVersion`、`reviewState`。若 v3 现场出现这些字段，立即停止并报告协议冲突。
-- **既有 v1/v2 轮次只读隔离**：若扫描 metadata 存在 `dailyRound`、`dailyBatch`、`dailyDispatch`，或 `dailyExecution.protocolVersion != 3` / `policy != lightweight_agent_driven_v3`，v3 工具 `scripts/duty-ops.py` 的 `inspect-round` 与 `recover` 仅返回 `legacy_round_delegate`（`mutated=false`），绝不迁移、补写或覆盖历史轮次；既有轮次继续按其自身固定版本与原规则运行。
-- **入口校验**：先用 `multica` CLI（`--output json`）回读当前 Issue、真实父任务、project/workspace、Agent、Runtime、metadata、评论与运行历史。只接受正文明确为 `mode=scan`、`mode=investigate_lane`、`mode=bug` 或 `mode=gate_test`（或第 4 节由审查人触发的 `回告`/`确认发布`/`已回告`/`不回告` 评论）的任务；未知 mode 停止核对。v3 所有状态、锁、附件回读、租约、唤醒和恢复统一通过 `scripts/duty-ops.py`，禁止手工 `assign`/`rerun` 或凭标题猜测身份。
+- **v3 禁止历史字段与跨版本回读**：v3 scan 绝不写入 `dailyRound`、`dailyBatch`、`dailyDispatch`；v3 `dailyLane` 绝不写入 `state`、`currentCandidateId`、`failureHandoffCandidateId`；v3 `dailyBug` 绝不写入 `state`、`index`、`total`、`completeDelivery`、`deliveryVersion`、`reviewState`。子任务（`dailyLane`/`dailyBug`）见到旧字段时先回读父扫描的 `dailyExecution`：若父扫描 `protocolVersion != 3` 或存在旧轮字段，视为历史轮次按父扫描 `schedulerRevision` 旧版规范继续，不误报 v3 冲突；仅在确认是 v3 轮次却混入旧字段时停止并报告协议冲突。
+- **既有 v1/v2 轮次只读隔离**：若扫描 metadata 存在 `dailyRound`、`dailyBatch`、`dailyDispatch`，或 `dailyExecution.protocolVersion != 3` / `policy != lightweight_agent_driven_v3`，v3 工具 `duty-ops.py` 的 `inspect-round` 与 `recover` 仅返回 `legacy_round_delegate`（`mutated=false`），绝不迁移、补写或覆盖历史轮次；既有轮次继续按其自身固定版本与原规则运行。
+- **脚本固定引导（严禁直接搜索或执行 `.t3/worktrees/...` 中的脚本，必须同时导出 `duty-ops.py` 与同级依赖 `duty-queue.py`）**：
+
+```bash
+TMP_OPS=$(mktemp -d)
+git -C /Users/moego-winches/Desktop/Company/person/slack-multica-relay fetch origin <40位调度器提交 SHA>
+git -C /Users/moego-winches/Desktop/Company/person/slack-multica-relay show <40位调度器提交 SHA>:scripts/duty-ops.py > "$TMP_OPS/duty-ops.py"
+git -C /Users/moego-winches/Desktop/Company/person/slack-multica-relay show <40位调度器提交 SHA>:scripts/duty-queue.py > "$TMP_OPS/duty-queue.py"
+```
+
+- **入口校验与职责严格隔离**：先用 `multica` CLI（`--output json`）回读当前 Issue、真实父任务、project/workspace、Agent、Runtime、metadata、评论与运行历史。只接受正文明确为 `mode=scan`、`mode=investigate_lane`、`mode=bug` 或 `mode=gate_test`（或第 4 节由审查人触发的 `回告`/`确认发布`/`已回告`/`不回告` 评论）的任务；未知 mode 停止核对。v3 所有状态、锁、附件回读、租约、唤醒和恢复统一通过 `"$TMP_OPS/duty-ops.py"`，禁止手工 `assign`/`rerun` 或凭标题猜测身份。使用 `multica issue comment add --content-file` 若文件位于工作目录外须传 `--allow-external-file`（`duty-ops.py` 已内置处理）。
+  - **`mode=scan`（初始采集与派发）**：完成三源采集 → 冻结清单 → `init-scan-manifest` → 为工位 1/2、2/2 调用 `dispatch-if-issue-idle` 后，**必须立即退出当前运行**等待 lane 完成唤醒；**严禁**父 scan 调用 `claim`、`submit-investigation`、轮询等待子任务或编写批处理脚本代调查。
+  - **`mode=scan`（唤醒后汇总与调度）**：被唤醒后先运行 `inspect-round`。若仍有候选未结案，只允许按状态重派空闲/退出的 lane（`dispatch-if-issue-idle`）后退出，仍不得代 lane 调查；全部候选结案后调用 `finish-scan`；若有 `confirmed` Bug，调用 `acquire-global-repair-slot`，`busy` 则退出等待前序释放唤醒，获得槽后每次只指派当前唯一待修 Bug 启动（`repairConcurrency=1`）。
+  - **`mode=investigate_lane`**：在独立工作目录循环执行「`claim` → 对这**单个**候选独立取证并定位真实仓库源码 → `submit-investigation`」，直到 `claim` 返回 `all_concluded`（调用 `rerun-parent-if-needed` 唤醒父 scan 后退出）或 `no_available_candidate`（运行 `inspect-round`，若另一 lane 已无活动运行或已超时则调用 `rerun-parent-if-needed` 后退出）。**严禁**编写循环脚本（如 `run_investigations.py`）批量调 `claim`/`submit-investigation`，**严禁**未读产品源码与原会话就用模板话术提交 `suspended_external`。
 
 ---
 
@@ -51,7 +63,9 @@ schedulerRevision=<调度器提交 SHA>
    - 覆盖全部 Domain，按稳定来源身份归并同一问题，保存 `candidateId`、`source`、`sourceUrl`、`feedbackDate`、现象、正确行为依据、影响、平台、验收目标和查重依据。
    - 对本项目历史任务、在途周度小队及 Bug Resolver 任务/PR 查重（已有修复仍须核对客户版本与修复范围，不凭已有 PR 直接排除回归）；不恢复人工已停止/取消项。
    - **已有工单**：Intercom 以 `csTickets` 非空或经 `jira` Skill 回读确认的研发工单为准；Canny/Facebook 在补证时经 `jira` 搜索来源链接或标题。命中后标为 `cs_followed` 并保存工单号，停止扩展调查。
-   - 每条采集记录只计一次：`sum(collected) = nonBug + productDecision + csFollowed + suspected`；进入调查后去向合计：`suspected = confirmed + duplicate + verificationBlocked + excludedAfterInvestigation`（外加仅因技术重试耗尽而生成的 `skippedFailure` 单独列出）。所有判断与证据写入 `scan-evidence-index.json`（零候选也须存在）。
+   - 每条采集记录只计一次：`sum(collected) = nonBug + productDecision + csFollowed + suspected`；进入调查后去向合计：`suspected = confirmed + duplicate + verificationBlocked + excludedAfterInvestigation`（外加仅因技术重试耗尽而生成的 `skippedFailure` 单独列出）。所有判断与证据写入 `scan-evidence-index.json`（零候选也须存在），且必须提供与每日看板脚本 `duty-board.py` 对齐的顶层字段：
+     - `targetDate`（`YYYY-MM-DD`）、`identifier`（扫描任务编号如 `GRM-xxxx`）、`records`（逐条数组，供看板 HTML「当日逐条记录」直接渲染）。
+     - `records` 每项包含：`state`（只能取 `confirmed`、`skipped_failure`、`verification_blocked`、`duplicate`、`cs_followed`、`excluded_after_investigation`、`product_decision`、`non_bug`，其中调查结论 `excluded` 映射为 `excluded_after_investigation`、`suspended_external` 映射为 `verification_blocked`）、`source`（`intercom`/`canny`/`facebook`）、`summary`（脱敏问题摘要）、`reason`（判断依据）、`sourceUrl`（https 来源链接）、可选 `csTickets` / `verifiedJiraKeys` / `unresolvedGap` / `resumeCondition` / `correctBehaviorBasis` / `observation` / `verificationMethod` / `attempts` / `relatedPR`（均不得含商家 ID、客户分层或查询语句）。
    - 真人若在任务中明确授权逐日回溯验证 flow，仅在任务专属输出目录按单日独立执行，不覆盖日常成功进度。
 
 ### 冻结 Manifest 与两张 Lane
@@ -59,7 +73,7 @@ schedulerRevision=<调度器提交 SHA>
 采集与初筛完成后，仅将需要进入调查的疑似 Bug 冻结为清单 JSON（所有候选 `feedbackDate` 等于 `targetDate`，`candidateId` 唯一且非空，`sourceUrl` 非空，`candidateSetSha256` 严格等于 `duty_queue.candidate_set_hash(ids)`），执行：
 
 ```bash
-python3 scripts/duty-ops.py init-scan-manifest \
+python3 "$TMP_OPS/duty-ops.py" init-scan-manifest \
   --server-url https://multica.devops.moego.dev \
   --workspace-id 1b6d114a-8407-4ba8-adea-d31209caabe5 \
   --project-id 724dce94-a8b9-44e7-8390-9c3cbdac7bc0 \
@@ -77,7 +91,7 @@ python3 scripts/duty-ops.py init-scan-manifest \
 <!-- daily-round-manifest:v3 round=<scan_id> -->
 ```
 
-并确保原 scan 下恰好存在两张 `dailyLane`（`lane=1,2`，`laneCount=2`，无遗留游标/状态字段）。禁止为候选逐条创建调查任务，禁止手工指派全部候选。
+并确保原 scan 下恰好存在两张 `dailyLane`（`lane=1,2`，`laneCount=2`，无遗留游标/状态字段）。随后仅通过 `dispatch-if-issue-idle` 启动这两张 `dailyLane` 并在本轮运行**立即退出**（等待 lane 收口通过 `rerun-parent-if-needed` 唤醒）。禁止为候选逐条创建调查任务，禁止手工指派全部候选，**禁止**父 scan 自己调用 `claim` / `submit-investigation`。
 
 ### 扫描完成汇总消息（8 行内）
 
@@ -112,7 +126,7 @@ python3 scripts/duty-ops.py init-scan-manifest \
 
 ### 调查结论标准与 `submit-investigation`
 
-每条调查必须补读原讨论、关联历史与附件，定位代码或契约，结合 `redshift`/日志/MIS 确认商家数据，并在授权测试环境完成有针对性的动态复现或验证（不能仅用“未复现”或“可疑代码”结案）。通过 `submit-investigation` 上传唯一调查报告附件、回读 SHA-256，在对应 lane 追加并回读：
+每条调查必须补读原讨论（Intercom 须调 `intercom` `get-conversation` 及 `list-attachments`/`download-attachments`）、关联历史与 `jira` 只读工单，通过 `github-workflow` 定位真实产品源码（本机 `$REPOS_DIR` 位于 `/Users/moego-winches/Desktop/Company/AI-Agent/agent-workspace/repo` 按 `front-end`/`back-end`/`unclear` 分类复用只读 cache 或用 `gh search code --owner MoeGolibrary` 查源码，**绝不允许**以“当前工作区没有产品源码 worktree”为由跳过代码定位或模板化提交 `suspended_external`），结合 `redshift`/日志/MIS 确认商家数据，并在授权测试环境完成有针对性的动态复现或验证（不能仅用“未复现”或“可疑代码”结案）。通过 `submit-investigation` 上传唯一调查报告附件、回读 SHA-256，在对应 lane 追加并回读：
 
 ```text
 <!-- daily-investigation:v3 round=<scan_id> candidate=<candidateId> -->

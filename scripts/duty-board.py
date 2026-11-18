@@ -856,16 +856,24 @@ def _attempt_text(attempt):
     return _clip('：'.join(str(part) for part in parts if part), 600)
 
 
+RECORD_STATE_ALIASES = {
+    'excluded': 'excluded_after_investigation',
+    'suspended_external': 'verification_blocked',
+}
+
+
 def scan_records(index):
     """证据索引 → 页面逐条记录。只保留排查与判断字段，不带商家 ID、客户分层与查询语句。"""
     records = []
     for record in index.get('records') or []:
         if not isinstance(record, dict):
             continue
+        raw_state = _clip(record.get('state'), 60)
+        state = RECORD_STATE_ALIASES.get(raw_state, raw_state)
         tickets = [key for key in (record.get('csTickets') or []) + (record.get('verifiedJiraKeys') or [])
                    if isinstance(key, str) and TICKET_KEY.fullmatch(key)]
         records.append({
-            'state': _clip(record.get('state'), 60), 'source': _clip(record.get('source'), 30),
+            'state': state, 'source': _clip(record.get('source'), 30),
             'summary': _clip(record.get('summary') or record.get('title') or record.get('evidenceId'), 240),
             'reason': _clip(record.get('reason'), 600), 'sourceUrl': _https(record.get('sourceUrl')),
             'details': [[label, _clip(record[key], 600)] for key, label in RECORD_DETAILS

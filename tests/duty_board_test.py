@@ -825,6 +825,15 @@ class HtmlTests(unittest.TestCase):
         self.assertEqual(second['sourceUrl'], '')
         self.assertNotIn('118708', str([first, second]))
 
+    def test_scan_records_normalize_v3_conclusion_aliases(self):
+        index = {'records': [
+            {'state': 'excluded', 'source': 'intercom', 'summary': 'S1'},
+            {'state': 'suspended_external', 'source': 'canny', 'summary': 'S2'},
+        ]}
+        first, second = board_module.scan_records(index)
+        self.assertEqual(first['state'], 'verification_blocked')
+        self.assertEqual(second['state'], 'excluded_after_investigation')
+
     def test_scan_index_is_read_from_evidence_zip(self):
         import json, tempfile, zipfile
         with tempfile.TemporaryDirectory() as directory:
