@@ -398,12 +398,46 @@ class Native:
         if metadata(self.issue(issue_id), key) != value:
             raise OpsError("metadata 写后回读不一致")
 
-    def comment_add(self, issue_id, content_file, attachment_file=None):
+    def _comment_trigger_parent_id(self, issue_id, error):
+        cause = getattr(error, "__cause__", None)
+        if not isinstance(cause, subprocess.CalledProcessError):
+            return None
+        detail = "\n".join(part for part in (cause.stderr, cause.stdout) if isinstance(part, str))
+        if "comment-triggered tasks cannot create top-level comments" not in detail:
+            return None
+        uuid_any = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+        match = re.search(rf"set parent_id \(--parent\) to ({uuid_any})", detail)
+        if match:
+            return match.group(1)
+        try:
+            runs = self.runs(issue_id)
+        except OpsError:
+            return None
+        for run in reversed(runs):
+            if not isinstance(run, dict) or run.get("status") != "running" or run.get("kind") != "comment":
+                continue
+            for key in ("trigger_comment_id", "comment_id", "triggerCommentId", "commentId"):
+                cid = run.get(key)
+                if isinstance(cid, str) and re.fullmatch(uuid_any, cid):
+                    return cid
+        return None
+
+    def comment_add(self, issue_id, content_file, attachment_file=None, parent_id=None):
         args = ["issue", "comment", "add", issue_id, "--content-file", str(content_file),
                 "--allow-external-file"]
         if attachment_file:
             args += ["--attachment", str(attachment_file)]
-        return self.call(args, ambiguous=True)
+        if parent_id:
+            args += ["--parent", str(parent_id)]
+        try:
+            return self.call(args, ambiguous=True)
+        except OpsError as error:
+            if parent_id:
+                raise
+            detected = self._comment_trigger_parent_id(issue_id, error)
+            if not detected:
+                raise
+            return self.call([*args, "--parent", detected], ambiguous=True)
 
     def attachment_download(self, attachment, directory):
         # multica attachment download 不支持 --output json 且输出纯文本状态。
