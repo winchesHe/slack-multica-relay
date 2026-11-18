@@ -12,9 +12,13 @@ schedulerRevision=<调度器提交 SHA>
 ## 1. 入口校验与历史隔离
 
 1. 用 `multica --server-url https://multica.devops.moego.dev --workspace-id 1b6d114a-8407-4ba8-adea-d31209caabe5 issue get <scan_id> --output json` 回读当前任务、项目（`724dce94-a8b9-44e7-8390-9c3cbdac7bc0`）、Runtime（`<真实 Runtime UUID>`）、metadata、评论和运行历史。
-2. 新 v3 扫描仅允许写入 `dailyExecution`（与 `dailyScan`）：
-   `{"schemaVersion":1,"protocolVersion":3,"policy":"lightweight_agent_driven_v3","laneCount":2,"repairConcurrency":1,"investigationFailurePolicy":"retry_2_then_skip_v1","schedulerRevision":"<40位调度器提交 SHA>","runtimeId":"<真实 Runtime UUID>"}`
-   严禁在 v3 扫描或子任务写入 `dailyRound`、`dailyBatch`、`dailyDispatch`、`dailyLane.state/currentCandidateId/failureHandoffCandidateId` 或 `dailyBug.state/index/total/completeDelivery/deliveryVersion/reviewState`。
+2. **新 v3 扫描首跑初始化 `dailyExecution`**：若当前扫描 `metadata` 不含 `dailyRound`/`dailyBatch`/`dailyDispatch` 且尚无 `dailyExecution`（新 Autopilot 任务初始 `metadata` 为空），必须在调用 `update-scan-status`、`inspect-round` 或 `init-scan-manifest` 之前先写入 `dailyExecution` 并回读确认（未写前勿调用 `inspect-round`，否则空 `metadata` 会返回 `legacy_round_delegate`）：
+```bash
+multica --server-url https://multica.devops.moego.dev --workspace-id 1b6d114a-8407-4ba8-adea-d31209caabe5 \
+  issue metadata set <scan_id> --key dailyExecution \
+  --value '{"schemaVersion":1,"protocolVersion":3,"policy":"lightweight_agent_driven_v3","laneCount":2,"repairConcurrency":1,"investigationFailurePolicy":"retry_2_then_skip_v1","schedulerRevision":"<40位调度器提交 SHA>","runtimeId":"<真实 Runtime UUID>"}'
+```
+   新 v3 扫描仅允许写入 `dailyExecution`（与 `dailyScan`）；严禁在 v3 扫描或子任务写入 `dailyRound`、`dailyBatch`、`dailyDispatch`、`dailyLane.state/currentCandidateId/failureHandoffCandidateId` 或 `dailyBug.state/index/total/completeDelivery/deliveryVersion/reviewState`。
 3. 若发现既有轮次带有旧字段或 `protocolVersion != 3`，保持只读隔离（`inspect-round`/`recover` 返回 `legacy_round_delegate`），绝不迁移或覆写旧轮。
 4. 脚本固定引导（严禁搜索或运行 `.t3/worktrees/...`，必须同时导出 `duty-ops.py` 与 `duty-queue.py`）：
 

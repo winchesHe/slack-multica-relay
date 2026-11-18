@@ -21,7 +21,7 @@ schedulerRevision=<调度器提交 SHA>
 扫描任务的 `dailyExecution` metadata 必须精确包含且仅包含以下字段：`schemaVersion=1`、`protocolVersion=3`、`policy=lightweight_agent_driven_v3`、`laneCount=2`、`repairConcurrency=1`、`investigationFailurePolicy=retry_2_then_skip_v1`、`schedulerRevision=<40位调度器提交 SHA>`、`runtimeId=<真实 Runtime UUID>`。
 
 - **v3 禁止历史字段与跨版本回读**：v3 scan 绝不写入 `dailyRound`、`dailyBatch`、`dailyDispatch`；v3 `dailyLane` 绝不写入 `state`、`currentCandidateId`、`failureHandoffCandidateId`；v3 `dailyBug` 绝不写入 `state`、`index`、`total`、`completeDelivery`、`deliveryVersion`、`reviewState`。子任务（`dailyLane`/`dailyBug`）见到旧字段时先回读父扫描的 `dailyExecution`：若父扫描 `protocolVersion != 3` 或存在旧轮字段，视为历史轮次按父扫描 `schedulerRevision` 旧版规范继续，不误报 v3 冲突；仅在确认是 v3 轮次却混入旧字段时停止并报告协议冲突。
-- **既有 v1/v2 轮次只读隔离**：若扫描 metadata 存在 `dailyRound`、`dailyBatch`、`dailyDispatch`，或 `dailyExecution.protocolVersion != 3` / `policy != lightweight_agent_driven_v3`，v3 工具 `duty-ops.py` 的 `inspect-round` 与 `recover` 仅返回 `legacy_round_delegate`（`mutated=false`），绝不迁移、补写或覆盖历史轮次；既有轮次继续按其自身固定版本与原规则运行。
+- **既有 v1/v2 轮次只读隔离**：若扫描 metadata 存在 `dailyRound`、`dailyBatch`、`dailyDispatch`，或 `dailyExecution.protocolVersion != 3` / `policy != lightweight_agent_driven_v3`，v3 工具 `duty-ops.py` 的 `inspect-round` 与 `recover` 仅返回 `legacy_round_delegate`（`mutated=false`），绝不迁移、补写或覆盖历史轮次；既有轮次继续按其自身固定版本与原规则运行。**例外（新扫描首跑初始化）**：若扫描正文含 `mode=scan` 与 `protocolVersion=3`、metadata 不含 `dailyRound`/`dailyBatch`/`dailyDispatch` 且尚无 `dailyExecution`（Autopilot 新建空 metadata），应先用 `multica issue metadata set <scan_id> --key dailyExecution --value ...` 初始化后再调用 `update-scan-status`/`inspect-round`/`init-scan-manifest`，不得误判为 `legacy_round_delegate`。
 - **脚本固定引导（严禁直接搜索或执行 `.t3/worktrees/...` 中的脚本，必须同时导出 `duty-ops.py` 与同级依赖 `duty-queue.py`）**：
 
 ```bash
