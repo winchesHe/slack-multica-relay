@@ -3,6 +3,7 @@ import copy
 import datetime as dt
 import importlib.util
 import json
+import subprocess
 from pathlib import Path
 import tempfile
 import threading
@@ -1157,6 +1158,68 @@ out.write_text(json.dumps(payload), encoding="utf-8")
         self.assertEqual(clean_inspect["needsRecovery"], [])
         clean_recover = self.ops.recover("scan-r", project_id="project", apply=True)
         self.assertFalse(clean_recover["mutated"])
+
+
+    def test_native_comment_add_retries_with_parent_on_comment_triggered_conflict(self):
+        calls = []
+        parent_uuid = "01a1ed17-32ba-7732-9972-fc844871e60b"
+        content_file = Path(self.temp.name) / "comment.md"
+        content_file.write_text("hello", encoding="utf-8")
+
+        def runner(command, **kwargs):
+            calls.append(command)
+            if "--parent" not in command:
+                raise subprocess.CalledProcessError(
+                    1, command, output="",
+                    stderr=f"Request conflict: comment-triggered tasks cannot create top-level comments; set parent_id (--parent) to {parent_uuid} or a coalesced comment id",
+                )
+            class Result:
+                stdout = json.dumps({"id": "reply-1", "parent_id": parent_uuid})
+            return Result()
+
+        native = ops_module.Native("https://multica.example", "workspace", runner=runner)
+        result = native.comment_add("issue-1", content_file)
+        self.assertEqual(result["id"], "reply-1")
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("--parent", calls[0])
+        self.assertIn("--parent", calls[1])
+        self.assertEqual(calls[1][calls[1].index("--parent") + 1], parent_uuid)
+
+    def test_native_comment_add_falls_back_to_running_comment_run_and_does_not_retry_ambiguous(self):
+        calls = []
+        parent_uuid = "01a1ed17-32ba-7732-9972-fc844871e60c"
+        content_file = Path(self.temp.name) / "comment2.md"
+        content_file.write_text("hello", encoding="utf-8")
+
+        def runner_fallback(command, **kwargs):
+            calls.append(command)
+            if command[5:7] == ["issue", "runs"]:
+                class RunsResult:
+                    stdout = json.dumps([
+                        {"id": "run-1", "status": "completed", "kind": "comment", "trigger_comment_id": "01a1ed17-32ba-7732-9972-000000000000"},
+                        {"id": "run-2", "status": "running", "kind": "comment", "trigger_comment_id": parent_uuid},
+                    ])
+                return RunsResult()
+            if "--parent" not in command:
+                raise subprocess.CalledProcessError(
+                    1, command, output="",
+                    stderr="Request conflict: comment-triggered tasks cannot create top-level comments",
+                )
+            class ReplyResult:
+                stdout = json.dumps({"id": "reply-2", "parent_id": parent_uuid})
+            return ReplyResult()
+
+        native = ops_module.Native("https://multica.example", "workspace", runner=runner_fallback)
+        result = native.comment_add("issue-1", content_file)
+        self.assertEqual(result["parent_id"], parent_uuid)
+        self.assertEqual(len(calls), 3)
+
+        def runner_timeout(command, **kwargs):
+            raise subprocess.CalledProcessError(1, command, output="", stderr="504 Gateway Timeout")
+
+        native_timeout = ops_module.Native("https://multica.example", "workspace", runner=runner_timeout)
+        with self.assertRaises(ops_module.AmbiguousWrite):
+            native_timeout.comment_add("issue-1", content_file)
 
 
 if __name__ == "__main__":
