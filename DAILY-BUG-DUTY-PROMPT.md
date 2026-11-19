@@ -139,6 +139,8 @@ python3 "$TMP_OPS/duty-ops.py" init-scan-manifest \
 - **`duplicate` / `excluded` / `cs_followed`**：须含非空 `conclusionRef`（指向已有 Bug/PR、正确行为/产品诉求依据或已回读 Jira 工单）。
 - **`suspended_external`**：仅在原来源、代码实现、数据/日志与测试验证四条路径均实际尝试并记录后仍缺外部材料时成立，保存下述结构且 `nextCheckAt` 至少为 24 小时后：
 
+> 涉及具体预约、支付或发送状态的 `excluded` 与 `suspended_external`，须先基于已知商家/联系人（如 Intercom `get-contact`）与时间窗执行至少一次 `redshift` 或 `datadog` 只读查询并记录真实命令结果；仅读取 `SKILL.md`，或未查商家/联系人即填写“无标识 / 无权限 / 不适用”，不算有效尝试。
+
 ```json
 {
   "kind": "external_evidence",
