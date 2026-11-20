@@ -337,11 +337,13 @@ class OpsTests(unittest.TestCase):
         self.assertEqual(result["missingReceipt"], [])
 
     def test_finish_scan_writes_finish_receipt_and_progress_reads_it(self):
+        self.native.issues["scan"]["identifier"] = "GRM-700"
         self.native.metadata_set("scan", "dailyScan", {
             "targetDate": "2026-10-21", "coverageComplete": True,
             "sources": {"canny": {"status": "success"}, "facebook": {"status": "success"},
                         "intercom": {"status": "success"}},
-            "collected": {"canny": 1, "facebook": 0, "intercom": 1}})
+            "collected": {"canny": 1, "facebook": 0, "intercom": 1},
+            "counts": {"nonBug": 1, "productDecision": 0, "csFollowed": 0}})
         self.native.issues["scan"]["created_at"] = "2026-10-22T18:00:00Z"
         claim = self.ops.claim("scan", "lane-1")
         report = Path(self.temp.name) / "investigation.html"
@@ -354,9 +356,12 @@ class OpsTests(unittest.TestCase):
         record_path.write_text(json.dumps(record), encoding="utf-8")
         self.ops.submit_investigation("scan", "lane-1", "intercom:1", claim["fencingToken"], record_path, report)
         evidence = Path(self.temp.name) / "scan-evidence-index.json"
-        evidence.write_text(json.dumps({"records": [{"candidateId": "intercom:1", "state": "confirmed"}]}), encoding="utf-8")
+        evidence.write_text(json.dumps({"records": [
+            {"evidenceId": "canny:1", "state": "non_bug", "source": "canny", "summary": "non bug", "reason": "how-to", "sourceUrl": "https://canny.example/1"},
+            {"candidateId": "intercom:1", "state": "confirmed", "source": "intercom", "summary": "bug", "reason": "obs", "sourceUrl": "https://app.intercom.com/conversation/1"},
+        ]}), encoding="utf-8")
         text = Path(self.temp.name) / "scan.txt"
-        text.write_text("scan summary", encoding="utf-8")
+        text.write_text("每日 Bug 值守｜10-21 反馈扫描完成 [GRM-700](https://multica.devops.moego.dev/grm/issues/GRM-700)", encoding="utf-8")
         finish = self.ops.finish_scan("scan", evidence, ledger_issue="GRM-664", channel="C0C14HSSP2T",
                                       text_file=text, target_status="in_review")
         self.assertEqual(finish["protocolVersion"], 3)
@@ -871,12 +876,12 @@ out.write_text(json.dumps(payload), encoding="utf-8")
             self.native.runs_by_issue[row["id"]] = []
         p_manifest = Path(self.temp.name) / "manifest-p.json"
         p_manifest.write_text(json.dumps(manifest(scan_id="scan-p", count=2)), encoding="utf-8")
-        self.ops.init_scan_manifest("scan-p", p_manifest, target_date="2026-10-21",
-                                    scheduler_revision="a" * 40, runtime_id=self.ops.runtime_id, agent_id="agent")
         self.ops.update_scan_status("scan-p", source="canny", source_status="success",
                                     collected={"canny": 2, "facebook": 0, "intercom": 2},
                                     counts={"nonBug": 1, "productDecision": 0, "csFollowed": 1},
                                     coverage_complete=True)
+        self.ops.init_scan_manifest("scan-p", p_manifest, target_date="2026-10-21",
+                                    scheduler_revision="a" * 40, runtime_id=self.ops.runtime_id, agent_id="agent")
         c1 = self.ops.claim("scan-p", "lp-1")
         r1 = Path(self.temp.name) / "p1.html"; r1.write_text("p1")
         rec1 = Path(self.temp.name) / "p1.json"; rec1.write_text(json.dumps({"conclusion": "cs_followed", "evidenceRevision": "intercom:1", "conclusionRef": "CS-1"}))
@@ -885,7 +890,13 @@ out.write_text(json.dumps(payload), encoding="utf-8")
         r2 = Path(self.temp.name) / "p2.html"; r2.write_text("p2")
         rec2 = Path(self.temp.name) / "p2.json"; rec2.write_text(json.dumps({"conclusion": "duplicate", "evidenceRevision": "intercom:2", "conclusionRef": "PR-2"}))
         self.ops.submit_investigation("scan-p", "lp-2", c2["candidateId"], c2["fencingToken"], rec2, r2)
-        ev = Path(self.temp.name) / "ev-p.json"; ev.write_text("{}")
+        ev = Path(self.temp.name) / "ev-p.json"
+        ev.write_text(json.dumps({"records": [
+            {"evidenceId": "canny:1", "state": "non_bug"},
+            {"evidenceId": "canny:2", "state": "cs_followed"},
+            {"candidateId": "intercom:1", "state": "cs_followed"},
+            {"candidateId": "intercom:2", "state": "duplicate"},
+        ]}), encoding="utf-8")
         dry = self.ops.finish_scan("scan-p", ev, ledger_issue="GRM-664", channel="C0", dry_run=True)
         self.assertEqual(dry["status"], "dry_run")
         self.assertEqual(len(self.slack.messages), 0)
@@ -1131,7 +1142,8 @@ out.write_text(json.dumps(payload), encoding="utf-8")
             "verification": {"fixable": True, "productDecisionRequired": False,
                              "expectedBehaviorRef": "e", "observedDeviationRef": "o", "dedupeRef": "d"}}))
         self.ops.submit_investigation("scan-r", "lane-r1", c1["candidateId"], c1["fencingToken"], inv_rec, inv_html)
-        ev = Path(self.temp.name) / "ev-r.json"; ev.write_text("{}")
+        ev = Path(self.temp.name) / "ev-r.json"
+        ev.write_text(json.dumps({"records": [{"candidateId": "intercom:1", "state": "confirmed"}]}), encoding="utf-8")
         self.ops.finish_scan("scan-r", ev, ledger_issue="GRM-664", channel="C0")
         # 其它 agent 的运行不会满足本 agent 的 active run 判定，且 recover --apply 安全拒绝抢占并记录 errors。
         self.native.runs_by_issue["bug-r1"] = [{"id": "other-run", "issue_id": "bug-r1", "agent_id": "other-agent", "status": "running"}]
@@ -1159,6 +1171,277 @@ out.write_text(json.dumps(payload), encoding="utf-8")
         clean_recover = self.ops.recover("scan-r", project_id="project", apply=True)
         self.assertFalse(clean_recover["mutated"])
 
+
+
+    def _write_collect_daily_artifacts(self, root_dir, target_date="2026-11-19", *, intercom_items=None):
+        root = Path(root_dir)
+        root.mkdir(parents=True, exist_ok=True)
+        canny_ev = [
+            {
+                "evidenceId": "canny:post-1",
+                "sourceKey": "canny",
+                "objectType": "post",
+                "title": "Feature request dark mode",
+                "content": "Please add dark mode",
+                "sourceUrl": "https://moego.canny.io/feature-request/p/dark-mode",
+            },
+            {
+                "evidenceId": "canny:comment-1",
+                "sourceKey": "canny",
+                "objectType": "comment",
+                "parentEvidenceId": "canny:post-1",
+                "title": "",
+                "content": "Me too! Would love dark mode.",
+                "sourceUrl": "https://moego.canny.io/feature-request/p/dark-mode",
+            },
+        ]
+        fb_ev = [
+            {
+                "evidenceId": "facebook:post-1",
+                "sourceKey": "facebook",
+                "objectType": "feedback",
+                "title": "Report card button missing",
+                "content": "Report card button missing after update on iOS app",
+                "sourceUrl": "https://www.facebook.com/groups/moego/posts/1",
+            },
+        ]
+        if intercom_items is None:
+            intercom_items = [
+                {
+                    "evidenceId": "intercom:conv-cs",
+                    "sourceKey": "intercom",
+                    "sourceUrl": "https://app.intercom.com/a/apps/abc/inbox/conversation/100",
+                    "csTickets": ["CS-12345"],
+                    "jiraKeys": ["CS-12345"],
+                    "messages": [{"role": "customer", "inWindow": True, "text": "Refund failed"}],
+                },
+                {
+                    "evidenceId": "intercom:conv-sup",
+                    "sourceKey": "intercom",
+                    "sourceUrl": "https://app.intercom.com/a/apps/abc/inbox/conversation/101",
+                    "csTickets": [],
+                    "jiraKeys": [],
+                    "messages": [{"role": "customer", "inWindow": True, "text": "How do I change password?"}],
+                },
+                {
+                    "evidenceId": "intercom:conv-bug",
+                    "sourceKey": "intercom",
+                    "sourceUrl": "https://app.intercom.com/a/apps/abc/inbox/conversation/102",
+                    "csTickets": [],
+                    "jiraKeys": [],
+                    "messages": [{"role": "customer", "inWindow": True, "text": "Calendar crashes with 500 error"}],
+                },
+            ]
+        files = []
+        for src_name, ev in (("canny", canny_ev), ("facebook", fb_ev), ("intercom", intercom_items)):
+            fpath = root / f"{src_name}.json"
+            fpath.write_text(json.dumps({
+                "manifest": {
+                    "schemaVersion": 1,
+                    "sourceKey": src_name,
+                    "status": "succeeded",
+                    "period": {"start": target_date, "end": target_date},
+                    "evidenceCount": len(ev),
+                },
+                "evidence": ev,
+            }, ensure_ascii=False), encoding="utf-8")
+            files.append(str(fpath))
+        return files
+
+    def test_screening_state_machine_gates_and_build_evidence_index(self):
+        scan = issue("scan-s", identifier="GRM-888", created_at="2026-11-20T01:00:00Z")
+        lanes = [issue(f"ls-{n}", parent_issue_id="scan-s", metadata={"dailyLane": {
+            "schemaVersion": 1, "protocolVersion": 3, "mode": "investigate_lane", "roundId": "scan-s", "lane": n, "laneCount": 2}})
+            for n in (1, 2)]
+        for row in (scan, *lanes):
+            self.native.issues[row["id"]] = row
+            self.native.comments_by_issue[row["id"]] = row["_comments"]
+            self.native.runs_by_issue[row["id"]] = []
+
+        src_files = self._write_collect_daily_artifacts(Path(self.temp.name) / "daily")
+        out_dir = Path(self.temp.name) / "batches"
+        prep = self.ops.prepare_screening("scan-s", src_files, target_date="2026-11-19", out_dir=str(out_dir), batch_size=2)
+        self.assertEqual(prep["totalCollected"], 6)
+        self.assertEqual(prep["autoCsFollowed"], 1)
+        self.assertEqual(prep["pendingCount"], 5)
+        self.assertEqual(prep["batchCount"], 3)
+        self.assertEqual(self.native.issue("scan-s")["metadata"]["dailyScan"]["collected"],
+                         {"canny": 2, "facebook": 1, "intercom": 3})
+
+        batch1 = json.loads((out_dir / "batch-001.json").read_text(encoding="utf-8"))
+        self.assertEqual([item["evidenceId"] for item in batch1["items"]], ["canny:post-1", "canny:comment-1"])
+        self.assertEqual(batch1["items"][1]["objectType"], "comment")
+        self.assertEqual(batch1["items"][1]["parentEvidenceId"], "canny:post-1")
+        batch2 = json.loads((out_dir / "batch-002.json").read_text(encoding="utf-8"))
+        self.assertEqual(batch2["items"][0]["preview"], "Report card button missing after update on iOS app")
+
+        # Pending > 0 must block export-screening and init-scan-manifest.
+        mpath = Path(self.temp.name) / "manifest-s.json"
+        with self.assertRaises(ops_module.OpsError):
+            self.ops.export_screening("scan-s", mpath)
+        mpath.write_text(json.dumps(manifest(scan_id="scan-s", count=1)), encoding="utf-8")
+        with self.assertRaises(ops_module.OpsError):
+            self.ops.init_scan_manifest("scan-s", mpath, target_date="2026-11-19",
+                                        scheduler_revision="a" * 40, runtime_id=self.ops.runtime_id, agent_id="agent")
+
+        # Record batch 1 and verify idempotent re-run of prepare_screening preserves recorded decisions and cleans stale batches.
+        d1 = Path(self.temp.name) / "d1.json"
+        d1.write_text(json.dumps([
+            {"evidenceId": "canny:post-1", "state": "product_decision", "summary": "Dark mode request", "reason": "Feature request"},
+            {"evidenceId": "canny:comment-1", "state": "product_decision", "summary": "Dark mode +1 comment", "reason": "Feature request comment"},
+        ]), encoding="utf-8")
+        rec1 = self.ops.record_screening("scan-s", d1)
+        self.assertEqual(rec1["pendingCount"], 3)
+        self.assertEqual(len(rec1["remainingBatches"]), 2)
+
+        prep_again = self.ops.prepare_screening("scan-s", src_files, target_date="2026-11-19", out_dir=str(out_dir), batch_size=2)
+        self.assertEqual(prep_again["pendingCount"], 3)
+        self.assertEqual(prep_again["batchCount"], 2)
+        self.assertFalse((out_dir / "batch-003.json").exists())
+
+        # Record remaining items; cs_followed without ticket key must fail.
+        bad_cs = Path(self.temp.name) / "bad-cs.json"
+        bad_cs.write_text(json.dumps([
+            {"evidenceId": "facebook:post-1", "state": "cs_followed", "summary": "Report card", "reason": "CS handled without key"},
+        ]), encoding="utf-8")
+        with self.assertRaises(ops_module.OpsError):
+            self.ops.record_screening("scan-s", bad_cs)
+
+        d2 = Path(self.temp.name) / "d2.json"
+        d2.write_text(json.dumps([
+            {"evidenceId": "facebook:post-1", "state": "suspected", "summary": "Report card missing", "reason": "Missing button regression"},
+            {"evidenceId": "intercom:conv-sup", "state": "non_bug", "summary": "Password change question", "reason": "How-to support question"},
+            {"evidenceId": "intercom:conv-bug", "state": "suspected", "summary": "Calendar 500 error", "reason": "Crash on calendar load"},
+        ]), encoding="utf-8")
+        rec2 = self.ops.record_screening("scan-s", d2)
+        self.assertEqual(rec2["pendingCount"], 0)
+        self.assertEqual(rec2["remainingBatches"], [])
+
+        exp = self.ops.export_screening("scan-s", mpath)
+        self.assertEqual(exp["candidateCount"], 2)
+        self.assertEqual(exp["totalCollected"], 6)
+        self.assertEqual(self.native.issue("scan-s")["metadata"]["dailyScan"]["counts"],
+                         {"nonBug": 1, "productDecision": 2, "csFollowed": 1})
+
+        # Tampered manifest candidate set must be rejected by init-scan-manifest.
+        bad_mpath = Path(self.temp.name) / "bad-manifest-s.json"
+        bad_mpath.write_text(json.dumps(manifest(scan_id="scan-s", count=1)), encoding="utf-8")
+        with self.assertRaises(ops_module.OpsError):
+            self.ops.init_scan_manifest("scan-s", bad_mpath, target_date="2026-11-19",
+                                        scheduler_revision="a" * 40, runtime_id=self.ops.runtime_id, agent_id="agent")
+
+        self.ops.init_scan_manifest("scan-s", mpath, target_date="2026-11-19",
+                                    scheduler_revision="a" * 40, runtime_id=self.ops.runtime_id, agent_id="agent")
+        with self.assertRaises(ops_module.OpsError):
+            self.ops.record_screening("scan-s", d2)
+
+        # Complete Phase 2 investigations and build complete evidence index.
+        self.ops.update_scan_status("scan-s", coverage_complete=True)
+        for lane_id, concl_payload in (
+            ("ls-1", {"conclusion": "excluded", "evidenceRevision": "fb:1", "conclusionRef": "User outdated app version"}),
+            ("ls-2", {"conclusion": "suspended_external", "evidenceRevision": "ic:102",
+                      "blocker": {"kind": "external_evidence", "missingEvidence": "missing request id",
+                                        "resumeCondition": "merchant sends trace",
+                                        "attempts": {"source": "read conv", "implementation": "checked repo",
+                                                     "data": "queried dd", "verification": "could not repro"},
+                                        "evidenceRevision": "ic:102", "checkedAt": "2026-11-20T01:00:00Z",
+                                        "nextCheckAt": "2026-11-21T01:00:00Z"}}),
+        ):
+            c = self.ops.claim("scan-s", lane_id)
+            rp = Path(self.temp.name) / f"{lane_id}.html"; rp.write_text("ok")
+            jf = Path(self.temp.name) / f"{lane_id}.json"; jf.write_text(json.dumps(concl_payload))
+            self.ops.submit_investigation("scan-s", lane_id, c["candidateId"], c["fencingToken"], jf, rp)
+
+        ev_path = Path(self.temp.name) / "scan-evidence-index-s.json"
+        built = self.ops.build_evidence_index("scan-s", ev_path, agent_id="agent")
+        self.assertEqual(built["recordCount"], 6)
+        ev_loaded = json.loads(ev_path.read_text(encoding="utf-8"))
+        states_by_id = {r["evidenceId"]: r["state"] for r in ev_loaded["records"]}
+        self.assertEqual(states_by_id, {
+            "canny:post-1": "product_decision",
+            "canny:comment-1": "product_decision",
+            "facebook:post-1": "excluded_after_investigation",
+            "intercom:conv-cs": "cs_followed",
+            "intercom:conv-sup": "non_bug",
+            "intercom:conv-bug": "verification_blocked",
+        })
+
+        # finish-scan succeeds with default summary (uses [GRM-888](https://.../grm/issues/GRM-888)).
+        fin = self.ops.finish_scan("scan-s", ev_path, ledger_issue="GRM-664", channel="C0")
+        self.assertEqual(fin["suspected"], 2)
+        self.assertEqual(len(self.slack.messages), 1)
+        self.assertIn("[GRM-888](https://multica.devops.moego.dev/grm/issues/GRM-888)", self.slack.messages[0]["text"])
+
+    def test_closure_gates_and_slack_link_validation(self):
+        # Reject bogus keys in update-scan-status counts/collected.
+        with self.assertRaises(ops_module.OpsError):
+            self.ops.update_scan_status("scan", counts={"intercom": 391})
+        with self.assertRaises(ops_module.OpsError):
+            self.ops.update_scan_status("scan", collected={"jira": 1})
+
+        # Reject unclosed collected vs counts+manifest (401 != 12) at init_scan_manifest.
+        scan_unclosed = issue("scan-u", identifier="GRM-999")
+        self.native.issues["scan-u"] = scan_unclosed
+        self.native.comments_by_issue["scan-u"] = []
+        self.native.runs_by_issue["scan-u"] = []
+        self.ops.update_scan_status("scan-u", collected={"canny": 8, "facebook": 2, "intercom": 391},
+                                    counts={"nonBug": 0, "productDecision": 0, "csFollowed": 4})
+        m_u = Path(self.temp.name) / "manifest-u.json"
+        m_u.write_text(json.dumps(manifest(scan_id="scan-u", count=8)), encoding="utf-8")
+        with self.assertRaises(ops_module.OpsError):
+            self.ops.init_scan_manifest("scan-u", m_u, target_date="2026-10-21",
+                                        scheduler_revision="a" * 40, runtime_id=self.ops.runtime_id, agent_id="agent")
+
+        # Slack link validation in finish_scan (dry-run & live) and deliver_bug/block_bug.
+        self.native.issues["scan"]["identifier"] = "GRM-701"
+        self.native.metadata_set("scan", "dailyScan", {
+            "targetDate": "2026-10-21", "coverageComplete": True,
+            "sources": {"canny": {"status": "success"}, "facebook": {"status": "success"}, "intercom": {"status": "success"}},
+            "collected": {"canny": 0, "facebook": 0, "intercom": 1},
+            "counts": {"nonBug": 0, "productDecision": 0, "csFollowed": 0}})
+        claim = self.ops.claim("scan", "lane-1")
+        rep = Path(self.temp.name) / "inv701.html"; rep.write_text("ok")
+        rec_f = Path(self.temp.name) / "inv701.json"
+        rec_f.write_text(json.dumps({"conclusion": "duplicate", "evidenceRevision": "ic:1", "conclusionRef": "GRM-1"}))
+        self.ops.submit_investigation("scan", "lane-1", "intercom:1", claim["fencingToken"], rec_f, rep)
+        ev701 = Path(self.temp.name) / "ev701.json"
+        ev701.write_text(json.dumps({"records": [{"candidateId": "intercom:1", "state": "duplicate"}]}))
+
+        bad_uuid = Path(self.temp.name) / "bad-uuid.txt"
+        bad_uuid.write_text("每日 Bug 值守｜10-21 反馈扫描完成　https://multica.devops.moego.dev/workspaces/1b6d114a-8407-4ba8-adea-d31209caabe5/issues/01a1f4f7-71af-716f-b4b2-3eb2385cb898", encoding="utf-8")
+        with self.assertRaises(ops_module.OpsError):
+            self.ops.finish_scan("scan", ev701, ledger_issue="GRM-664", channel="C0", text_file=bad_uuid, dry_run=True)
+
+        bad_mrkdwn = Path(self.temp.name) / "bad-mrkdwn.txt"
+        bad_mrkdwn.write_text("每日 Bug 值守｜10-21 反馈扫描完成 <https://multica.devops.moego.dev/grm/issues/GRM-701|GRM-701>", encoding="utf-8")
+        with self.assertRaises(ops_module.OpsError):
+            self.ops.finish_scan("scan", ev701, ledger_issue="GRM-664", channel="C0", text_file=bad_mrkdwn, dry_run=True)
+
+        bad_missing_ident = Path(self.temp.name) / "bad-noident.txt"
+        bad_missing_ident.write_text("每日 Bug 值守｜10-21 反馈扫描完成 [GRM-999](https://multica.devops.moego.dev/grm/issues/GRM-999)", encoding="utf-8")
+        with self.assertRaises(ops_module.OpsError):
+            self.ops.finish_scan("scan", ev701, ledger_issue="GRM-664", channel="C0", text_file=bad_missing_ident)
+
+        good_txt = Path(self.temp.name) / "good701.txt"
+        good_txt.write_text("每日 Bug 值守｜10-21 反馈扫描完成 [GRM-701](https://multica.devops.moego.dev/grm/issues/GRM-701)", encoding="utf-8")
+        dry = self.ops.finish_scan("scan", ev701, ledger_issue="GRM-664", channel="C0", text_file=good_txt, dry_run=True)
+        self.assertEqual(dry["status"], "dry_run")
+
+        # Bug delivery/block must also reject /workspaces/.../issues/<uuid>.
+        bug = issue("bug-link", identifier="GRM-702", parent_issue_id="scan", metadata={"dailyBug": {
+            "schemaVersion": 1, "protocolVersion": 3, "mode": "bug", "batchId": "scan",
+            "sourceScanId": "scan", "candidateId": "intercom:1", "investigationRef": "scan:intercom:1",
+            "feedbackDate": "2026-10-21", "source": "intercom", "sourceUrl": "https://app.intercom.com/conversation/1"}})
+        self.native.issues["bug-link"] = bug
+        self.native.comments_by_issue["bug-link"] = []
+        self.native.runs_by_issue["bug-link"] = []
+        bug_rep = Path(self.temp.name) / "bug702.html"; bug_rep.write_text("report")
+        with self.assertRaises(ops_module.OpsError):
+            self.ops.deliver_bug(bug_id="bug-link", report_file=bug_rep, ledger_issue="GRM-664", channel="C0",
+                                 text_file=bad_uuid, prs=["https://github.com/org/repo/pull/1"], pr_heads=["abcdef1"], dry_run=True)
+        with self.assertRaises(ops_module.OpsError):
+            self.ops.block_bug(bug_id="bug-link", blocker={"kind": "ci", "reason": "wait", "resumeCondition": "green"},
+                                ledger_issue="GRM-664", channel="C0", text_file=bad_mrkdwn, dry_run=True)
 
     def test_native_comment_add_retries_with_parent_on_comment_triggered_conflict(self):
         calls = []

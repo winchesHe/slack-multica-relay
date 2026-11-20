@@ -48,6 +48,17 @@ UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abA
 SHA_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
 PR_RE = re.compile(r"^https://github\.com/[^/]+/[^/]+/pull/[0-9]+$")
 DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
+ISSUE_IDENTIFIER_RE = re.compile(r"^[A-Z][A-Z0-9]+-[0-9]+$")
+WORKSPACE_ISSUE_URL_RE = re.compile(r"https?://[^\s)\]>]+/workspaces/[^/\s]+/issues/[^\s)\]>]+")
+SLACK_MRKDWN_LINK_RE = re.compile(r"<https?://[^|>\s]+\|[^>]+>")
+TICKET_KEY_RE = re.compile(r"\b([A-Z][A-Z0-9]{1,9}-\d+)\b")
+SCREENING_STATES = {"non_bug", "product_decision", "cs_followed", "suspected"}
+SCAN_COUNT_KEYS = {"nonBug", "productDecision", "csFollowed"}
+EVIDENCE_RECORD_STATES = {
+    "confirmed", "skipped_failure", "verification_blocked", "duplicate",
+    "cs_followed", "excluded_after_investigation", "product_decision", "non_bug",
+    "excluded", "suspended_external",
+}
 
 
 class OpsError(ValueError):
@@ -245,6 +256,22 @@ def compose_slack_permalink(workspace_base, channel_id, ts, thread_ts=None):
     if thread_ts and str(thread_ts).strip() != ts_str:
         url = f"{url}?thread_ts={str(thread_ts).strip()}&cid={channel_id}"
     return url
+
+
+def validate_slack_markdown_text(text, *, identifier=None, require_issue_link=False):
+    if not isinstance(text, str) or not text.strip():
+        raise OpsError("Slack 正文不能为空")
+    if WORKSPACE_ISSUE_URL_RE.search(text):
+        raise OpsError("Slack 正文禁止使用 /workspaces/.../issues/<uuid> 裸链接，请使用 [GRM-xxx](https://.../grm/issues/GRM-xxx)")
+    if SLACK_MRKDWN_LINK_RE.search(text):
+        raise OpsError("Slack 正文必须使用标准 Markdown 链接 [文本](URL)，不要使用 <URL|文本>")
+    if require_issue_link and ISSUE_IDENTIFIER_RE.fullmatch(str(identifier or "")):
+        ident = str(identifier)
+        pattern = re.compile(
+            rf"\[{re.escape(ident)}\]\(https?://[^)\s]+/issues/{re.escape(ident)}(?:[/?#][^)\s]*)?\)"
+        )
+        if not pattern.search(text):
+            raise OpsError(f"Slack 扫描汇总必须包含标准 Markdown 任务链接 [{ident}](https://.../issues/{ident})")
 
 
 def run_id_set(runs):
@@ -720,7 +747,7 @@ class Ops:
         if execution != expected:
             self.native.metadata_set(scan_id, "dailyExecution", expected)
         scan_data = metadata(scan, "dailyScan")
-        if scan_data and scan_data.get("targetDate") != target_date:
+        if scan_data and scan_data.get("targetDate") and scan_data.get("targetDate") != target_date:
             raise OpsError("dailyScan.targetDate 已冻结，不能覆盖")
         daily_scan = dict(scan_data)
         daily_scan.update({"targetDate": target_date, "coverageComplete": bool(scan_data.get("coverageComplete", False)),
@@ -781,6 +808,435 @@ class Ops:
             lanes.append(lane)
         return lanes
 
+    def _issue_public_url(self, issue_id, identifier=None):
+        base = (getattr(self.native, "server_url", None) or "https://multica.devops.moego.dev").rstrip("/")
+        if ISSUE_IDENTIFIER_RE.fullmatch(str(identifier or "")):
+            slug = str(identifier).split("-", 1)[0].lower()
+            return f"{base}/{slug}/issues/{identifier}"
+        return f"{base}/workspaces/{self.workspace_id}/issues/{issue_id}"
+
+    @staticmethod
+    def _screening_counts(items):
+        counts = {"nonBug": 0, "productDecision": 0, "csFollowed": 0, "suspected": 0, "pending": 0}
+        for item in items.values():
+            st = item.get("state")
+            if st == "non_bug":
+                counts["nonBug"] += 1
+            elif st == "product_decision":
+                counts["productDecision"] += 1
+            elif st == "cs_followed":
+                counts["csFollowed"] += 1
+            elif st == "suspected":
+                counts["suspected"] += 1
+            else:
+                counts["pending"] += 1
+        return counts
+
+    @staticmethod
+    def _screening_remaining_batches(screening):
+        items = screening.get("items") or {}
+        remaining = []
+        for batch in screening.get("batches") or []:
+            eids = batch.get("evidenceIds") or []
+            if any((items.get(eid) or {}).get("state", "pending") == "pending" for eid in eids):
+                remaining.append({"batchId": batch.get("batchId"), "file": batch.get("file"),
+                                  "pending": sum(1 for eid in eids if (items.get(eid) or {}).get("state", "pending") == "pending")})
+        return remaining
+
+    @staticmethod
+    def _extract_screening_preview(source, raw_item):
+        if source == "intercom":
+            msgs = [
+                re.sub(r"\s+", " ", str(m.get("text") or "")).strip()
+                for m in (raw_item.get("messages") or [])
+                if isinstance(m, dict) and m.get("role") in {"customer", "user", "lead"} and m.get("inWindow")
+            ]
+            joined = " | ".join(msg for msg in msgs if msg)
+            return joined[:600]
+        title = re.sub(r"\s+", " ", str(raw_item.get("title") or "")).strip()
+        content = re.sub(r"\s+", " ", str(raw_item.get("content") or "")).strip()
+        if title and content and content != title:
+            if content.startswith(title):
+                return content[:600]
+            return f"{title} — {content}"[:600]
+        return (title or content)[:600]
+
+    def prepare_screening(self, scan_id, source_files, *, target_date=None, out_dir=None, batch_size=40):
+        if type(batch_size) is not int or batch_size < 1:
+            raise OpsError("batch-size 必须是正整数")
+        if not target_date or not DATE_RE.fullmatch(target_date):
+            raise OpsError("prepare-screening 必须提供 YYYY-MM-DD 格式的 --target-date")
+        if not source_files:
+            raise OpsError("prepare-screening 必须提供 --source-files")
+        by_source = {}
+        for file_path in source_files:
+            payload = json_from_file(file_path)
+            manifest_info = payload.get("manifest")
+            evidence = payload.get("evidence")
+            if not isinstance(manifest_info, dict) or not isinstance(evidence, list):
+                raise OpsError(f"采集产物格式无效：{file_path}")
+            src = manifest_info.get("sourceKey")
+            if src not in SOURCE_NAMES:
+                raise OpsError(f"采集产物 sourceKey 无效：{src}")
+            if src in by_source:
+                raise OpsError(f"重复提供了 {src} 采集产物")
+            if manifest_info.get("status") not in {"succeeded", "success"}:
+                raise OpsError(f"{src} 采集状态未成功：{manifest_info.get('status')}")
+            period = manifest_info.get("period")
+            if isinstance(period, dict):
+                if period.get("start") != target_date or period.get("end") != target_date:
+                    raise OpsError(f"{src} 采集周期与目标日 {target_date} 不一致")
+            elif isinstance(period, str) and period != target_date:
+                raise OpsError(f"{src} 采集周期与目标日 {target_date} 不一致")
+            ev_count = manifest_info.get("evidenceCount")
+            if type(ev_count) is int and ev_count != len(evidence):
+                raise OpsError(f"{src} 采集 manifest.evidenceCount({ev_count}) 与 evidence 长度({len(evidence)}) 不一致")
+            by_source[src] = evidence
+        if set(by_source) != set(SOURCE_NAMES):
+            missing = sorted(set(SOURCE_NAMES) - set(by_source))
+            raise OpsError(f"prepare-screening 缺少来源采集产物：{', '.join(missing)}")
+
+        ordered_items = []
+        seen_ids = set()
+        for src in SOURCE_NAMES:
+            for idx, raw_item in enumerate(by_source[src]):
+                if not isinstance(raw_item, dict):
+                    raise OpsError(f"{src} 第 {idx} 条证据不是对象")
+                eid = raw_item.get("evidenceId")
+                surl = raw_item.get("sourceUrl")
+                if not isinstance(eid, str) or not eid.strip():
+                    raise OpsError(f"{src} 第 {idx} 条证据缺少 evidenceId")
+                if eid in seen_ids:
+                    raise OpsError(f"存在重复 evidenceId：{eid}")
+                if not isinstance(surl, str) or not surl.strip():
+                    raise OpsError(f"{eid} 缺少 sourceUrl")
+                seen_ids.add(eid)
+                cs_tickets = [str(t).strip() for t in (raw_item.get("csTickets") or []) if isinstance(t, str) and t.strip()]
+                jira_keys = [str(t).strip() for t in (raw_item.get("jiraKeys") or []) if isinstance(t, str) and t.strip()]
+                preview = self._extract_screening_preview(src, raw_item)
+                item_row = {
+                    "index": len(ordered_items),
+                    "evidenceId": eid.strip(),
+                    "source": src,
+                    "sourceUrl": surl.strip(),
+                    "csTickets": cs_tickets,
+                    "jiraKeys": jira_keys,
+                    "preview": preview,
+                }
+                if raw_item.get("objectType"):
+                    item_row["objectType"] = str(raw_item["objectType"])
+                if raw_item.get("parentEvidenceId"):
+                    item_row["parentEvidenceId"] = str(raw_item["parentEvidenceId"])
+                ordered_items.append(item_row)
+
+        collected_map = {src: len(by_source[src]) for src in SOURCE_NAMES}
+        with file_lock(self._lock_for_round(scan_id)):
+            existing_manifest = self.manifest(scan_id, self.agent_id)
+            state = self.state(scan_id)
+            prev_screening = state.get("screening") or {}
+            prev_items = prev_screening.get("items") or {}
+            if existing_manifest and set(prev_items) != seen_ids:
+                raise OpsError("manifest 已冻结，不能变更采集初筛样本集")
+            same_universe = bool(prev_items) and set(prev_items.keys()) == seen_ids and prev_screening.get("targetDate") == target_date
+
+            items = {}
+            auto_cs = 0
+            pending_rows = []
+            for row in ordered_items:
+                eid = row["evidenceId"]
+                prev_row = prev_items.get(eid) if same_universe else None
+                if prev_row and prev_row.get("state") in SCREENING_STATES:
+                    entry = {**row, **{k: prev_row[k] for k in ("state", "summary", "reason", "csTickets", "verifiedJiraKeys", "auto") if k in prev_row}}
+                elif row["source"] == "intercom" and row["csTickets"]:
+                    auto_cs += 1
+                    entry = {
+                        **row,
+                        "state": "cs_followed",
+                        "summary": (row["preview"][:120] or eid),
+                        "reason": f"Intercom 会话已关联 CS 工单：{', '.join(row['csTickets'])}",
+                        "auto": True,
+                    }
+                else:
+                    entry = {**row, "state": "pending"}
+                items[eid] = entry
+                if entry["state"] == "pending":
+                    pending_rows.append(row)
+
+            batch_root = Path(out_dir) if out_dir else (self.state_dir / f"screening-{scan_id}")
+            batch_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            for stale in batch_root.glob("batch-*.json"):
+                stale.unlink()
+            batches = []
+            for b_idx in range(0, len(pending_rows), batch_size):
+                chunk = pending_rows[b_idx:b_idx + batch_size]
+                batch_num = (b_idx // batch_size) + 1
+                batch_id = f"batch-{batch_num:03d}"
+                batch_path = batch_root / f"{batch_id}.json"
+                atomic_write(batch_path, {
+                    "roundId": scan_id,
+                    "targetDate": target_date,
+                    "batchId": batch_id,
+                    "count": len(chunk),
+                    "items": chunk,
+                })
+                batches.append({"batchId": batch_id, "file": str(batch_path), "evidenceIds": [r["evidenceId"] for r in chunk]})
+
+            screening = {
+                "schemaVersion": 1,
+                "targetDate": target_date,
+                "collected": collected_map,
+                "totalCollected": len(ordered_items),
+                "items": items,
+                "batches": batches,
+            }
+            state["screening"] = screening
+            self.save_state(scan_id, state)
+
+        # 锁外或统一走 update_scan_status 写回 dailyScan；这里注意 update_scan_status 内部也会加同一把锁，
+        # 因此必须在释放上方 with file_lock 后再调用 update_scan_status，避免自重入死锁。
+        for src in SOURCE_NAMES:
+            self.update_scan_status(scan_id, target_date=target_date, source=src, source_status="success",
+                                    collected={src: collected_map[src]})
+        counts = self._screening_counts(items)
+        return {
+            "status": "prepared",
+            "roundId": scan_id,
+            "targetDate": target_date,
+            "collected": collected_map,
+            "totalCollected": len(ordered_items),
+            "autoCsFollowed": auto_cs,
+            "pendingCount": counts["pending"],
+            "batchSize": batch_size,
+            "batchCount": len(batches),
+            "batchFiles": [b["file"] for b in batches],
+            "counts": {k: counts[k] for k in ("nonBug", "productDecision", "csFollowed", "suspected")},
+        }
+
+    def record_screening(self, scan_id, decisions_file):
+        try:
+            raw = json.loads(Path(decisions_file).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise OpsError("初筛结论 JSON 不可读") from error
+        if isinstance(raw, list):
+            decisions = raw
+        elif isinstance(raw, dict):
+            decisions = raw.get("decisions") if isinstance(raw.get("decisions"), list) else raw.get("records")
+        else:
+            decisions = None
+        if not isinstance(decisions, list) or not decisions:
+            raise OpsError("decisions-file 必须包含非空 decisions 或 records 数组")
+        with file_lock(self._lock_for_round(scan_id)):
+            if self.manifest(scan_id, self.agent_id):
+                raise OpsError("manifest 已冻结，不能再修改初筛结论")
+            state = self.state(scan_id)
+            screening = state.get("screening")
+            if not isinstance(screening, dict) or not isinstance(screening.get("items"), dict):
+                raise OpsError("尚未执行 prepare-screening")
+            items = screening["items"]
+            updated = 0
+            for idx, entry in enumerate(decisions):
+                if not isinstance(entry, dict):
+                    raise OpsError(f"第 {idx} 条初筛结论不是对象")
+                eid = entry.get("evidenceId")
+                if not isinstance(eid, str) or eid not in items:
+                    raise OpsError(f"初筛结论包含未知 evidenceId：{eid}")
+                st = entry.get("state")
+                if st not in SCREENING_STATES:
+                    raise OpsError(f"{eid} 的初筛状态无效：{st}")
+                summary = str(entry.get("summary") or "").strip()
+                reason = str(entry.get("reason") or "").strip()
+                if not summary or not reason:
+                    raise OpsError(f"{eid} 缺少非空 summary 或 reason")
+                cs_tickets = [str(t).strip() for t in (entry.get("csTickets") or items[eid].get("csTickets") or [])
+                              if isinstance(t, str) and t.strip()]
+                verified_keys = [str(t).strip() for t in (entry.get("verifiedJiraKeys") or [])
+                                 if isinstance(t, str) and t.strip()]
+                if st == "cs_followed" and not (cs_tickets or verified_keys or TICKET_KEY_RE.search(reason)):
+                    raise OpsError(f"{eid} 标为 cs_followed 时必须提供 csTickets/verifiedJiraKeys 或工单号依据")
+                updated_item = {
+                    **items[eid],
+                    "state": st,
+                    "summary": summary,
+                    "reason": reason,
+                    "auto": False,
+                }
+                if cs_tickets:
+                    updated_item["csTickets"] = cs_tickets
+                if verified_keys:
+                    updated_item["verifiedJiraKeys"] = verified_keys
+                items[eid] = updated_item
+                updated += 1
+            self.save_state(scan_id, state)
+            counts = self._screening_counts(items)
+            remaining = self._screening_remaining_batches(screening)
+        return {
+            "status": "recorded",
+            "roundId": scan_id,
+            "updated": updated,
+            "totalCollected": screening.get("totalCollected", len(items)),
+            "classified": len(items) - counts["pending"],
+            "pendingCount": counts["pending"],
+            "remainingBatches": remaining,
+            "counts": {k: counts[k] for k in ("nonBug", "productDecision", "csFollowed", "suspected")},
+        }
+
+    def export_screening(self, scan_id, manifest_file, *, evidence_file=None):
+        with file_lock(self._lock_for_round(scan_id)):
+            state = self.state(scan_id)
+            screening = state.get("screening")
+            if not isinstance(screening, dict) or not isinstance(screening.get("items"), dict):
+                raise OpsError("尚未执行 prepare-screening")
+            items = screening["items"]
+            counts = self._screening_counts(items)
+            if counts["pending"] > 0:
+                rem = [b["batchId"] for b in self._screening_remaining_batches(screening)]
+                hint = f"（未清批次：{', '.join(rem[:5])}）" if rem else ""
+                raise OpsError(f"仍有 {counts['pending']} 条采集反馈未完成初筛{hint}，禁止导出 manifest")
+            target_date = screening["targetDate"]
+            candidates = [
+                {
+                    "candidateId": item["evidenceId"],
+                    "feedbackDate": target_date,
+                    "summary": item["summary"],
+                    "source": item["source"],
+                    "sourceUrl": item["sourceUrl"],
+                }
+                for item in items.values()
+                if item.get("state") == "suspected"
+            ]
+            manifest_payload = {
+                "protocolVersion": PROTOCOL_VERSION,
+                "roundId": scan_id,
+                "feedbackDate": target_date,
+                "candidateCount": len(candidates),
+                "candidates": candidates,
+                "candidateSetSha256": candidate_hash([c["candidateId"] for c in candidates]),
+            }
+            atomic_write(manifest_file, manifest_payload)
+            scan = self.native.issue(scan_id)
+            scan_ident = scan.get("identifier") or scan_id
+            if evidence_file and not candidates:
+                records = [self._screening_record_row(item) for item in items.values()]
+                atomic_write(evidence_file, {"targetDate": target_date, "identifier": scan_ident, "records": records})
+        phase1_counts = {k: counts[k] for k in ("nonBug", "productDecision", "csFollowed")}
+        self.update_scan_status(scan_id, target_date=target_date, collected=screening.get("collected"),
+                                counts=phase1_counts)
+        return {
+            "status": "exported",
+            "roundId": scan_id,
+            "targetDate": target_date,
+            "totalCollected": len(items),
+            "candidateCount": len(candidates),
+            "candidateSetSha256": manifest_payload["candidateSetSha256"],
+            "counts": {k: counts[k] for k in ("nonBug", "productDecision", "csFollowed", "suspected")},
+        }
+
+    @staticmethod
+    def _screening_record_row(item):
+        row = {
+            "evidenceId": item["evidenceId"],
+            "state": item["state"],
+            "source": item["source"],
+            "summary": item["summary"],
+            "reason": item["reason"],
+            "sourceUrl": item["sourceUrl"],
+        }
+        if item.get("csTickets"):
+            row["csTickets"] = item["csTickets"]
+        if item.get("verifiedJiraKeys"):
+            row["verifiedJiraKeys"] = item["verifiedJiraKeys"]
+        return row
+
+    def build_evidence_index(self, scan_id, evidence_file, *, agent_id=None):
+        agent_id = agent_id or self.agent_id or self.native.issue(scan_id).get("assignee_id")
+        with file_lock(self._lock_for_round(scan_id)):
+            state = self.state(scan_id)
+            screening = state.get("screening")
+            if not isinstance(screening, dict) or not isinstance(screening.get("items"), dict):
+                raise OpsError("尚未执行 prepare-screening")
+            items = screening["items"]
+            counts = self._screening_counts(items)
+            if counts["pending"] > 0:
+                raise OpsError(f"仍有 {counts['pending']} 条采集反馈未完成初筛，不能生成证据索引")
+            manifest = self.manifest(scan_id, agent_id)
+            if not manifest:
+                raise OpsError("manifest 未完成回读")
+            scan = self.native.issue(scan_id)
+            issues = self._round_issues(scan_id, scan.get("project_id"))
+            lanes = [row for row in issues if metadata(row, "dailyLane").get("roundId") == scan_id]
+            _, inv_records = self._records(scan_id, manifest, lanes, agent_id)
+            if len(inv_records) != len(manifest["candidates"]):
+                raise OpsError("仍有候选没有终态调查结论")
+            state_map = {
+                "excluded": "excluded_after_investigation",
+                "suspended_external": "verification_blocked",
+            }
+            candidate_by_id = {c["candidateId"]: c for c in manifest["candidates"]}
+            out_records = []
+            for eid, item in items.items():
+                if item.get("state") != "suspected":
+                    out_records.append(self._screening_record_row(item))
+                    continue
+                rec = inv_records.get(eid)
+                if not rec:
+                    raise OpsError(f"候选 {eid} 缺少调查结论")
+                conclusion = rec.get("conclusion")
+                mapped_state = state_map.get(conclusion, conclusion)
+                reason = rec.get("conclusionRef") or ""
+                if conclusion == "confirmed":
+                    ver = rec.get("verification") or {}
+                    reason = ver.get("observedDeviationRef") or ver.get("expectedBehaviorRef") or rec.get("evidenceRevision") or "已确认可修"
+                elif conclusion == "suspended_external":
+                    ext = (rec.get("blocker") or rec.get("externalBlock") or {})
+                    reason = ext.get("missingEvidence") or "外部证据阻塞"
+                elif conclusion == "skipped_failure":
+                    fs = rec.get("failureSkip") or {}
+                    reason = fs.get("reason") or "调查重试耗尽跳过"
+                row = {
+                    "evidenceId": eid,
+                    "candidateId": eid,
+                    "state": mapped_state,
+                    "source": item.get("source") or (candidate_by_id.get(eid) or {}).get("source"),
+                    "summary": item.get("summary") or (candidate_by_id.get(eid) or {}).get("summary") or eid,
+                    "reason": str(reason or rec.get("evidenceRevision") or conclusion),
+                    "sourceUrl": item.get("sourceUrl") or rec.get("sourceUrl"),
+                }
+                if conclusion == "suspended_external":
+                    ext = (rec.get("blocker") or rec.get("externalBlock") or {})
+                    if ext.get("missingEvidence"):
+                        row["unresolvedGap"] = ext["missingEvidence"]
+                    if ext.get("resumeCondition"):
+                        row["resumeCondition"] = ext["resumeCondition"]
+                    if ext.get("attempts"):
+                        row["attempts"] = [f"{k}：{v}" for k, v in ext["attempts"].items()]
+                if conclusion == "confirmed":
+                    ver = rec.get("verification") or {}
+                    if ver.get("expectedBehaviorRef"):
+                        row["correctBehaviorBasis"] = ver["expectedBehaviorRef"]
+                    if ver.get("observedDeviationRef"):
+                        row["observation"] = ver["observedDeviationRef"]
+                if rec.get("conclusionRef"):
+                    keys = TICKET_KEY_RE.findall(str(rec["conclusionRef"]))
+                    if keys:
+                        if conclusion == "cs_followed":
+                            row["csTickets"] = list(dict.fromkeys(keys))
+                        else:
+                            row["verifiedJiraKeys"] = list(dict.fromkeys(keys))
+                out_records.append(row)
+            payload = {
+                "targetDate": screening["targetDate"],
+                "identifier": scan.get("identifier") or scan_id,
+                "records": out_records,
+            }
+            atomic_write(evidence_file, payload)
+        return {
+            "status": "built",
+            "roundId": scan_id,
+            "evidenceFile": str(evidence_file),
+            "recordCount": len(out_records),
+            "totalCollected": len(items),
+        }
+
     def init_scan_manifest(self, scan_id, manifest_file, *, target_date=None, scheduler_revision=None,
                            runtime_id=None, project_id=None, agent_id=None, sources=None, collected=None):
         raw = json_from_file(manifest_file)
@@ -792,6 +1248,26 @@ class Ops:
         if not scheduler_revision or not re.fullmatch(r"[0-9a-fA-F]{40}", scheduler_revision):
             raise OpsError("schedulerRevision 必须是 40 位 SHA")
         with file_lock(self._lock_for_round(scan_id)):
+            state = self.state(scan_id)
+            screening = state.get("screening")
+            if isinstance(screening, dict) and isinstance(screening.get("items"), dict):
+                s_counts = self._screening_counts(screening["items"])
+                if s_counts["pending"] > 0:
+                    raise OpsError(f"仍有 {s_counts['pending']} 条采集反馈未完成初筛，禁止冻结 manifest")
+                suspected_ids = sorted(eid for eid, it in screening["items"].items() if it.get("state") == "suspected")
+                manifest_ids = sorted(item["candidateId"] for item in raw["candidates"])
+                if manifest_ids != suspected_ids:
+                    raise OpsError("manifest 候选集合与初筛 suspected 集合不一致")
+                if collected is None:
+                    collected = screening.get("collected")
+            else:
+                scan_data_pre = metadata(self.native.issue(scan_id), "dailyScan")
+                pre_collected = scan_data_pre.get("collected") or collected or {}
+                if isinstance(pre_collected, dict) and sum(pre_collected.values()) > 0:
+                    pre_counts = scan_data_pre.get("counts") or {}
+                    accounted = sum(int(pre_counts.get(k, 0)) for k in SCAN_COUNT_KEYS) + len(raw["candidates"])
+                    if accounted != sum(pre_collected.values()):
+                        raise OpsError("dailyScan.collected 与初筛分类+候选数不闭合，请先通过 prepare-screening/record-screening/export-screening 完成全量初筛")
             existing = self.manifest(scan_id, agent_id)
             current_hash = sha256_file(manifest_file)
             if existing:
@@ -863,13 +1339,17 @@ class Ops:
             elif source_status is not None or source_url is not None:
                 raise OpsError("设置 source-url 或 source-status 时必须指定 --source")
             if collected is not None:
-                if not isinstance(collected, dict) or any(type(value) is not int or value < 0 for value in collected.values()):
-                    raise OpsError("collected 必须是非负整数对象")
+                if (not isinstance(collected, dict)
+                        or any(key not in SOURCE_NAMES for key in collected)
+                        or any(type(value) is not int or value < 0 for value in collected.values())):
+                    raise OpsError("collected 只能包含 canny/facebook/intercom 非负整数")
                 # 按来源分次更新时保留此前已记录的来源计数，避免后写入覆盖先写入。
                 data["collected"] = {**(data.get("collected") or {}), **collected}
             if counts is not None:
-                if not isinstance(counts, dict) or any(type(value) is not int or value < 0 for value in counts.values()):
-                    raise OpsError("counts 必须是非负整数对象")
+                if (not isinstance(counts, dict)
+                        or any(key not in SCAN_COUNT_KEYS for key in counts)
+                        or any(type(value) is not int or value < 0 for value in counts.values())):
+                    raise OpsError("counts 只能包含 nonBug/productDecision/csFollowed 非负整数")
                 data["counts"] = {**(data.get("counts") or {}), **counts}
             if coverage_complete is not None:
                 data["coverageComplete"] = bool(coverage_complete)
@@ -1468,10 +1948,50 @@ class Ops:
             scan_ident = scan.get("identifier") or scan_id
             collected_map = scan_data.get("collected") or {}
             collected_total = sum(collected_map.values()) if isinstance(collected_map, dict) else 0
+            ev_data = json_from_file(evidence_file)
+            state = self.state(scan_id)
+            screening = state.get("screening")
+            if isinstance(screening, dict) and isinstance(screening.get("items"), dict):
+                s_counts = self._screening_counts(screening["items"])
+                if s_counts["pending"] > 0:
+                    raise OpsError(f"仍有 {s_counts['pending']} 条采集反馈未完成初筛，不能 finish")
+            classified_total = int(counts.get("nonBug", 0)) + int(counts.get("productDecision", 0)) + cs_followed_total + suspected_count
+            if collected_total > 0:
+                if classified_total != collected_total:
+                    raise OpsError(f"采集总数({collected_total})与分类合计({classified_total})不一致，必须 100% 闭合后才可 finish")
+                ev_records = ev_data.get("records")
+                if not isinstance(ev_records, list) or len(ev_records) != collected_total:
+                    actual_len = len(ev_records) if isinstance(ev_records, list) else 0
+                    raise OpsError(f"scan-evidence-index records 数量({actual_len})必须等于采集总数({collected_total})")
+                if any(not isinstance(row, dict) or row.get("state") not in EVIDENCE_RECORD_STATES for row in ev_records):
+                    raise OpsError("scan-evidence-index records 包含缺少或无效 state 的记录")
+                if isinstance(screening, dict) and isinstance(screening.get("items"), dict):
+                    seen_ev = {row.get("evidenceId") or row.get("candidateId") for row in ev_records}
+                    if not all(eid in seen_ev for eid in screening["items"]):
+                        raise OpsError("scan-evidence-index records 未覆盖全部初筛 evidenceId")
+            issue_url = self._issue_public_url(scan_id, scan.get("identifier"))
+            target_str = str(scan_data.get("targetDate") or "")
+            mmdd = target_str[5:] if DATE_RE.fullmatch(target_str) else target_str
             default_summary = (
-                f"{scan_ident} 每日 Bug 值守｜{scan_data.get('targetDate')} 反馈扫描完成\n"
-                f"采集 {collected_total} 条｜疑似候选 {suspected_count} 个｜确认可修 {confirmed} 个。"
+                f"每日 Bug 值守｜{mmdd} 反馈扫描完成 [{scan_ident}]({issue_url})\n\n"
+                f"结论：采集 {collected_total} 条 · 疑似候选 {suspected_count} 个 · 确认可修 {confirmed} 个"
             )
+            if text_file:
+                try:
+                    summary_body = Path(text_file).read_text(encoding="utf-8")
+                except OSError as error:
+                    raise OpsError("Slack 汇总正文文件不可读") from error
+                validate_slack_markdown_text(
+                    summary_body,
+                    identifier=scan.get("identifier"),
+                    require_issue_link=bool(ISSUE_IDENTIFIER_RE.fullmatch(str(scan.get("identifier") or ""))),
+                )
+            else:
+                validate_slack_markdown_text(
+                    default_summary,
+                    identifier=scan.get("identifier"),
+                    require_issue_link=bool(ISSUE_IDENTIFIER_RE.fullmatch(str(scan.get("identifier") or ""))),
+                )
             if dry_run:
                 if not self.slack or not channel:
                     raise OpsError("finish-scan 需要 Slack adapter 和 channel")
@@ -1486,7 +2006,6 @@ class Ops:
                     record = records.get(candidate["candidateId"])
                     if record and record.get("conclusion") == "confirmed":
                         self._create_bug_if_needed(scan_id, candidate, project_id=scan.get("project_id"))
-            state = self.state(scan_id)
             intent = state.setdefault("intents", {}).setdefault("finish", {"evidenceSha256": evidence_hash})
             if intent.get("evidenceSha256") != evidence_hash:
                 raise OpsError("finish intent 与当前证据冲突")
@@ -1752,6 +2271,12 @@ class Ops:
                     self._rerun_parent_if_needed_unlocked(scan_id, agent_id)
                     return old
             version = max_version + 1
+            for tf in (text_file, edit_blocked_text_file):
+                if tf:
+                    try:
+                        validate_slack_markdown_text(Path(tf).read_text(encoding="utf-8"), require_issue_link=False)
+                    except OSError as error:
+                        raise OpsError("Slack 正文文件不可读") from error
             if dry_run:
                 if not self.slack or not channel or not text_file:
                     raise OpsError("交付需要 Slack channel 和 text-file")
@@ -1986,7 +2511,8 @@ def _parse_bool_arg(value):
 
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("init-scan-manifest", "claim", "submit-investigation",
+    parser.add_argument("command", choices=("prepare-screening", "record-screening", "export-screening", "build-evidence-index",
+                                             "init-scan-manifest", "claim", "submit-investigation",
                                              "dispatch-if-issue-idle", "rerun-parent-if-needed",
                                              "acquire-global-repair-slot", "release-global-repair-slot",
                                              "finish-scan", "update-scan-status", "deliver-bug", "block-bug", "inspect-round", "recover"))
@@ -2030,6 +2556,10 @@ def build_parser():
     parser.add_argument("--collected")
     parser.add_argument("--counts")
     parser.add_argument("--coverage-complete", nargs="?", const="true", default=None)
+    parser.add_argument("--source-files", nargs="+", default=[])
+    parser.add_argument("--out-dir")
+    parser.add_argument("--batch-size", type=int, default=40)
+    parser.add_argument("--decisions-file")
     return parser
 
 
@@ -2051,7 +2581,16 @@ def main(argv=None):
                             (args.lane_issue_id, "laneIssueId")):
             if value:
                 ops._validate_id(value, name)
-        if args.command == "init-scan-manifest":
+        if args.command == "prepare-screening":
+            result = ops.prepare_screening(args.round_id, args.source_files, target_date=args.target_date,
+                                           out_dir=args.out_dir, batch_size=args.batch_size)
+        elif args.command == "record-screening":
+            result = ops.record_screening(args.round_id, args.decisions_file)
+        elif args.command == "export-screening":
+            result = ops.export_screening(args.round_id, args.manifest_file, evidence_file=args.evidence_file)
+        elif args.command == "build-evidence-index":
+            result = ops.build_evidence_index(args.round_id, args.evidence_file, agent_id=args.agent_id)
+        elif args.command == "init-scan-manifest":
             result = ops.init_scan_manifest(args.round_id, args.manifest_file, target_date=args.target_date,
                 scheduler_revision=args.scheduler_revision, runtime_id=runtime_id, project_id=args.project_id, agent_id=args.agent_id)
         elif args.command == "claim":
