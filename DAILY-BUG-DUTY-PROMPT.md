@@ -53,7 +53,7 @@ git -C /Users/moego-winches/Desktop/Company/person/slack-multica-relay show <40�
 ### 日采集窗口与三源规则
 
 1. 目标日（`targetDate`）为任务开始时 Asia/Shanghai 的前一个完整自然日。采集开始前调用 `duty-ops.py update-scan-status --target-date <YYYY-MM-DD> --coverage-complete false` 冻结目标日并初始化覆盖状态，并确保扫描标题含 `每日 Bug 值守｜<MM-DD> 反馈`（`multica issue update <scan_id> --title "每日 Bug 值守｜<MM-DD> 反馈｜三源采集与派发" --no-start`），供看板按反馈日检索；恢复时复用已保存目标日，不重算或覆盖旧现场。
-2. 依次对 `canny`、`facebook`、`intercom` 执行 `collect-daily --source <source> --period-start <start> --period-end <yesterday>`，使用同一独立 `DAILY_BUG_OUTPUT_ROOT`。每来源完成或失败后立即调用 `update-scan-status --source <source> --source-status success|failed --collected ...` 保存真实状态与已知数量（失败不填 0）。已成功覆盖昨日则跳过重采；仅对失败来源补采缺失窗口。
+2. 依次对 `canny`、`facebook`、`intercom` 执行 `collect-daily --source <source> --period-start <start> --period-end <yesterday>`，使用同一独立 `DAILY_BUG_OUTPUT_ROOT`。每来源完成或失败后立即调用 `update-scan-status --source <source> --source-status success|failed --collected ...` 保存真实状态与已知数量（失败不填 0）。若 `$DAILY_BUG_OUTPUT_ROOT/daily-bug/daily-progress/<source>.json` 中 `lastSuccessfulDate >= targetDate`，则跳过重采并从该进度文件指向的 `manifest` JSON 中读取 `runArtifact` 路径（`prepare-screening --source-files` 必须传入包含 `manifest` 与 `evidence` 的 `runArtifact` 文件）；仅对未覆盖或失败来源补采缺失窗口。
 3. **来源口径**：
    - **Canny**：按 `period-created-posts / page-visible` 读取窗口内新帖及页面可见评论，不使用 vote/Quick Win 过滤；不声称覆盖旧帖当天新增评论或票数变化，不创建公开 Site。
    - **Facebook**：仅读取既有 Slack 汇总频道消息，不直接抓取 Facebook；`MFC_DOMAIN`、`MFC_SQUAD=All` 仅作来源标签，不作排除依据。
