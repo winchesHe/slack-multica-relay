@@ -7,7 +7,7 @@ schedulerRevision=<调度器提交 SHA>
 
 # GRM 每日 Bug 值守｜02:00 每日扫描入口（Closed Loop B / v3）
 
-每天北京时间 02:00 触发本扫描任务。执行本轮全流程均遵循值守 Agent（`387e0620-8a22-44f5-919c-4a3e6296fcfb`）完整规范：Intercom/Canny/Facebook 三源采集 → 冻结本轮 manifest → 两张 `investigate_lane` 并行取证 → 全部候选结论回读 → 全局修复槽串行 → 逐项完整交付。全程中文；不派生其它 Agent；禁止修改本仓库源文件、本机 Skill、其它 Prompt、Multica 配置或环境变量；PR 合并、生产发布与生产数据写入需额外明确授权。
+每天北京时间 02:00 触发本扫描任务。执行本轮全流程均遵循值守 Agent（`387e0620-8a22-44f5-919c-4a3e6296fcfb`）完整规范：Intercom/Canny/Facebook 三源采集 → `prepare-screening`/`record-screening`/`export-screening` 全量初筛闭合 → 冻结本轮 manifest → 两张 `investigate_lane` 并行取证 → `build-evidence-index` 与 `finish-scan` → 全局修复槽串行 → 逐项完整交付。全程中文；不派生其它 Agent；禁止修改本仓库源文件、本机 Skill、其它 Prompt、Multica 配置或环境变量；PR 合并、生产发布与生产数据写入需额外明确授权。
 
 ## 1. 入口校验与历史隔离
 
@@ -34,9 +34,18 @@ git -C /Users/moego-winches/Desktop/Company/person/slack-multica-relay show <40�
 ## 2. 三源采集与固定 Manifest
 
 1. 确定 Asia/Shanghai 前一个完整自然日作为 `targetDate`，立即调用 `duty-ops.py update-scan-status --workspace-id 1b6d114a-8407-4ba8-adea-d31209caabe5 --round-id <scan_id> --target-date <YYYY-MM-DD> --coverage-complete false` 冻结目标日，并按 `targetDate` 的 `MM-DD` 执行 `multica --server-url https://multica.devops.moego.dev --workspace-id 1b6d114a-8407-4ba8-adea-d31209caabe5 issue update <scan_id> --title "每日 Bug 值守｜<MM-DD> 反馈｜三源采集与派发" --no-start`（若标题已含 `每日 Bug 值守｜<MM-DD> 反馈` 则保持），确保看板能按反馈日检索到本轮扫描；恢复时复用已保存日期。
-2. 用 Python `os.environ` 逐项确认 `DAILY_BUG_COLLECTOR_SCRIPT`、`DAILY_BUG_OUTPUT_ROOT`、`DAILY_BUG_CANNY_ACCOUNT_REF` 存在且非空（只输出变量名与布尔值，禁止打印值）。按 `moe-feedback-collector` `collect-daily` 依次采集 `canny`（首调传 `--account-ref`；`period-created-posts / page-visible`，不用 vote 过滤）、`facebook`（既有 Slack 汇总）与 `intercom`（`inWindow=true` 客户消息为目标日反馈；暂存会话文件于清单固定后删除，后续用 `intercom` Skill 重读）。每来源完成或失败立即调用 `update-scan-status --source <src> --source-status success|failed --collected ... --counts ...`（失败不填 0，恢复只补失败源窗口）。
-3. 附件按 `list-attachments` → `download-attachments` 到临时目录逐个查看（录屏抽帧），调查结束后删除原件。结合 `jira` 只读查 `csTickets`/`jiraKeys`（命中的标为 `cs_followed`），结合历史任务与 PR 查重。计算 `nonBug`、`productDecision`、`csFollowed`、`suspected`，形成含 `targetDate`、`identifier` 与 `records` 数组的 `scan-evidence-index.json` 初筛基线（零候选亦须有证据，全部调查完成后补齐最终 `records`）。
-4. 仅冻结当前反馈日疑似 Bug 为 manifest JSON（`candidateId` 唯一、`feedbackDate == targetDate`、`sourceUrl` 非空、`candidateSetSha256 == duty_queue.candidate_set_hash(ids)`），执行：
+2. 用 Python `os.environ` 逐项确认 `DAILY_BUG_COLLECTOR_SCRIPT`、`DAILY_BUG_OUTPUT_ROOT`、`DAILY_BUG_CANNY_ACCOUNT_REF` 存在且非空（只输出变量名与布尔值，禁止打印值）。若 `$DAILY_BUG_OUTPUT_ROOT/daily-bug/daily-progress/<src>.json` 中 `lastSuccessfulDate >= targetDate`，跳过重复采集并从该进度文件指向的 `manifest` JSON 读取 `runArtifact` 路径；否则按 `moe-feedback-collector` `collect-daily` 依次采集 `canny`（首调传 `--account-ref`；`period-created-posts / page-visible`，不用 vote 过滤）、`facebook`（既有 Slack 汇总）与 `intercom`（`inWindow=true` 客户消息为目标日反馈；暂存会话文件于清单固定后删除，后续用 `intercom` Skill 重读）。每来源完成或失败立即调用 `update-scan-status --source <src> --source-status success|failed --collected '{"<src>": N}'`（失败不填 0，恢复只补失败源窗口；勿在此步虚填 `--counts`）。
+3. **确定性全量初筛状态机**：三源成功后**必须**调用 `prepare-screening` 校验三源 `runArtifact`（含 `manifest` 与 `evidence` 数组，严禁通过 bash `print` 把全量正文刷到 stdout），自动把 Intercom 非空 `csTickets` 归类 `cs_followed`，其余切片写入紧凑 `batch-NNN.json`：
+```bash
+python3 "$TMP_OPS/duty-ops.py" prepare-screening \
+  --workspace-id 1b6d114a-8407-4ba8-adea-d31209caabe5 \
+  --scan-id <scan_id> \
+  --target-date <YYYY-MM-DD> \
+  --source-files <canny_runArtifact.json> <facebook_runArtifact.json> <intercom_runArtifact.json> \
+  --out-dir <screening_dir>
+```
+   用 `read` 工具逐个读取每个 `batch-NNN.json` 并写批次判定 JSON 调用 `record-screening --scan-id <scan_id> --decisions-file <decisions.json>`，直到 `pendingCount == 0` 且 `remainingBatches == []`。再调用 `export-screening --scan-id <scan_id> --manifest-file <manifest.json> [--evidence-file <scan-evidence-index.json>]`（0 候选时直接写出全量 `scan-evidence-index.json`），自动同步 `dailyScan.counts` 并生成候选清单。
+4. `export-screening` 闭合后，执行 `init-scan-manifest` 冻结 `suspected` 候选清单与两张 lane（禁止未闭合即跳过或手工改写 manifest）：
 
 ```bash
 python3 "$TMP_OPS/duty-ops.py" init-scan-manifest \
@@ -56,7 +65,15 @@ python3 "$TMP_OPS/duty-ops.py" init-scan-manifest \
 ## 3. 并行调查汇总与 `finish-scan`（仅由 lane 收口唤醒或恢复后进入）
 
 1. 两张 `dailyLane` 各自独立运行，通过 `duty-ops.py claim` 逐条领取候选，按真实原会话/附件、`jira` 与 `$REPOS_DIR`（`/Users/moego-winches/Desktop/Company/AI-Agent/agent-workspace/repo`）或 `MoeGolibrary/*` 真实代码完成深查后按 `fencingToken` 提交 `submit-investigation`（`confirmed` 须可解释原现象并记录 Feishu Bitable/Sheet 归属线索；`suspended_external` 须四条取证路径均实试并 `nextCheckAt >= +24h`；首次+2 次重试无结论由 `claim` 自动写 `skipped_failure`）。父 scan 被唤醒后先跑 `inspect-round`，若仍有未结案候选则只重派空闲/退出 lane 后退出，绝不代劳。
-2. 当且仅当 manifest 全部候选均有有效 v3 结论或 `skipped_failure`、`coverageComplete=true` 且包含完整 `records` 数组（每条含规范 `state`、`source`、`summary`、`reason`、`sourceUrl` 等，`excluded` 写为 `excluded_after_investigation`、`suspended_external` 写为 `verification_blocked`）的 `scan-evidence-index.json` 就绪时，生成 8 行内汇总正文，调用 `finish-scan --dry-run` 预检通过后执行：
+2. 全部候选结案后，先调用 `build-evidence-index` 合并初筛记录与 Phase 2 调查结论写出完整 `scan-evidence-index.json`（`len(records) == sum(collected)`，0 候选且 `export-screening` 已生成时可跳过或重跑验证）：
+```bash
+python3 "$TMP_OPS/duty-ops.py" build-evidence-index \
+  --workspace-id 1b6d114a-8407-4ba8-adea-d31209caabe5 \
+  --agent-id 387e0620-8a22-44f5-919c-4a3e6296fcfb \
+  --scan-id <scan_id> \
+  --evidence-file <scan-evidence-index.json>
+```
+   当且仅当 manifest 全部候选均有有效 v3 结论或 `skipped_failure`、`coverageComplete=true` 且 `scan-evidence-index.json` 已就绪（全量覆盖 `sum(collected)` 且全部 `state` 合法）时，生成 8 行内汇总正文（第一行必须用普通 ASCII 空格与标准 Markdown 任务链接 `[GRM-xxx](https://multica.devops.moego.dev/grm/issues/GRM-xxx)`，禁止全角空格 `\u3000`、禁止 `/workspaces/.../issues/<uuid>`、禁止 `<URL|文本>`），调用 `finish-scan --dry-run` 预检通过后执行：
 
 ```bash
 python3 "$TMP_OPS/duty-ops.py" finish-scan \
