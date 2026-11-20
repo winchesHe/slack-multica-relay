@@ -32,8 +32,8 @@ git -C /Users/moego-winches/Desktop/Company/person/slack-multica-relay show <40�
 ```
 
 - **入口校验与职责严格隔离**：先用 `multica` CLI（`--output json`）回读当前 Issue、真实父任务、project/workspace、Agent、Runtime、metadata、评论与运行历史。只接受正文明确为 `mode=scan`、`mode=investigate_lane`、`mode=bug` 或 `mode=gate_test`（或第 4 节由审查人触发的 `回告`/`确认发布`/`已回告`/`不回告` 评论）的任务；未知 mode 停止核对。v3 所有状态、锁、附件回读、租约、唤醒和恢复统一通过 `"$TMP_OPS/duty-ops.py"`，禁止手工 `assign`/`rerun` 或凭标题猜测身份。使用 `multica issue comment add --content-file` 若文件位于工作目录外须传 `--allow-external-file`（`duty-ops.py` 已内置处理）。
-  - **`mode=scan`（初始采集与派发）**：完成三源采集 → 冻结清单 → `init-scan-manifest` → 为工位 1/2、2/2 调用 `dispatch-if-issue-idle` 后，**必须立即退出当前运行**等待 lane 完成唤醒；**严禁**父 scan 调用 `claim`、`submit-investigation`、轮询等待子任务或编写批处理脚本代调查。
-  - **`mode=scan`（唤醒后汇总与调度）**：被唤醒后先运行 `inspect-round`。若仍有候选未结案，只允许按状态重派空闲/退出的 lane（`dispatch-if-issue-idle`）后退出，仍不得代 lane 调查；全部候选结案后调用 `finish-scan`；若有 `confirmed` Bug，调用 `acquire-global-repair-slot`，`busy` 则退出等待前序释放唤醒，获得槽后每次只指派当前唯一待修 Bug 启动（`repairConcurrency=1`）。
+  - **`mode=scan`（初始采集、全量初筛与派发）**：完成三源采集 → `prepare-screening` 分批 → 逐批读取并调用 `record-screening` 直到 `pendingCount == 0` → `export-screening` 导出候选清单 → `init-scan-manifest` 冻结清单 → 为工位 1/2、2/2 调用 `dispatch-if-issue-idle` 后，**必须立即退出当前运行**等待 lane 完成唤醒；**严禁**父 scan 把全量采集/Intercom 原文打印到 bash stdout，**严禁**跳过批次或未闭合就冻结清单，**严禁**父 scan 调用 `claim`、`submit-investigation`、轮询等待子任务或编写批处理脚本代调查。
+  - **`mode=scan`（唤醒后汇总与调度）**：被唤醒后先运行 `inspect-round`。若仍有候选未结案，只允许按状态重派空闲/退出的 lane（`dispatch-if-issue-idle`）后退出，仍不得代 lane 调查；全部候选结案后先调用 `build-evidence-index` 生成全量 `scan-evidence-index.json`（条数须严格等于 `sum(collected)`），再调用 `finish-scan`；若有 `confirmed` Bug，调用 `acquire-global-repair-slot`，`busy` 则退出等待前序释放唤醒，获得槽后每次只指派当前唯一待修 Bug 启动（`repairConcurrency=1`）。
   - **`mode=investigate_lane`**：在独立工作目录循环执行「`claim` → 对这**单个**候选独立取证并定位真实仓库源码 → `submit-investigation`」，直到 `claim` 返回 `all_concluded`（调用 `rerun-parent-if-needed` 唤醒父 scan 后退出）或 `no_available_candidate`（运行 `inspect-round`，若另一 lane 已无活动运行或已超时则调用 `rerun-parent-if-needed` 后退出）。**严禁**编写循环脚本（如 `run_investigations.py`）批量调 `claim`/`submit-investigation`，**严禁**未读产品源码与原会话就用模板话术提交 `suspended_external`。
 
 ---
@@ -59,18 +59,20 @@ git -C /Users/moego-winches/Desktop/Company/person/slack-multica-relay show <40�
    - **Facebook**：仅读取既有 Slack 汇总频道消息，不直接抓取 Facebook；`MFC_DOMAIN`、`MFC_SQUAD=All` 仅作来源标签，不作排除依据。
    - **Intercom**：每会话一条 evidence，`inWindow=true` 的客户消息才是目标日反馈，其余消息作上下文；脱敏占位不得还原。`csTickets` 与 `moegoCompanyIds`（达 10 个时可能不全）仅作候选线索，取证前先按对象 ID/公司核对实际商家。本轮 scan 固定清单后清理本地会话文件，后续需原文时经 `intercom` Skill `get-conversation` 重读。
 4. **附件逐个检查**：文字中的 `[Image]`、`[Attachment: …]` 不等于已看过附件。Intercom 候选先 `list-attachments`，再 `download-attachments --author user --author lead`（相关客服截图按 `--index` 补下）到当前调查独立临时目录逐个查看；录屏用 `ffmpeg` 抽帧查看；403 等签名错误按规则重试，仍失败须在报告记录缺失附件及原因，不得写成无附件或据此挂起外部缺证。临时目录调查结束后删除，原件不上传任何位置，报告仅写脱敏观察（确需附图须先裁剪打码）。
-5. **归并、查重与分类口径**：
-   - 覆盖全部 Domain，按稳定来源身份归并同一问题，保存 `candidateId`、`source`、`sourceUrl`、`feedbackDate`、现象、正确行为依据、影响、平台、验收目标和查重依据。
-   - 对本项目历史任务、在途周度小队及 Bug Resolver 任务/PR 查重（已有修复仍须核对客户版本与修复范围，不凭已有 PR 直接排除回归）；不恢复人工已停止/取消项。
-   - **已有工单**：Intercom 以 `csTickets` 非空或经 `jira` Skill 回读确认的研发工单为准；Canny/Facebook 在补证时经 `jira` 搜索来源链接或标题。命中后标为 `cs_followed` 并保存工单号，停止扩展调查。
-   - 每条采集记录只计一次：`sum(collected) = nonBug + productDecision + csFollowed + suspected`；进入调查后去向合计：`suspected = confirmed + duplicate + verificationBlocked + excludedAfterInvestigation`（外加仅因技术重试耗尽而生成的 `skippedFailure` 单独列出）。所有判断与证据写入 `scan-evidence-index.json`（零候选也须存在），且必须提供与每日看板脚本 `duty-board.py` 对齐的顶层字段：
-     - `targetDate`（`YYYY-MM-DD`）、`identifier`（扫描任务编号如 `GRM-xxxx`）、`records`（逐条数组，供看板 HTML「当日逐条记录」直接渲染）。
-     - `records` 每项包含：`state`（只能取 `confirmed`、`skipped_failure`、`verification_blocked`、`duplicate`、`cs_followed`、`excluded_after_investigation`、`product_decision`、`non_bug`，其中调查结论 `excluded` 映射为 `excluded_after_investigation`、`suspended_external` 映射为 `verification_blocked`）、`source`（`intercom`/`canny`/`facebook`）、`summary`（脱敏问题摘要）、`reason`（判断依据）、`sourceUrl`（https 来源链接）、可选 `csTickets` / `verifiedJiraKeys` / `unresolvedGap` / `resumeCondition` / `correctBehaviorBasis` / `observation` / `verificationMethod` / `attempts` / `relatedPR`（均不得含商家 ID、客户分层或查询语句）。
+5. **确定性全量初筛状态机（严禁 stdout 打印全量正文或跳过条数）**：
+   - 三源 `collect-daily` 完成后，**必须**调用 `duty-ops.py prepare-screening --scan-id <scan_id> --target-date <YYYY-MM-DD> --source-files <canny_run.json> <facebook_run.json> <intercom_run.json> --out-dir <screening_dir>`。该命令在本地校验三源 `manifest`、同步 `dailyScan.collected`/`sources`、把 Intercom 中 `csTickets` 非空会话自动标为 `cs_followed`，并将其余待筛条目切片写入紧凑批次文件 `batch-001.json`、`batch-002.json`...（每批默认 40 条）。**严禁**通过 bash `print`/切片将 `runArtifact` 原文刷到 stdout。
+   - **逐批完整判定**：用 `read` 工具逐个读取每个 `batch-NNN.json`，覆盖全部 Domain 判断每条 `evidenceId`（`non_bug` / `product_decision` / `cs_followed` / `suspected`），写入批次判定 JSON 后调用 `duty-ops.py record-screening --scan-id <scan_id> --decisions-file <decisions.json>`，直到返回 `pendingCount == 0` 且 `remainingBatches == []`。
+   - **归并、查重与分类口径**：
+     - 同一问题可在清单描述说明关联，但每条采集 `evidenceId` 只计一次：`sum(collected) = nonBug + productDecision + csFollowed + suspected`。进入调查后去向合计：`suspected = confirmed + duplicate + verificationBlocked + excludedAfterInvestigation`（外加仅因技术重试耗尽而生成的 `skippedFailure` 单独列出）。
+     - **已有工单**：Intercom 以 `csTickets` 非空或经 `jira` Skill 回读确认的研发工单为准；Canny/Facebook 经 `jira` 搜索来源链接或标题。命中标 `cs_followed` 并写明 `csTickets` / `verifiedJiraKeys`。
+     - 对本项目历史任务、在途周度小队及 Bug Resolver 任务/PR 查重放在 Phase 2（或有明确 PR 依据再归类 `duplicate`）；不恢复人工已停止/取消项。
+   - **导出 Manifest 与闭合门禁**：`pendingCount == 0` 后调用 `duty-ops.py export-screening --scan-id <scan_id> --manifest-file <manifest.json> [--evidence-file <scan-evidence-index.json>]`（0 候选时直接写出完整 `scan-evidence-index.json`），自动同步 `dailyScan.counts`（`nonBug`/`productDecision`/`csFollowed`）并生成合法 `manifest.json`。`init-scan-manifest` 与 `finish-scan` 会强制校验 `sum(collected) == nonBug + productDecision + csFollowed + suspected` 与全量 `evidenceId` 覆盖。
+   - **生成全量证据索引**：全部调查结束后、调用 `finish-scan` 前，必须执行 `duty-ops.py build-evidence-index --scan-id <scan_id> --evidence-file <scan-evidence-index.json>`，合并初筛与调查结论输出与 `duty-board.py` 完全对齐的 `scan-evidence-index.json`（含 `targetDate`、`identifier` 与 `len(records) == sum(collected)`，每条含合法 `state`/`source`/`summary`/`reason`/`sourceUrl`，不得含商家 ID、客户分层或查询语句）。
    - 真人若在任务中明确授权逐日回溯验证 flow，仅在任务专属输出目录按单日独立执行，不覆盖日常成功进度。
 
 ### 冻结 Manifest 与两张 Lane
 
-采集与初筛完成后，仅将需要进入调查的疑似 Bug 冻结为清单 JSON（所有候选 `feedbackDate` 等于 `targetDate`，`candidateId` 唯一且非空，`sourceUrl` 非空，`candidateSetSha256` 严格等于 `duty_queue.candidate_set_hash(ids)`），执行：
+`export-screening` 完成后，仅将 `suspected` 候选清单冻结为 manifest（所有候选 `feedbackDate` 等于 `targetDate`，`candidateId` 唯一且非空，`sourceUrl` 非空，`candidateSetSha256` 严格等于 `duty_queue.candidate_set_hash(ids)`），执行：
 
 ```bash
 python3 "$TMP_OPS/duty-ops.py" init-scan-manifest \
@@ -95,10 +97,13 @@ python3 "$TMP_OPS/duty-ops.py" init-scan-manifest \
 
 ### 扫描完成汇总消息（8 行内）
 
-全轮所有候选均有结论或 `skipped_failure`、`coverageComplete=true` 且 `scan-evidence-index.json` 完成回读后，调用 `finish-scan` 向 `<交付频道 ID>` 发送一次汇总并写回 `<!-- daily-scan-finish:v3 round=<scan_id> -->` 与 `GRM-664` `kind=scan` 台账。Slack 正文须含当前任务编号（如 `GRM-xxx`）与完整链接，控制在 8 行内，不单列外部缺证清单，有跳过项时须明确标出不得声称全部验证通过：
+全轮所有候选均有结论或 `skipped_failure`、`coverageComplete=true` 且全量 `scan-evidence-index.json`（条数等于 `sum(collected)`）完成 `build-evidence-index` 与回读后，调用 `finish-scan` 向 `<交付频道 ID>` 发送一次汇总并写回 `<!-- daily-scan-finish:v3 round=<scan_id> -->` 与 `GRM-664` `kind=scan` 台账。
+
+- **链接格式硬门禁**：第一行必须使用普通 ASCII 空格与标准 Markdown 任务链接 `[GRM-xxx](https://multica.devops.moego.dev/grm/issues/GRM-xxx)`；**禁止**全角空格 `\u3000`、**禁止** `/workspaces/.../issues/<uuid>` 内部链接、**禁止** Slack 原始 `<URL|文本>` 语法（`finish-scan` / `deliver-bug` / `block-bug` 会自动校验并拒绝违规格式）。
+- 控制在 8 行内，不单列外部缺证清单，有跳过项时须明确标出不得声称全部验证通过：
 
 ```text
-每日 Bug 值守｜MM-DD 反馈扫描完成　<当前任务链接>
+每日 Bug 值守｜MM-DD 反馈扫描完成 [GRM-xxx](https://multica.devops.moego.dev/grm/issues/GRM-xxx)
 
 结论：<今日无新增可修 Bug / 新增可修 N 个> · 本轮处理 N/N<有跳过时补：执行失败跳过 N，未确认> · <三源采集正常 / 哪个来源有问题>
 
@@ -326,6 +331,10 @@ python3 "$TMP_OPS/duty-ops.py" init-scan-manifest \
 
 ```text
 update-scan-status        --workspace-id --round-id [--target-date] [--source] [--source-url] [--source-status] [--collected] [--counts] [--coverage-complete [true|false]]
+prepare-screening         --workspace-id --scan-id --target-date --source-files <canny.json> <facebook.json> <intercom.json> [--out-dir] [--batch-size 40]
+record-screening          --workspace-id --scan-id --decisions-file
+export-screening          --workspace-id --scan-id --manifest-file [--evidence-file]
+build-evidence-index      --workspace-id --scan-id --evidence-file [--agent-id]
 init-scan-manifest        --workspace-id --project-id --agent-id --runtime-id --scan-id --manifest-file --target-date --scheduler-revision
 claim                     --workspace-id --agent-id --round-id --lane-issue-id [--worker-id] [--ttl-seconds]
 submit-investigation      --workspace-id --agent-id --round-id --lane-issue-id --candidate-id --fencing-token --record-file [--report-file]
@@ -342,11 +351,11 @@ recover                   --workspace-id --project-id --agent-id --round-id [--a
 
 | 阶段 | 唯一放行证据 | 未满足时动作 |
 |---|---|---|
-| 采集 | `dailyScan` 三源成功窗口、数量与 `coverageComplete=true` | 补失败来源，失败不填 0 |
+| 采集与初筛 | `dailyScan` 三源成功窗口、`coverageComplete=true` 且 `prepare-screening` → `record-screening` 全量闭合（`pendingCount == 0`、`sum(collected) == nonBug + productDecision + csFollowed + suspected`） | 补失败来源或续筛剩余批次，禁止跳过冻结 manifest |
 | 调查 | manifest 全部候选均已取得有效 v3 结论或 `skipped_failure` | `claim`/`submit-investigation`/`recover`，禁止建 Bug 或提前修复 |
 | 修复槽 | holder 已达终态（全 Bug 有 receipt 或 scan 终态），本轮获得槽 | 忙则 FIFO 入队退出，不抢占 |
-| Bug 交付 | HTML 报告、Slack（含受阻编辑与附件回读）、`GRM-664` 台账、`v3` receipt 全部 `readbackVerified` | 保留 `intent`，重跑从断点续传 |
-| 扫描结束 | `scan-evidence-index.json`、`GRM-664` `scan` 记录、Slack 汇总、`<!-- daily-scan-finish:v3 ... -->` 全部 `readbackVerified` | 不发“扫描完成” |
+| Bug 交付 | HTML 报告、Slack（含受阻编辑与附件回读，合法 Markdown 链接）、`GRM-664` 台账、`v3` receipt 全部 `readbackVerified` | 保留 `intent`，重跑从断点续传 |
+| 扫描结束 | `build-evidence-index` 产出全量 `scan-evidence-index.json`（覆盖全部 `collected`）、`GRM-664` `scan` 记录、Slack 汇总（含 `[GRM-xxx](...)` 链接）、`<!-- daily-scan-finish:v3 ... -->` 全部 `readbackVerified` | 不发“扫描完成” |
 
 **运行与退出检查（Exit Checklist）**：
 1. 当前 round/Agent/Runtime 作用域与协议版本一致，无任何 v1/v2 字段混入，旧轮保持只读隔离；
