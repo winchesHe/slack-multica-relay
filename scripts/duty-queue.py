@@ -276,6 +276,20 @@ def round_manifest(scan, agent_id):
     return entries
 
 
+def _normalize_lane_record(item):
+    """兼容读取已切回 v2 修复轮次的原 v3 工位调查记录（conclusion/report）。"""
+    if item.get('protocolVersion') == 3 and 'conclusion' in item and 'state' not in item:
+        normalized = {**item, 'state': item['conclusion']}
+        report = item.get('report')
+        if isinstance(report, dict) and 'investigationRecord' not in normalized:
+            normalized['investigationRecord'] = {
+                'attachmentId': report.get('attachmentId'),
+                'evidenceRevision': item.get('evidenceRevision'),
+            }
+        return normalized
+    return item
+
+
 def lane_round_candidates(scan, issues, agent_id):
     """工位轮次：清单来自原扫描评论，结论取两个工位中同一候选最新的记录。"""
     info = meta(scan, 'dailyRound')
@@ -287,6 +301,7 @@ def lane_round_candidates(scan, issues, agent_id):
     found = []
     for lane in lanes:
         for created, item in comment_records(lane, RECORD_MARKER, agent_id):
+            item = _normalize_lane_record(item)
             if item.get('roundId') != scan['id'] or item.get('candidateId') not in ids:
                 raise QueueError('工位记录不属于本轮冻结清单')
             found.append((created, item, lane))
