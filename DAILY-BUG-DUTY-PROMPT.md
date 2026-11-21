@@ -34,7 +34,7 @@ git -C /Users/moego-winches/Desktop/Company/person/slack-multica-relay show <40�
 - **入口校验与职责严格隔离**：先用 `multica` CLI（`--output json`）回读当前 Issue、真实父任务、project/workspace、Agent、Runtime、metadata、评论与运行历史。只接受正文明确为 `mode=scan`、`mode=investigate_lane`、`mode=bug` 或 `mode=gate_test`（或第 4 节由审查人触发的 `回告`/`确认发布`/`已回告`/`不回告` 评论）的任务；未知 mode 停止核对。v3 所有状态、锁、附件回读、租约、唤醒和恢复统一通过 `"$TMP_OPS/duty-ops.py"`，禁止手工 `assign`/`rerun` 或凭标题猜测身份。使用 `multica issue comment add --content-file` 若文件位于工作目录外须传 `--allow-external-file`（`duty-ops.py` 已内置处理）。
   - **`mode=scan`（初始采集、全量初筛与派发）**：完成三源采集 → `prepare-screening` 分批 → 逐批读取并调用 `record-screening` 直到 `pendingCount == 0` → `export-screening` 导出候选清单 → `init-scan-manifest` 冻结清单 → 为工位 1/2、2/2 调用 `dispatch-if-issue-idle` 后，**必须立即退出当前运行**等待 lane 完成唤醒；**严禁**父 scan 把全量采集/Intercom 原文打印到 bash stdout，**严禁**跳过批次或未闭合就冻结清单，**严禁**父 scan 调用 `claim`、`submit-investigation`、轮询等待子任务或编写批处理脚本代调查。
   - **`mode=scan`（唤醒后汇总与调度）**：被唤醒后先运行 `inspect-round`。若仍有候选未结案，只允许按状态重派空闲/退出的 lane（`dispatch-if-issue-idle`）后退出，仍不得代 lane 调查；全部候选结案后先调用 `build-evidence-index` 生成全量 `scan-evidence-index.json`（条数须严格等于 `sum(collected)`），再调用 `finish-scan`；若有 `confirmed` Bug，调用 `acquire-global-repair-slot`，`busy` 则退出等待前序释放唤醒，获得槽后每次只指派当前唯一待修 Bug 启动（`repairConcurrency=1`）。
-  - **`mode=investigate_lane`**：在独立工作目录循环执行「`claim` → 对这**单个**候选独立取证并定位真实仓库源码 → `submit-investigation`」，直到 `claim` 返回 `all_concluded`（调用 `rerun-parent-if-needed` 唤醒父 scan 后退出）或 `no_available_candidate`（运行 `inspect-round`，若另一 lane 已无活动运行或已超时则调用 `rerun-parent-if-needed` 后退出）。**严禁**编写循环脚本（如 `run_investigations.py`）批量调 `claim`/`submit-investigation`，**严禁**未读产品源码与原会话就用模板话术提交 `suspended_external`。
+  - **`mode=investigate_lane`（有界批次接力）**：在独立工作目录循环执行「`claim` → 对这**单个**候选独立取证并定位真实仓库源码 → `submit-investigation`」。每次运行默认最多处理 **5 条或运行 15 分钟**：当 `claim` 返回 `handoff_required` 时（脚本已为本工位预排后继运行，并在剩余未领候选 ≥ 2 时顺带拉起空闲队友工位），**必须立即结束当前运行退出**，不得继续领第 6 条，也不得误调用 `rerun-parent-if-needed`；若自主感知耗时接近 15 分钟也可在提交当前候选后调用 `handoff-lane` 主动交棒退出。只有当 `claim` 返回 `all_concluded`（调用 `rerun-parent-if-needed` 唤醒父 scan 后退出）或 `no_available_candidate`（运行 `inspect-round`，若另一 lane 已无活动运行或已超时则调用 `rerun-parent-if-needed` 后退出）时才结束整个工位。**严禁**在仍有剩余候选时未经 `handoff-lane`/`handoff_required` 擅自静默退出，**严禁**编写循环脚本批量调 `claim`/`submit-investigation`，**严禁**未读产品源码与原会话就用模板话术提交 `suspended_external`。
 
 ---
 
@@ -336,7 +336,8 @@ record-screening          --workspace-id --scan-id --decisions-file
 export-screening          --workspace-id --scan-id --manifest-file [--evidence-file]
 build-evidence-index      --workspace-id --scan-id --evidence-file [--agent-id]
 init-scan-manifest        --workspace-id --project-id --agent-id --runtime-id --scan-id --manifest-file --target-date --scheduler-revision
-claim                     --workspace-id --agent-id --round-id --lane-issue-id [--worker-id] [--ttl-seconds]
+claim                     --workspace-id --agent-id --round-id --lane-issue-id [--worker-id] [--ttl-seconds] [--max-batch-size 5] [--max-run-minutes 15]
+handoff-lane              --workspace-id --agent-id --round-id --lane-issue-id
 submit-investigation      --workspace-id --agent-id --round-id --lane-issue-id --candidate-id --fencing-token --record-file [--report-file]
 finish-scan               --workspace-id --agent-id --round-id --evidence-file --ledger-issue --channel [--text-file] [--target-status] [--dry-run]
 acquire-global-repair-slot --workspace-id --round-id

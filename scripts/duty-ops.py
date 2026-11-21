@@ -33,6 +33,8 @@ POLICY = "lightweight_agent_driven_v3"
 FAILURE_POLICY = "retry_2_then_skip_v1"
 LANE_COUNT = 2
 RETRY_LIMIT = 2
+DEFAULT_MAX_BATCH_SIZE = 5
+DEFAULT_MAX_RUN_MINUTES = 15
 IN_FLIGHT = {"queued", "dispatched", "running", "waiting_local_directory"}
 TERMINAL_ISSUE = {"done", "cancelled", "canceled"}
 TERMINAL_RECEIPT = {"delivered", "blocked"}
@@ -1429,6 +1431,102 @@ class Ops:
     def _lease_expired(self, lease):
         return parse_time(lease["expiresAt"]) <= self.now
 
+    def _active_lane_run(self, runs, agent_id):
+        for run in runs:
+            if (isinstance(run, dict) and run.get("status") == "running"
+                    and run.get("id") and (not agent_id or run.get("agent_id") in (None, agent_id))):
+                return run
+        return None
+
+    def _run_started_at(self, run):
+        for key in ("started_at", "created_at"):
+            val = run.get(key)
+            if isinstance(val, str) and val.strip():
+                try:
+                    return parse_time(val)
+                except OpsError:
+                    continue
+        return self.now
+
+    def _ensure_lane_run_entry(self, state, lane_id, current_run):
+        lane_runs = state.setdefault("laneRuns", {})
+        run_id = current_run["id"]
+        entry = lane_runs.get(run_id)
+        if not isinstance(entry, dict):
+            entry = {
+                "laneIssueId": lane_id,
+                "claimedCount": 0,
+                "startedAt": iso(self._run_started_at(current_run)),
+            }
+            lane_runs[run_id] = entry
+        if len(lane_runs) > 40:
+            oldest = sorted(lane_runs.keys(), key=lambda rid: lane_runs[rid].get("startedAt") or "")
+            for rid in oldest[:-40]:
+                if rid != run_id:
+                    lane_runs.pop(rid, None)
+        return entry
+
+    def _reap_and_occupied(self, scan_id, lane_id, manifest, lanes, state, entries, records):
+        for cid, lease in list(state.setdefault("leases", {}).items()):
+            lane_runs = self.native.runs(lease.get("laneIssueId", lane_id))
+            tracked_ids = set(lease.get("runIds", []))
+            tracked = [run for run in lane_runs if run.get("id") in tracked_ids]
+            exited_without_conclusion = bool(tracked) and all(run.get("status") not in IN_FLIGHT for run in tracked)
+            if self._lease_expired(lease) or exited_without_conclusion:
+                failed = state.setdefault("failedRuns", {}).setdefault(cid, [])
+                observed = [run.get("id") for run in tracked if run.get("id")]
+                observed = observed or [run_id for run_id in lease.get("runIds", []) if run_id]
+                observed = observed or [lease.get("attemptId")]
+                for run_id in observed:
+                    if run_id and run_id not in failed:
+                        failed.append(run_id)
+                state["leases"].pop(cid, None)
+                if len(failed) >= RETRY_LIMIT + 1 and cid not in records:
+                    skipped = self._skip_candidate(scan_id, lease.get("laneIssueId", lane_id), entries[cid], state, failed,
+                                                    "调查运行结束或租约过期，三次运行均未形成结论")
+                    records[cid] = skipped
+        occupied = {lease.get("candidateId"): lease for lease in state["leases"].values()
+                    if not self._lease_expired(lease)}
+        for cid, item in records.items():
+            if item.get("conclusion") in CONCLUSIONS:
+                occupied[cid] = {"conclusion": True}
+        return occupied
+
+    def _handoff_lane_unlocked(self, scan_id, lane_id, lanes, agent_id, *, total_candidates, occupied_count,
+                               reason, claimed_in_run=0, elapsed_seconds=0):
+        successor = self._launch_if_idle_unlocked(lane_id, agent_id, allow_successor=True, round_id=scan_id)
+        unclaimed_count = max(0, total_candidates - occupied_count)
+        peer_dispatched = []
+        peer_errors = []
+        if unclaimed_count >= 2:
+            for other in lanes:
+                other_id = other.get("id")
+                if not other_id or other_id == lane_id or other.get("status") != "in_progress":
+                    continue
+                other_runs = self.native.runs(other_id)
+                if any(run.get("status") in IN_FLIGHT for run in other_runs):
+                    continue
+                try:
+                    peer_res = self._launch_if_idle_unlocked(other_id, agent_id, allow_successor=False, round_id=scan_id)
+                    peer_dispatched.append(peer_res)
+                except OpsError as error:
+                    peer_errors.append({"issueId": other_id, "reason": str(error)})
+        payload = {
+            "status": "handoff_required",
+            "reason": reason,
+            "roundId": scan_id,
+            "laneIssueId": lane_id,
+            "claimedInRun": claimed_in_run,
+            "elapsedSeconds": int(max(0, elapsed_seconds)),
+            "remainingCandidates": unclaimed_count,
+            "successor": successor,
+            "peerDispatched": peer_dispatched,
+            "message": "已达单棒上限，已预排后继运行；请立即结束当前运行以无缝交棒。",
+        }
+        if peer_errors:
+            payload["peerErrors"] = peer_errors
+        return payload
+
     def _skip_candidate(self, scan_id, lane_id, entry, state, run_ids, reason):
         state["nextFencingToken"] = int(state.get("nextFencingToken", 0)) + 1
         token = state["nextFencingToken"]
@@ -1443,11 +1541,16 @@ class Ops:
         state["records"][entry["candidateId"]] = skipped
         return skipped
 
-    def claim(self, scan_id, lane_id, *, worker_id=None, ttl_seconds=3600, agent_id=None):
+    def claim(self, scan_id, lane_id, *, worker_id=None, ttl_seconds=3600, agent_id=None,
+              max_batch_size=DEFAULT_MAX_BATCH_SIZE, max_run_minutes=DEFAULT_MAX_RUN_MINUTES):
         agent_id = agent_id or self.agent_id or self.native.issue(scan_id).get("assignee_id")
         worker_id = worker_id or agent_id or "worker"
         if ttl_seconds <= 0:
             raise OpsError("租约 TTL 必须为正数")
+        if type(max_batch_size) is not int or max_batch_size < 0:
+            raise OpsError("max-batch-size 必须是非负整数")
+        if type(max_run_minutes) is not int or max_run_minutes < 0:
+            raise OpsError("max-run-minutes 必须是非负整数")
         with file_lock(self._lock_for_round(scan_id)):
             manifest = self.manifest(scan_id, agent_id)
             if not manifest:
@@ -1458,42 +1561,38 @@ class Ops:
                 raise OpsError("lane 不属于该扫描")
             state = self.state(scan_id)
             entries, records = self._records(scan_id, manifest, lanes, agent_id)
-            for cid, lease in list(state.setdefault("leases", {}).items()):
-                lane_runs = self.native.runs(lease.get("laneIssueId", lane_id))
-                tracked_ids = set(lease.get("runIds", []))
-                tracked = [run for run in lane_runs if run.get("id") in tracked_ids]
-                exited_without_conclusion = bool(tracked) and all(run.get("status") not in IN_FLIGHT for run in tracked)
-                if self._lease_expired(lease) or exited_without_conclusion:
-                    failed = state.setdefault("failedRuns", {}).setdefault(cid, [])
-                    observed = [run.get("id") for run in tracked if run.get("id")]
-                    observed = observed or [run_id for run_id in lease.get("runIds", []) if run_id]
-                    observed = observed or [lease.get("attemptId")]
-                    for run_id in observed:
-                        if run_id and run_id not in failed:
-                            failed.append(run_id)
-                    state["leases"].pop(cid, None)
-                    if len(failed) >= RETRY_LIMIT + 1 and cid not in records:
-                        skipped = self._skip_candidate(scan_id, lease.get("laneIssueId", lane_id), entries[cid], state, failed,
-                                                        "调查运行结束或租约过期，三次运行均未形成结论")
-                        records[cid] = skipped
+            occupied = self._reap_and_occupied(scan_id, lane_id, manifest, lanes, state, entries, records)
             if any(lease.get("laneIssueId") == lane_id and not self._lease_expired(lease)
                    for lease in state["leases"].values()):
                 raise OpsError("同一 lane 已持有未过期租约")
-            occupied = {lease.get("candidateId"): lease for lease in state["leases"].values()
-                        if not self._lease_expired(lease)}
-            for cid, item in records.items():
-                if item.get("conclusion") in CONCLUSIONS:
-                    occupied[cid] = {"conclusion": True}
             available = next((entry for entry in manifest["candidates"] if entry["candidateId"] not in occupied), None)
             if available is None:
                 self.save_state(scan_id, state)
                 if len(records) == len(manifest["candidates"]):
                     return {"status": "all_concluded", "roundId": scan_id}
                 return {"status": "no_available_candidate", "roundId": scan_id}
+            run_history = self.native.runs(lane_id)
+            current_run = self._active_lane_run(run_history, agent_id)
+            run_entry = None
+            if current_run:
+                run_entry = self._ensure_lane_run_entry(state, lane_id, current_run)
+                claimed_in_run = int(run_entry.get("claimedCount", 0))
+                elapsed_seconds = (self.now - parse_time(run_entry["startedAt"])).total_seconds()
+                hit_batch = max_batch_size > 0 and claimed_in_run >= max_batch_size
+                hit_time = max_run_minutes > 0 and claimed_in_run >= 1 and elapsed_seconds >= max_run_minutes * 60
+                if hit_batch or hit_time:
+                    self.save_state(scan_id, state)
+                    return self._handoff_lane_unlocked(
+                        scan_id, lane_id, lanes, agent_id,
+                        total_candidates=len(manifest["candidates"]),
+                        occupied_count=len(occupied),
+                        reason="batch_limit" if hit_batch else "time_limit",
+                        claimed_in_run=claimed_in_run,
+                        elapsed_seconds=elapsed_seconds,
+                    )
             # fencing token 单调递增，旧 lease 即使迟到也不能覆盖新 worker。
             token = int(state.get("nextFencingToken", 0)) + 1
             state["nextFencingToken"] = token
-            run_history = self.native.runs(lane_id)
             active = sorted((run for run in run_history if run.get("status") in IN_FLIGHT),
                             key=lambda run: run.get("status") != "running")
             lease = {"candidateId": available["candidateId"], "laneIssueId": lane_id, "workerId": worker_id,
@@ -1502,10 +1601,58 @@ class Ops:
                      "runIds": [run.get("id") for run in active if run.get("id")],
                      "attemptId": f"lease-{token}"}
             state["leases"][available["candidateId"]] = lease
+            claimed_count_now = None
+            if run_entry is not None:
+                run_entry["claimedCount"] = int(run_entry.get("claimedCount", 0)) + 1
+                claimed_count_now = run_entry["claimedCount"]
             self.save_state(scan_id, state)
-            return {"status": "claimed", "roundId": scan_id, "laneIssueId": lane_id,
+            resp = {"status": "claimed", "roundId": scan_id, "laneIssueId": lane_id,
                     "candidateId": available["candidateId"], "fencingToken": token, "expiresAt": lease["expiresAt"],
                     "feedbackDate": available["feedbackDate"], "sourceUrl": available.get("sourceUrl")}
+            if claimed_count_now is not None:
+                resp.update({"claimedInRun": claimed_count_now, "maxBatchSize": max_batch_size,
+                             "maxRunMinutes": max_run_minutes})
+            return resp
+
+    def handoff_lane(self, scan_id, lane_id, *, agent_id=None):
+        agent_id = agent_id or self.agent_id or self.native.issue(scan_id).get("assignee_id")
+        with file_lock(self._lock_for_round(scan_id)):
+            manifest = self.manifest(scan_id, agent_id)
+            if not manifest:
+                raise OpsError("尚未登记 manifest")
+            lanes = [row for row in self._round_issues(scan_id) if metadata(row, "dailyLane").get("roundId") == scan_id]
+            lane = next((row for row in lanes if row["id"] == lane_id), None)
+            if not lane:
+                raise OpsError("lane 不属于该扫描")
+            state = self.state(scan_id)
+            entries, records = self._records(scan_id, manifest, lanes, agent_id)
+            occupied = self._reap_and_occupied(scan_id, lane_id, manifest, lanes, state, entries, records)
+            if any(lease.get("laneIssueId") == lane_id and not self._lease_expired(lease)
+                   for lease in state["leases"].values()):
+                raise OpsError("当前 lane 仍持有未提交租约，请先 submit-investigation 再交棒")
+            available = next((entry for entry in manifest["candidates"] if entry["candidateId"] not in occupied), None)
+            if available is None:
+                self.save_state(scan_id, state)
+                if len(records) == len(manifest["candidates"]):
+                    parent = self._rerun_parent_if_needed_unlocked(scan_id, agent_id)
+                    return {"status": "all_concluded", "roundId": scan_id, "parentWakeup": parent}
+                return {"status": "no_available_candidate", "roundId": scan_id}
+            current_run = self._active_lane_run(self.native.runs(lane_id), agent_id)
+            claimed_in_run = 0
+            elapsed_seconds = 0.0
+            if current_run:
+                run_entry = self._ensure_lane_run_entry(state, lane_id, current_run)
+                claimed_in_run = int(run_entry.get("claimedCount", 0))
+                elapsed_seconds = (self.now - parse_time(run_entry["startedAt"])).total_seconds()
+            self.save_state(scan_id, state)
+            return self._handoff_lane_unlocked(
+                scan_id, lane_id, lanes, agent_id,
+                total_candidates=len(manifest["candidates"]),
+                occupied_count=len(occupied),
+                reason="explicit_handoff",
+                claimed_in_run=claimed_in_run,
+                elapsed_seconds=elapsed_seconds,
+            )
 
     def submit_investigation(self, scan_id, lane_id, candidate_id, fencing_token, record_file=None, report_file=None,
                              *, agent_id=None):
@@ -2488,11 +2635,23 @@ class Ops:
                 bug = self.native.issue(bug_id)
                 if bug.get("status") in {"in_review", "done", "cancelled", "canceled"}:
                     report.setdefault("warnings", []).append(f"{bug_id} 终态缺少 v3 回执，保留待人工核对")
-            for issue_id in report["needsRecovery"]:
-                if issue_id == round_id or issue_id in {lane["id"] for lane in report["lanes"]} or issue_id in {bug["id"] for bug in report["bugs"]}:
+            lane_ids = {lane["id"] for lane in report["lanes"]}
+            bug_ids = {bug["id"] for bug in report["bugs"]}
+            ordered_targets = [iid for iid in report["needsRecovery"] if iid != round_id]
+            if round_id in report["needsRecovery"]:
+                ordered_targets.append(round_id)
+            lanes_recovered = False
+            for issue_id in ordered_targets:
+                if (issue_id == round_id and lanes_recovered
+                        and report.get("candidateCount") is not None
+                        and report.get("concluded", 0) < report["candidateCount"]):
+                    continue
+                if issue_id == round_id or issue_id in lane_ids or issue_id in bug_ids:
                     try:
-                        self._launch_if_idle_unlocked(issue_id, agent_id, round_id=round_id)
+                        launch_res = self._launch_if_idle_unlocked(issue_id, agent_id, round_id=round_id)
                         report["mutated"] = True
+                        if issue_id in lane_ids and launch_res.get("status") in {"started", "reconciled", "reused", "active"}:
+                            lanes_recovered = True
                     except OpsError as error:
                         report.setdefault("errors", []).append({"issueId": issue_id, "reason": str(error)})
             return report
@@ -2512,7 +2671,7 @@ def _parse_bool_arg(value):
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("prepare-screening", "record-screening", "export-screening", "build-evidence-index",
-                                             "init-scan-manifest", "claim", "submit-investigation",
+                                             "init-scan-manifest", "claim", "handoff-lane", "submit-investigation",
                                              "dispatch-if-issue-idle", "rerun-parent-if-needed",
                                              "acquire-global-repair-slot", "release-global-repair-slot",
                                              "finish-scan", "update-scan-status", "deliver-bug", "block-bug", "inspect-round", "recover"))
@@ -2530,6 +2689,8 @@ def build_parser():
     parser.add_argument("--candidate-id")
     parser.add_argument("--fencing-token", type=int)
     parser.add_argument("--ttl-seconds", type=int, default=3600)
+    parser.add_argument("--max-batch-size", type=int, default=DEFAULT_MAX_BATCH_SIZE)
+    parser.add_argument("--max-run-minutes", type=int, default=DEFAULT_MAX_RUN_MINUTES)
     parser.add_argument("--manifest-file")
     parser.add_argument("--report-file")
     parser.add_argument("--record-file")
@@ -2595,7 +2756,10 @@ def main(argv=None):
                 scheduler_revision=args.scheduler_revision, runtime_id=runtime_id, project_id=args.project_id, agent_id=args.agent_id)
         elif args.command == "claim":
             result = ops.claim(args.round_id, args.lane_issue_id, worker_id=args.worker_id,
-                                ttl_seconds=args.ttl_seconds, agent_id=args.agent_id)
+                                ttl_seconds=args.ttl_seconds, agent_id=args.agent_id,
+                                max_batch_size=args.max_batch_size, max_run_minutes=args.max_run_minutes)
+        elif args.command == "handoff-lane":
+            result = ops.handoff_lane(args.round_id, args.lane_issue_id, agent_id=args.agent_id)
         elif args.command == "submit-investigation":
             if not args.candidate_id:
                 raise OpsError("submit-investigation 必须显式提供 --candidate-id")
