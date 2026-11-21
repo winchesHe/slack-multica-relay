@@ -1443,6 +1443,113 @@ out.write_text(json.dumps(payload), encoding="utf-8")
             self.ops.block_bug(bug_id="bug-link", blocker={"kind": "ci", "reason": "wait", "resumeCondition": "green"},
                                 ledger_issue="GRM-664", channel="C0", text_file=bad_mrkdwn, dry_run=True)
 
+
+    def test_claim_handoff_by_count_time_peer_rescue_and_all_concluded(self):
+        scan = issue("scan-h", identifier="GRM-890", created_at="2026-11-21T01:00:00Z")
+        lanes = [issue(f"lh-{n}", parent_issue_id="scan-h", status="in_progress", metadata={"dailyLane": {
+            "schemaVersion": 1, "protocolVersion": 3, "mode": "investigate_lane", "roundId": "scan-h", "lane": n, "laneCount": 2}})
+            for n in (1, 2)]
+        for row in (scan, *lanes):
+            self.native.issues[row["id"]] = row
+            self.native.comments_by_issue[row["id"]] = row["_comments"]
+            self.native.runs_by_issue[row["id"]] = []
+        hm = Path(self.temp.name) / "manifest-h.json"
+        hm.write_text(json.dumps(manifest(scan_id="scan-h", count=7)), encoding="utf-8")
+        self.ops.init_scan_manifest("scan-h", hm, target_date="2026-10-21",
+                                    scheduler_revision="a" * 40, runtime_id=self.ops.runtime_id, agent_id="agent")
+
+        # Lane 1 starts a running run; Lane 2 is idle. Claim & submit 5 items.
+        self.native.runs_by_issue["lh-1"] = [
+            {"id": "run-lh1-1", "issue_id": "lh-1", "agent_id": "agent", "status": "running",
+             "started_at": ops_module.iso(self.ops.now)}
+        ]
+        for idx in range(5):
+            c = self.ops.claim("scan-h", "lh-1", max_batch_size=5, max_run_minutes=15)
+            self.assertEqual(c["status"], "claimed")
+            self.assertEqual(c["claimedInRun"], idx + 1)
+            rep = Path(self.temp.name) / f"lh1-{idx}.html"; rep.write_text("ok")
+            rec = Path(self.temp.name) / f"lh1-{idx}.json"
+            rec.write_text(json.dumps({"conclusion": "excluded", "evidenceRevision": f"ic:{idx+1}", "conclusionRef": "ok"}))
+            self.ops.submit_investigation("scan-h", "lh-1", c["candidateId"], c["fencingToken"], rec, rep)
+
+        # 6th claim hits max_batch_size=5 -> queues successor on lh-1 AND wakes idle peer lh-2 (2 unclaimed left).
+        handoff = self.ops.claim("scan-h", "lh-1", max_batch_size=5, max_run_minutes=15)
+        self.assertEqual(handoff["status"], "handoff_required")
+        self.assertEqual(handoff["reason"], "batch_limit")
+        self.assertEqual(handoff["claimedInRun"], 5)
+        self.assertEqual(handoff["successor"]["status"], "started")
+        self.assertEqual(len(handoff["peerDispatched"]), 1)
+        self.assertEqual(handoff["peerDispatched"][0]["issueId"], "lh-2")
+        self.assertEqual(self.ops.state("scan-h").get("leases"), {})
+        self.assertEqual(self.ops.state("scan-h").get("failedRuns"), {})
+
+        # Calling claim again in the same run is idempotent: reuses queued successor, does not enqueue a 3rd run.
+        calls_before = len(self.native.calls)
+        handoff_again = self.ops.claim("scan-h", "lh-1", max_batch_size=5, max_run_minutes=15)
+        self.assertEqual(handoff_again["status"], "handoff_required")
+        self.assertEqual(handoff_again["successor"]["status"], "reused")
+        self.assertFalse(any(c[:2] == ("rerun", "lh-1") for c in self.native.calls[calls_before:]))
+
+        # Simulate next run on lh-1 starting; time_limit triggers after 1st item if >= 15 min elapsed.
+        # (At 0 claimed in the new run, elapsed=20m must STILL issue 1 candidate so no 0-work loop.)
+        self.native.runs_by_issue["lh-1"] = [
+            {"id": "run-lh1-1", "issue_id": "lh-1", "agent_id": "agent", "status": "completed"},
+            {"id": "run-lh1-2", "issue_id": "lh-1", "agent_id": "agent", "status": "running",
+             "started_at": ops_module.iso(self.ops.now - ops_module.dt.timedelta(minutes=20))},
+        ]
+        self.native.runs_by_issue["lh-2"] = [{"id": "run-lh2-1", "issue_id": "lh-2", "agent_id": "agent", "status": "running"}]
+        c6 = self.ops.claim("scan-h", "lh-1", max_batch_size=5, max_run_minutes=15)
+        self.assertEqual(c6["status"], "claimed")
+        self.assertEqual(c6["claimedInRun"], 1)
+        rep6 = Path(self.temp.name) / "lh1-5.html"; rep6.write_text("ok")
+        rec6 = Path(self.temp.name) / "lh1-5.json"
+        rec6.write_text(json.dumps({"conclusion": "excluded", "evidenceRevision": "ic:6", "conclusionRef": "ok"}))
+        self.ops.submit_investigation("scan-h", "lh-1", c6["candidateId"], c6["fencingToken"], rec6, rep6)
+
+        # Now elapsed is 20m >= 15m and claimedInRun=1 -> hits time_limit; only 1 candidate left so peer is NOT woken even if idle.
+        self.native.runs_by_issue["lh-2"] = []
+        time_handoff = self.ops.claim("scan-h", "lh-1", max_batch_size=5, max_run_minutes=15)
+        self.assertEqual(time_handoff["status"], "handoff_required")
+        self.assertEqual(time_handoff["reason"], "time_limit")
+        self.assertEqual(time_handoff["remainingCandidates"], 1)
+        self.assertEqual(time_handoff["peerDispatched"], [])
+
+        # Run 3 finishes the 7th (last) candidate; explicit handoff_lane sees all_concluded & wakes parent instead of lane.
+        self.native.runs_by_issue["lh-1"] = [
+            {"id": "run-lh1-2", "issue_id": "lh-1", "agent_id": "agent", "status": "completed"},
+            {"id": "run-lh1-3", "issue_id": "lh-1", "agent_id": "agent", "status": "running",
+             "started_at": ops_module.iso(self.ops.now)},
+        ]
+        c7 = self.ops.claim("scan-h", "lh-1", max_batch_size=5, max_run_minutes=15)
+        self.assertEqual(c7["status"], "claimed")
+        rep7 = Path(self.temp.name) / "lh1-6.html"; rep7.write_text("ok")
+        rec7 = Path(self.temp.name) / "lh1-6.json"
+        rec7.write_text(json.dumps({"conclusion": "excluded", "evidenceRevision": "ic:7", "conclusionRef": "ok"}))
+        self.ops.submit_investigation("scan-h", "lh-1", c7["candidateId"], c7["fencingToken"], rec7, rep7)
+        end_handoff = self.ops.handoff_lane("scan-h", "lh-1")
+        self.assertEqual(end_handoff["status"], "all_concluded")
+        self.assertEqual(end_handoff["parentWakeup"]["issueId"], "scan-h")
+
+    def test_recover_launches_lanes_before_scan_and_skips_redundant_parent_wakeup(self):
+        scan = issue("scan-rec", identifier="GRM-891")
+        lanes = [issue(f"lr-{n}", parent_issue_id="scan-rec", status="in_progress", metadata={"dailyLane": {
+            "schemaVersion": 1, "protocolVersion": 3, "mode": "investigate_lane", "roundId": "scan-rec", "lane": n, "laneCount": 2}})
+            for n in (1, 2)]
+        for row in (scan, *lanes):
+            self.native.issues[row["id"]] = row
+            self.native.comments_by_issue[row["id"]] = row["_comments"]
+            self.native.runs_by_issue[row["id"]] = []
+        rm = Path(self.temp.name) / "manifest-rec.json"
+        rm.write_text(json.dumps(manifest(scan_id="scan-rec", count=2)), encoding="utf-8")
+        self.ops.init_scan_manifest("scan-rec", rm, target_date="2026-10-21",
+                                    scheduler_revision="a" * 40, runtime_id=self.ops.runtime_id, agent_id="agent")
+        calls_before = len(self.native.calls)
+        res = self.ops.recover("scan-rec", project_id="project", apply=True)
+        self.assertTrue(res["mutated"])
+        reruns = [c[1] for c in self.native.calls[calls_before:] if c[0] == "rerun"]
+        self.assertEqual(sorted(reruns), ["lr-1", "lr-2"])
+        self.assertNotIn("scan-rec", reruns)
+
     def test_native_comment_add_retries_with_parent_on_comment_triggered_conflict(self):
         calls = []
         parent_uuid = "01a1ed17-32ba-7732-9972-fc844871e60b"

@@ -142,3 +142,17 @@ adapter 在私有 JSON 旁的 `.slack-reply-state/` 保存 owner-only ledger，�
 HTTP 429 或 JSON `rate_limited`/`ratelimited` 表示该次发送被限流，ledger 记为 `rate_limited` 并保存 `Retry-After` 对应的 `retryAt`。CLI 返回 `slack_rate_limited`、`retryable: true` 和 `retry_after_seconds`；调用方等待后重新执行同一发送命令，等待期内 adapter 不调用 Slack，到期后可再次发送，无需手动清 ledger。缺失或无效的 Retry-After 采用 60 秒冷却；CLI 不自行睡眠或循环。回读时遇到限流仅要求延后回读，原 `accepted`/`attempting` 状态保持不变。
 
 复制脚本、修改文档或合入 PR 都不会自动启用 adapter。采用后需同步最终回复指令并回读绑定，再以新任务验证一次发送和后续重试。adapter 成功不代表业务任务已经完成。
+## 每日 Bug 值守 v3 本地巡检兜底（`duty-watchdog.py` + `launchd`）
+
+工位已内置有界分批接力（每棒 5 条或 15 分钟由 `claim` / `handoff-lane` 自动预排后继并互拉空闲队友）。为防止平台强杀或宿主机重启导致掉棒，可在本机部署纯 Python 巡检脚本 `scripts/duty-watchdog.py`（零 LLM 调用）：
+
+- 每次触发仅执行一次 `multica issue list --status in_progress` 查询当前 v3 `in_progress` 轮次（严格跳过 legacy v1/v2 轮次及 `blocked`/`done`/`cancelled`/`in_review` 任务）。
+- 无活跃 v3 `in_progress` 轮次时直接以 `status=idle` 秒退；仅在 `inspect-round` 存在 `needsRecovery` 时调用 `recover --apply`，且对无进展连续重启启用熔断（默认 5 次）。
+
+```bash
+python3 scripts/duty-watchdog.py \
+  --server-url https://multica.devops.moego.dev \
+  --workspace-id 1b6d114a-8407-4ba8-adea-d31209caabe5 \
+  --project-id 724dce94-a8b9-44e7-8390-9c3cbdac7bc0 \
+  --agent-id 387e0620-8a22-44f5-919c-4a3e6296fcfb
+```

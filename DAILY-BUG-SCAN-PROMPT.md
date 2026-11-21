@@ -64,7 +64,7 @@ python3 "$TMP_OPS/duty-ops.py" init-scan-manifest \
 
 ## 3. 并行调查汇总与 `finish-scan`（仅由 lane 收口唤醒或恢复后进入）
 
-1. 两张 `dailyLane` 各自独立运行，通过 `duty-ops.py claim` 逐条领取候选，按真实原会话/附件、`jira` 与 `$REPOS_DIR`（`/Users/moego-winches/Desktop/Company/AI-Agent/agent-workspace/repo`）或 `MoeGolibrary/*` 真实代码完成深查后按 `fencingToken` 提交 `submit-investigation`（`confirmed` 须可解释原现象并记录 Feishu Bitable/Sheet 归属线索；`suspended_external` 须四条取证路径均实试并 `nextCheckAt >= +24h`；首次+2 次重试无结论由 `claim` 自动写 `skipped_failure`）。父 scan 被唤醒后先跑 `inspect-round`，若仍有未结案候选则只重派空闲/退出 lane 后退出，绝不代劳。
+1. 两张 `dailyLane` 各自独立运行，通过 `duty-ops.py claim` 逐条领取候选（每棒上限 5 条或 15 分钟，`claim` 返回 `handoff_required` 时会自动预排本工位后继并互拉空闲队友，随后立即退出交棒），按真实原会话/附件、`jira` 与 `$REPOS_DIR`（`/Users/moego-winches/Desktop/Company/AI-Agent/agent-workspace/repo`）或 `MoeGolibrary/*` 真实代码完成深查后按 `fencingToken` 提交 `submit-investigation`（`confirmed` 须可解释原现象并记录 Feishu Bitable/Sheet 归属线索；`suspended_external` 须四条取证路径均实试并 `nextCheckAt >= +24h`；首次+2 次重试无结论由 `claim` 自动写 `skipped_failure`）。父 scan 被唤醒后先跑 `inspect-round`，若仍有未结案候选则只重派空闲/退出 lane 后退出，绝不代劳。
 2. 全部候选结案后，先调用 `build-evidence-index` 合并初筛记录与 Phase 2 调查结论写出完整 `scan-evidence-index.json`（`len(records) == sum(collected)`，0 候选且 `export-screening` 已生成时可跳过或重跑验证）：
 ```bash
 python3 "$TMP_OPS/duty-ops.py" build-evidence-index \
