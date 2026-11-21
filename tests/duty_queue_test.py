@@ -730,6 +730,68 @@ class SnapshotTests(unittest.TestCase):
         self.assertNotIn('_comments', by_id['other'])
         self.assertNotIn('_comments', by_id['other-lane'])
 
+    def test_lane_round_candidates_accepts_v3_conclusion_and_report_shape(self):
+        scan = {
+            **issue('scan', dailyRound={
+                'schemaVersion': 1, 'policy': 'investigate_all_then_repair', 'state': 'ready_repair',
+                'candidateCount': 2, 'candidateManifest': {'attachmentId': 'att-manifest'},
+                'registrationComplete': True, 'investigationComplete': True,
+                'investigationStore': 'lane_comments', 'laneIssueIds': ['lane-1', 'lane-2'],
+                'investigationIndex': {'attachmentId': 'att-index'},
+            }),
+            '_comments': [{
+                'author_type': 'agent', 'author_id': 'agent', 'created_at': '2026-11-21T01:00:00Z',
+                'content': '<!-- daily-round-manifest:v3 round=scan -->\n```json\n' + json.dumps({
+                    'roundId': 'scan', 'candidates': [
+                        {'candidateId': 'intercom:conv-1', 'feedbackDate': '2026-11-20',
+                         'sourceUrl': 'https://app.intercom.com/a/inbox/oh5g31xm/inbox/conversation/1'},
+                        {'candidateId': 'intercom:conv-2', 'feedbackDate': '2026-11-20',
+                         'sourceUrl': 'https://app.intercom.com/a/inbox/oh5g31xm/inbox/conversation/2'},
+                    ]
+                }) + '\n```',
+            }],
+        }
+        lane1 = {
+            **issue('lane-1', dailyLane={'schemaVersion': 1, 'protocolVersion': 3, 'mode': 'investigate_lane',
+                                        'roundId': 'scan', 'lane': 1, 'laneCount': 2}),
+            'parent_issue_id': 'scan', 'status': 'in_review',
+            '_comments': [{
+                'author_type': 'agent', 'author_id': 'agent', 'created_at': '2026-11-21T02:00:00Z',
+                'content': '<!-- daily-investigation:v3 round=scan candidate=intercom:conv-1 -->\n```json\n' + json.dumps({
+                    'schemaVersion': 1, 'protocolVersion': 3, 'mode': 'investigate',
+                    'roundId': 'scan', 'sourceScanId': 'scan', 'candidateId': 'intercom:conv-1',
+                    'feedbackDate': '2026-11-20', 'conclusion': 'confirmed',
+                    'evidenceRevision': 'intercom:1',
+                    'report': {'attachmentId': 'att-1', 'readbackVerified': True},
+                    'verification': {
+                        'fixable': True, 'productDecisionRequired': False,
+                        'customerSymptomLinkRef': 'https://app.intercom.com/a/inbox/oh5g31xm/inbox/conversation/1',
+                        'expectedBehaviorRef': 'expected', 'observedDeviationRef': 'observed', 'dedupeRef': 'no-dup',
+                    },
+                }) + '\n```',
+            }],
+        }
+        lane2 = {
+            **issue('lane-2', dailyLane={'schemaVersion': 1, 'protocolVersion': 3, 'mode': 'investigate_lane',
+                                        'roundId': 'scan', 'lane': 2, 'laneCount': 2}),
+            'parent_issue_id': 'scan', 'status': 'in_review',
+            '_comments': [{
+                'author_type': 'agent', 'author_id': 'agent', 'created_at': '2026-11-21T02:05:00Z',
+                'content': '<!-- daily-investigation:v3 round=scan candidate=intercom:conv-2 -->\n```json\n' + json.dumps({
+                    'schemaVersion': 1, 'protocolVersion': 3, 'mode': 'investigate',
+                    'roundId': 'scan', 'sourceScanId': 'scan', 'candidateId': 'intercom:conv-2',
+                    'feedbackDate': '2026-11-20', 'conclusion': 'excluded',
+                    'conclusionRef': 'expected behavior', 'evidenceRevision': 'intercom:2',
+                    'report': {'attachmentId': 'att-2', 'readbackVerified': True},
+                }) + '\n```',
+            }],
+        }
+        rows, pending = queue.lane_round_candidates(scan, [scan, lane1, lane2], 'agent')
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(pending, [])
+        self.assertEqual(rows[0]['metadata']['dailyInvestigation']['state'], 'confirmed')
+        self.assertEqual(rows[0]['metadata']['dailyInvestigation']['investigationRecord']['attachmentId'], 'att-1')
+
 
 if __name__ == '__main__':
     unittest.main()
