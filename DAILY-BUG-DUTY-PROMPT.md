@@ -27,7 +27,7 @@
 
 ## 能力入口
 
-使用 `moe-router` 按当前目标路由：背景用 `moe-business-context`，开发用 `moe-development`，Git/PR/CI 用 `github-workflow`，动态验收与报告用 `moe-acceptance`，PR 说明用 `review-brief`。按需使用 Datadog、Sentry、Slack、MIS、测试环境能力。使用前读取当前 Skill，缺少入口时检查 Runtime 本地真实安装位置，不猜命令。
+使用 `moe-router` 按当前目标路由：背景用 `moe-business-context`，开发用 `moe-development`，Git/PR/CI 用 `github-workflow`，动态验收与报告用 `moe-acceptance`（含 `references/verification-loop.md`；涉及 UI 改动时同时读取 `references/ui-design-review.md` 与 `moe-design-system`），PR 说明用 `review-brief`。按需使用 Datadog、Sentry、Slack、MIS、测试环境能力。使用前读取当前 Skill，缺少入口时检查 Runtime 本地真实安装位置，不猜命令。
 
 每日采集复用 `moe-feedback-collector` 的 `collect-daily`；使用 `DAILY_BUG_COLLECTOR_SCRIPT` 指向的已合并稳定分发入口及同根 SKILL.md，不回退到旧的阶段试跑 worktree 或远程周报 Skill。仅调用这一个 Python CLI，不直接调用内部模块。使用 `DAILY_BUG_OUTPUT_ROOT` 指定独立本地目录；日模式 Intercom 经 intercom skill 读取目标日有客户消息的会话，内容已脱敏，覆盖各团队；Facebook 的 MFC_DOMAIN 是来源标签，不是客户业务归属的证据。`MFC_SQUAD=All`、`MFC_DOMAIN=all` 不用于排除其它团队；逐条按实际功能确定业务和仓库。采集不读周报、不发布或覆盖周报、不调用原周度 collect 补采。
 
@@ -40,7 +40,7 @@ Multica 任务操作一律用原生 CLI：先看帮助，核对服务、GRM 工�
 ### 缺口处理与受阻判定
 
 - 遇到账号、数据、配置、环境或工具调用缺口时，按当前目标进入适用 Skill 中对应的模块或 reference，并实际执行其中适用的查询、准备或恢复动作。读取主文件不代表已经使用其能力；已有有效事实直接复用，不遍历无关模块。
-- 现有授权内可自行补齐的前置必须由当前子任务运行自身主动完成，不把缺口留给父任务或真人。测试账号缺少目标日期、地址坐标、预约/订单、通话/回调记录或特定状态样本时，必须先完整走完 `moe-acceptance/references/data.md` 的前置降级阶梯（路径一资格/开关、路径二业务数据：当前账号现成样本 → 本账号 API / 底层 `svc-*` RPC / 授权 T2 测试表最小隔离写入 → 全 T2 查现成样本）与 `accounts.md`，并在消费入口回读确认；遇到依赖外部 webhook/回调（如 Twilio 通话）且网关未暴露写接口、但验证目标是下游读取/轮询/刷新消费的场景，不得以“无法真实外呼或等第三方回调”直接阻塞，应沿上述阶梯用内部创建 RPC 或授权 T2 测试库写入最小隔离测试行完成验收后清理。当前界面操作失败时，沿 Skill 核对受支持的 API 或其它可用通道。准备符合真实业务约束的测试前置，不改写被测响应、绕过权限或伪造观察结果。
+- 现有授权内可自行补齐的前置必须由当前子任务运行自身主动完成，不把缺口留给父任务或真人。测试账号缺少目标日期、地址坐标、预约/订单、通话/回调记录或特定状态样本时，必须先完整走完 `moe-acceptance/references/data.md` 的前置降级阶梯（路径一资格/开关、路径二业务数据：当前账号现成样本 → 本账号 API / 底层 `svc-*` RPC / 授权 T2 测试表最小隔离写入 → 全 T2 查现成样本）与 `account.md`，并在消费入口回读确认；遇到依赖外部 webhook/回调（如 Twilio 通话）且网关未暴露写接口、但验证目标是下游读取/轮询/刷新消费的场景，不得以“无法真实外呼或等第三方回调”直接阻塞，应沿上述阶梯用内部创建 RPC 或授权 T2 测试库写入最小隔离测试行完成验收后清理。当前界面操作失败时，沿 Skill 核对受支持的 API 或其它可用通道。准备符合真实业务约束的测试前置，不改写被测响应、绕过权限或伪造观察结果。
 - 判定受阻前，必须同时完成 `moe-acceptance/references/case-execution.md` 的「遇阻时的三步归因阶梯」，核对实际尝试与结果，以及剩余适用路径为何不可执行；只要仍有已授权、可执行且可能解决缺口的下一步，或验收报告导出/诊断脚本（`report_diagnostics.py` / `delivery_artifacts.py`）仍报出未走完准备与归因阶梯的 `case_insufficient` 告警，就不得进入受阻流程或向 Slack 发送受阻通知。只有必要权限或用户决定缺失，或全部适用路径经实际尝试失败、有依据排除且无新线索时，才按原受阻协议记录外部条件、尝试依据与最小恢复条件。“已登记测试账号没有现成样本”“缺少目标日期或带坐标预约但尚未在测试环境新建”“缺少外部通话/回调新记录但未尝试内部 RPC 或 T2 测试表隔离造数”“页面卡住”“尚未查清准备方式”本身均不构成受阻依据。
 
 ## 业务归属与 Slack 负责人通知
@@ -240,7 +240,7 @@ python3 <临时目录>/duty-queue.py \
 
 动态复现前记录复现入口、环境/账号/数据前置、根因验证方法、正确行为依据和必要 Case。代码证明实现，需求/有效历史决定支持预期。先保存并查看必要 before 证据，再验证根因，不能只凭可疑代码认定原因。
 
-按开发、Git 和验收 Skills 连续实现、动态验收与局部修复复验，只改本 Bug 所需内容。可先推送草稿 PR 取得测试构建，再确认真实版本完成验收；构建成功不是业务通过。必要数据/环境缺口先沿 Skills 在授权内准备或恢复，真实不可执行才报告阻塞。跨模块需分阶段时遵守目标仓库规则，不降低验收标准。
+按开发、Git 和验收 Skills（遵循 `moe-acceptance/references/verification-loop.md` 的单智能体闭环适配：不派生其他智能体，先跑增量测试与 `report_diagnostics.py` 等确定性门禁，亲核 before/after 一手证据与独立回读，涉及 UI 改动时叠加 `references/ui-design-review.md`；单 Case 达修复轮次上限或走完前置与三步归因阶梯确认真实受阻时停止自动修改，按第 3 节向交付频道发出受阻通知并交由调度器接续下一项）连续实现、动态验收与局部修复复验，只改本 Bug 所需内容。可先推送草稿 PR 取得测试构建，再确认真实版本完成验收；构建成功不是业务通过。必要数据/环境缺口先沿 Skills 在授权内准备或恢复，真实不可执行才报告阻塞。跨模块需分阶段时遵守目标仓库规则，不降低验收标准。
 
 本工作流不创建 Jira，自动创建的分支、commit message 和 PR 标题需要 Jira key 时一律使用 `GRM-0`。Multica 任务编号（如 `GRM-123`）与 Jira 单号同形但不是 Jira 单号，不得写入分支、commit 或 PR 标题。
 
