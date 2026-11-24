@@ -21,14 +21,17 @@
 - 移动端存量改版核对 `slices/splice-manifest.json` 并运行 `uv run --script ~/.agents/skills/moe-work-buddy/scripts/mobile_splice.py verify` 确认返回 `PASS`（`diff_pixels: 0` 且 `locked_pixels_checked > 0`）。
 
 ### 3. 外部设计输入 / 真实宿主基准对照与整板核查（不限于 Figma）
-- 凡主文档 `Resources`、画板 `design-source.json` 或子单描述中存在**外部设计输入**（Figma 链接、外部网页原型 URL、设计师高保真原稿/标注等）或 T2 存量基准，审查官**必须独立核对外部输入原件（原图 + 精确样式/结构规格，如 Figma `get_design_context`/`get_screenshot`、原型 DOM/CSS 采集、`evidence/design-reference-spec.json`）与当前画板实截**：
-  1. **逐区精确对齐**：重点核查字段标签 / 修改前旧值 / 修改后新值三层字号、字重与色值，按钮数量与文案（如新建页是否漏 `Cancel`），底部分割线/容器边缘是否拉齐无多余留白，以及头像、图标、背景态等关键元素是否与外部输入一致；
-  2. **禁止私自加戏与脑补状态**：拦截画板中凭空编造且外部输入与 PRD 未要求的额外文案/颜色名、业务不可达的空态/错误态页，以及自制的标准 Loading 说明页；
-  3. **整板核查（防改 A 坏 B）**：凡本轮**新增或改动过的板**，必须整板对照外部输入与真实宿主结构，严禁只核对评论锚点那一小块就放行。
+- 凡主文档 `Resources`、`evidence/design-reference-spec.json` 或子单描述中存在**外部设计输入**（Figma 链接、外部网页原型 URL、设计师高保真原稿/标注等）或 T2 存量基准，审查官须核对外部输入原件与当前画板实截（若当前 runtime 具备对应外部工具如 Figma MCP 则独立拉取原件；若缺少该工具，则基于 `evidence/design-reference-spec.json` 与已落盘原图核对并在报告中如实注明）：
+  1. **分区裁决优先级（防误打回已批准改动）**：先对照主文档 `Settled`、PRD 与本轮已采纳评论，区分**获准变更区**与**应保真区**——**获准变更区以 `Settled` / PRD 为准**（即使相对旧外部原稿删减了按钮、状态或文案也不得判错）；**其余未获准变更的保真区**按外部设计输入与真实宿主基准验收，仅**未经批准的偏差**判 P0 阻断；
+  2. **保真区逐项对齐**：重点核查字段标签 / 修改前旧值 / 修改后新值三层字号、字重与色值，按钮数量与文案，底部分割线/容器边缘是否拉齐无多余留白，以及头像、图标、背景态等关键元素；
+  3. **禁止私自加戏与脑补状态**：拦截外部输入与 PRD 均未要求的额外文案/颜色名、业务不可达的空态/错误态页，以及自制的标准 Loading 说明页；
+  4. **整板核查（防改 A 坏 B）**：凡本轮**新增或改动过的板**，必须按上述分区规则整板核查，严禁只核对评论锚点那一小块就放行。
 
 ### 4. `DESIGN.md` / `MOBILE-DESIGN.md` 与 MoeGo Design System 深度检查
-- **MoeGo UI 组件优先与图标族**：是否遵循 `DESIGN.md` 的「组件优先于 Token」——优先复用 `.moe-ds-*` 原语与 `@moego/ui` 现有组件（必要时通过 `moego-ui` CLI、`https://ui.t2.moego.dev/mcp/list-components.json` / `<kebab-name>.json` 或 `component-selection.md` 核验是否已有现成组件却被拿 Token 零散手搓）；图标是否按 `Hero/Major/Minor/Nav/Micro` 正确选族、引入 `moego-design.css` / `moego-icons.js`、无 `moe-icon[data-missing-icon]` 且严禁用 emoji 充当图标。
-- **Token 与变量使用**：新增颜色、背景、边框、阴影是否优先消费 `--moe-*` 语义变量；拦截未经合规 `/* moe-allow-raw: 原因 */` 豁免的硬编码裸色（锁底区与外部原型保留色值除外）。
+- **按宿主核对组件优先与图标族**：
+  - **Web（`b-web` / `standalone`）**：遵循 `DESIGN.md` 的「组件优先于 Token」，优先复用 `.moe-ds-*` 原语与 `@moego/ui` 现有组件（通过 `moego-ui` CLI、`https://ui.t2.moego.dev/mcp/list-components.json` / `<kebab-name>.json` 或 `component-selection.md` 核验）；图标按 `Hero/Major/Minor/Nav/Micro` 选族，引入 `moego-design.css` / `moego-icons.js`，无 `moe-icon[data-missing-icon]` 且严禁用 emoji 替图标。
+  - **移动端 B App（`mobile`）**：遵循 `MOBILE-DESIGN.md` 的「组件优先于样式常量」，核对是否对齐 `MoeText` / `MoeTab` / `MoeTag` / `MoeGoTag` / `Spin` / `ConfirmBottomSheet` 等既有原生组件与 `@moego/icons-react-native`（不强求套用 Web `@moego/ui`），严禁 emoji 替图标。
+- **按宿主核对 Token 与色值**：Web 端新增颜色、背景、边框、阴影优先消费 `--moe-*` 语义变量（锁底区、外部原型保留色值与合规 `/* moe-allow-raw */` 除外）；移动端 B App 核对是否使用 `MOBILE-DESIGN.md` 登记的原生色板及 `mobile_splice.py analyze` 采样底色（不因使用合法 B App 原生色值而按 Web Token 比例误报）。
 - **Gap / Spacing / Radius**：间距、内边距、圆角是否合理使用 `--moe-space-spacing-*`、`--moe-space-padding-*`、`--moe-space-radius-*` 并符合商家端模块密度，无明显拥挤、不对齐或异常留白。
 - **Typography**：Web 端字体使用 `--moe-font-family-manrope` 及 `.moe-h1`~`.moe-h6` / `.moe-text-*` 层级；移动端 B App 按 `MOBILE-DESIGN.md` 使用真实 `ProximaNova` 字体与 `MoeText` / 外部设计输入字号字重层级，无随意写死、层级错乱或误用默认 Web 字体。
 - **宿主、锁底与便签**：B-web 是否保留真实外壳/锁底；移动端是否真截图切片锁底而非手写整屏假壳；画板标题与 `sticky` 便签是否只写设计讲解与交互说明（严禁写入工具版本、视口像素、`verify` 像素数或工程免责声明）。
@@ -53,7 +56,7 @@
      - **已答（Answered）**：文档其他处、画板或代码已有答案但 Spec 未写清（注明来源路径/位置）；
      - **工程小项（Minor）**：不改变产品行为、范围与视觉意图的工程细节（给出建议默认做法）；
      - **需人拍板（Theirs）**：只有需求负责人能拍板且会实质改变行为/视觉/实现路径的问题（写清选项与影响）。
-  2. 对照 `DESIGN.md` / `MOBILE-DESIGN.md` 及实时组件源（`moego-ui` CLI / `https://ui.t2.moego.dev/mcp/<kebab-name>.json` / 已安装 `@moego/ui` 公开类型）核对已确认画板原语、原型色值到 `--moe-*` Token 与真实组件/图标导出的映射，拦截放着已有组件不用而重复造轮子的方案。
+  2. **按目标宿主分别核对组件与样式映射**：Web 端对照 `DESIGN.md` 与实时源（`moego-ui` CLI / `https://ui.t2.moego.dev/mcp/<kebab-name>.json` / 本地 `@moego/ui` 公开类型）核对 `@moego/ui`、`@moego/icons-react` 与 `--moe-*` Token 映射；移动端 B App 对照 `MOBILE-DESIGN.md` 与 `moego-mobile` 源码核对 `MoeText` / `MoeTab` / `MoeTag` / `MoeGoTag` / `Spin`、`@moego/icons-react-native` 及原生样式常量映射（不得拿 Web `@moego/ui` / `--moe-*` 硬套原生 App），拦截重复造轮子的方案。
   3. 逐条核对「3.2 端到端动态验收 Case」的代码可达性：验证每条正向动态断言依赖的端上 UI 入口回调与上游消费/重算链路在当前代码中真实存在，拦截虚写分支并给出「标为该端不适用 / 改为不误报断言」的修订建议。
 
 ---
@@ -62,7 +65,7 @@
 
 - **严禁杠精与发散**：禁止发明新需求、禁止推翻已写入 `Settled` 的人类拍板决定、禁止以个人主观审美偏好作为阻断项。只分 **P0（阻断）** 与 **P1（建议）**。
 - **判定条件**：
-  - `artboard_review`：存在任一 P0（L1 报错、锁底 verify 失败、缺失图标或 emoji 替图标、与外部设计输入/真实宿主基准存在明显样式或结构偏差（如三层字色字重错位、漏按钮、分割线未拉齐、私自加戏文案/硬造不存在状态）、明显违反 `DESIGN.md` / `MOBILE-DESIGN.md` 规范、任意本轮已采纳评论未准确落地、任意历史已采纳决定回退、肉眼可见视觉破坏或与 PRD 冲突）→ `VERDICT: CHANGES_REQUESTED`；否则 → `VERDICT: PASS`。
+  - `artboard_review`：存在任一 P0（L1 报错、锁底 verify 失败、缺失图标或 emoji 替图标、在未获 `Settled`/PRD 批准变更的保真区与外部设计输入/真实宿主基准存在未经批准的样式或结构偏差（如三层字色字重错位、漏按钮、分割线未拉齐、私自加戏文案/硬造不存在状态）、明显违反 `DESIGN.md` / `MOBILE-DESIGN.md` 规范、任意本轮已采纳评论未准确落地、任意历史已采纳决定回退、肉眼可见视觉破坏或与 PRD 冲突）→ `VERDICT: CHANGES_REQUESTED`；否则 → `VERDICT: PASS`。
   - `builder_check`：存在未补齐的 `已答（Answered）`、不可达的 `3.2` 验收 Case、或缺失/写错的关键 `@moego/ui` / Token 映射 → `VERDICT: CHANGES_REQUESTED`；Spec 本身无事实/可达性错误（即使存在需人类拍板的 `需人拍板` 或可归入默认决定的 `工程小项`）→ `VERDICT: PASS`（由父单将三堆合入主文档后交人拍板）。
 - **固定输出格式（首行必须可机读）**：
   - 第 1 行：`VERDICT: PASS` 或 `VERDICT: CHANGES_REQUESTED`
