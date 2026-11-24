@@ -27,7 +27,7 @@
   3. **整板核查（防改 A 坏 B）**：凡本轮**新增或改动过的板**，必须整板对照外部输入与真实宿主结构，严禁只核对评论锚点那一小块就放行。
 
 ### 4. `DESIGN.md` / `MOBILE-DESIGN.md` 与 MoeGo Design System 深度检查
-- **MoeGo UI 原语与图标**：是否按 `DESIGN.md` 复用 `.moe-ds-*` 原语（`.moe-ds-btn` / `.moe-ds-input` / `.moe-ds-drawer*` / `.moe-ds-tabs` / `.moe-ds-tag` / `.moe-ds-banner` / `.moe-ds-empty` / `.moe-ds-divider` 等）与 `<moe-icon>`；是否正确引入 `moego-design.css` / `moego-icons.js`；确认无 `moe-icon[data-missing-icon]`、图标名存在于 `icons-index.md`、严禁用 emoji 充当图标。
+- **MoeGo UI 组件优先与图标族**：是否遵循 `DESIGN.md` 的「组件优先于 Token」——优先复用 `.moe-ds-*` 原语与 `@moego/ui` 现有组件（必要时通过 `moego-ui` CLI、`https://ui.t2.moego.dev/mcp/list-components.json` / `<kebab-name>.json` 或 `component-selection.md` 核验是否已有现成组件却被拿 Token 零散手搓）；图标是否按 `Hero/Major/Minor/Nav/Micro` 正确选族、引入 `moego-design.css` / `moego-icons.js`、无 `moe-icon[data-missing-icon]` 且严禁用 emoji 充当图标。
 - **Token 与变量使用**：新增颜色、背景、边框、阴影是否优先消费 `--moe-*` 语义变量；拦截未经合规 `/* moe-allow-raw: 原因 */` 豁免的硬编码裸色（锁底区与外部原型保留色值除外）。
 - **Gap / Spacing / Radius**：间距、内边距、圆角是否合理使用 `--moe-space-spacing-*`、`--moe-space-padding-*`、`--moe-space-radius-*` 并符合商家端模块密度，无明显拥挤、不对齐或异常留白。
 - **Typography**：Web 端字体使用 `--moe-font-family-manrope` 及 `.moe-h1`~`.moe-h6` / `.moe-text-*` 层级；移动端 B App 按 `MOBILE-DESIGN.md` 使用真实 `ProximaNova` 字体与 `MoeText` / 外部设计输入字号字重层级，无随意写死、层级错乱或误用默认 Web 字体。
@@ -53,7 +53,7 @@
      - **已答（Answered）**：文档其他处、画板或代码已有答案但 Spec 未写清（注明来源路径/位置）；
      - **工程小项（Minor）**：不改变产品行为、范围与视觉意图的工程细节（给出建议默认做法）；
      - **需人拍板（Theirs）**：只有需求负责人能拍板且会实质改变行为/视觉/实现路径的问题（写清选项与影响）。
-  2. 对照 `DESIGN.md` 核对已确认画板原语、原型色值到 `--moe-*` Token 与已安装 `@moego/ui` / `@moego/icons-react` 真实导出的映射，指出可复用组件或写错/漏写的映射。
+  2. 对照 `DESIGN.md` / `MOBILE-DESIGN.md` 及实时组件源（`moego-ui` CLI / `https://ui.t2.moego.dev/mcp/<kebab-name>.json` / 已安装 `@moego/ui` 公开类型）核对已确认画板原语、原型色值到 `--moe-*` Token 与真实组件/图标导出的映射，拦截放着已有组件不用而重复造轮子的方案。
   3. 逐条核对「3.2 端到端动态验收 Case」的代码可达性：验证每条正向动态断言依赖的端上 UI 入口回调与上游消费/重算链路在当前代码中真实存在，拦截虚写分支并给出「标为该端不适用 / 改为不误报断言」的修订建议。
 
 ---
