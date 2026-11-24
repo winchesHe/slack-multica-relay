@@ -16,7 +16,7 @@
 
 ## Skill 入口
 
-使用 `moe-router` 按当前目标路由；关联业务证据用 `moe-business-context`，单一来源足够时直接用对应 Skill。开发用 `moe-development`，Git 与 CI 用 `github-workflow`，PR 说明用 `review-brief`，动态验收与报告用 `moe-acceptance`，Sites 发布用 Sites Skills。用户明确要求向 Slack 发送 PR 评审材料时，按当前 `moe-opc` 与 `review-brief` 的评审发送约定执行。先读取当前适用 Skill，再按其真实合同执行；具体账号、数据、平台、证据、报告模板和资源恢复规则由所属 Skill 维护。
+使用 `moe-router` 按当前目标路由；关联业务证据用 `moe-business-context`，单一来源足够时直接用对应 Skill。开发用 `moe-development`，Git 与 CI 用 `github-workflow`，PR 说明用 `review-brief`，动态验收与报告用 `moe-acceptance`（含 `references/verification-loop.md`；涉及 UI 改动时同时读取 `references/ui-design-review.md` 与 `moe-design-system`），Sites 发布用 Sites Skills。用户明确要求向 Slack 发送 PR 评审材料时，按当前 `moe-opc` 与 `review-brief` 的评审发送约定执行。先读取当前适用 Skill，再按其真实合同执行；具体账号、数据、平台、证据、报告模板和资源恢复规则由所属 Skill 维护。
 
 优先使用 Runtime 已提供的 Skill。缺少 MoeGo 入口时检查 `/Users/moego-winches/.agents/skills/`；Sites 入口缺失时检查 `/Users/moego-winches/.codex/plugins/cache/openai-bundled/sites/` 当前安装版本的 `skills/`。按实际文件和工具能力核对，不能因遗漏插件目录就宣称能力缺失。
 
@@ -60,7 +60,7 @@
 
 构建或部署正常进行时，按 `moe-acceptance` 检查真实进展并有界等待，目标条件满足后直接继续原 Case，不以“等待部署”结束本轮。无关 lint 等检查失败不阻塞验收，也不顺手修复；是否阻断由目标部署与当前 Case 的实际依赖判断，不要求 CI 全绿。单次工具等待结束后根据真实进展继续判断，不把它视作任务结束。
 
-按 `moe-acceptance` 依据实际代码来源、业务动作和观察给出各 Case 结论，失败时局部修复复验。遇到阻塞先通过 `moe-router` 寻找适用路径，按 `moe-acceptance` 的「阻塞调查与上报」实际尝试并记录结果，已有路由仍适用时直接复用。没有现成样本、单次查询为空或准备方式未明，不能以「数据不足」结束。连续三轮同类调查或修复无新增证据或可验证改善时停止该路径，已确认无效可更早换路。适用路径均已失败或有依据排除且无新线索，或确需用户决定时才按第 4 节报告阻塞；独立可做的 Case 继续。
+按 `moe-acceptance`（遵循 `references/verification-loop.md` 的单智能体闭环适配：不派生其他智能体，以确定性增量测试与 `report_diagnostics.py` 先行、亲核 before/after 一手证据与独立回读防自审放水；涉及 UI 缺陷时叠加 `references/ui-design-review.md`）依据实际代码来源、业务动作和观察给出各 Case 结论，失败时局部修复复验。遇到阻塞先通过 `moe-router` 寻找适用路径，按 `moe-acceptance` 的「阻塞调查与上报」及 `account.md` / `data.md` 前置阶梯实际尝试并记录结果，已有路由仍适用时直接复用。没有现成样本、单次查询为空或准备方式未明，不能以「数据不足」结束。连续三轮同类调查或修复无新增证据或可验证改善时停止该路径，已确认无效可更早换路。适用路径均已失败或有依据排除且无新线索，或确需用户决定时才按第 4 节标记 `blocked` 并回报发起请求的 Slack thread 升级；独立可做的 Case 继续。
 
 ### 代码验证与测试
 
