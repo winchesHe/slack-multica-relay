@@ -12,7 +12,7 @@
 ## 模式一：`artboard_review`（画板新建 & 每轮按评论修订审查）
 
 ### 1. 读取规范与现行产物
-- 读取 `~/.agents/skills/moe-work-buddy/assets/design-system/DESIGN.md`、`~/.agents/skills/moe-work-buddy/assets/design-system/tokens-cheatsheet.md`（按需查 `icons-index.md`）。
+- 按画板涉及端读取规范：Web 读 `~/.agents/skills/moe-work-buddy/assets/design-system/DESIGN.md` 与 `tokens-cheatsheet.md`（按需查 `icons-index.md`），移动端 B App 必读 `~/.agents/skills/moe-work-buddy/assets/design-system/MOBILE-DESIGN.md`。
 - 读取任务主文档 `doc.xml`（重点核对 `Resources` 里的「设计来源」、`Settled` 决策表与 PRD 正文）以及画板 `canvas.json`、`pages/<activePage>/design-source.json` 和当前页全部 HTML/CSS 源码。
 
 ### 2. 自动化门禁复核（只读）
@@ -20,20 +20,26 @@
 - 对当前页 HTML 方案板运行 `node ~/.agents/skills/moe-work-buddy/scripts/check_artboard_design.mjs --prd <doc.xml> --check-result <check.json> <方案HTML...>`，检查 L1（阻断）与 L2（逐项核查）；
 - 移动端存量改版核对 `slices/splice-manifest.json` 并运行 `uv run --script ~/.agents/skills/moe-work-buddy/scripts/mobile_splice.py verify` 确认返回 `PASS`（`diff_pixels: 0` 且 `locked_pixels_checked > 0`）。
 
-### 3. `DESIGN.md` 与 MoeGo Design System 深度检查
+### 3. 外部设计输入 / 真实宿主基准对照与整板核查（不限于 Figma）
+- 凡主文档 `Resources`、画板 `design-source.json` 或子单描述中存在**外部设计输入**（Figma 链接、外部网页原型 URL、设计师高保真原稿/标注等）或 T2 存量基准，审查官**必须独立核对外部输入原件（原图 + 精确样式/结构规格，如 Figma `get_design_context`/`get_screenshot`、原型 DOM/CSS 采集、`evidence/design-reference-spec.json`）与当前画板实截**：
+  1. **逐区精确对齐**：重点核查字段标签 / 修改前旧值 / 修改后新值三层字号、字重与色值，按钮数量与文案（如新建页是否漏 `Cancel`），底部分割线/容器边缘是否拉齐无多余留白，以及头像、图标、背景态等关键元素是否与外部输入一致；
+  2. **禁止私自加戏与脑补状态**：拦截画板中凭空编造且外部输入与 PRD 未要求的额外文案/颜色名、业务不可达的空态/错误态页，以及自制的标准 Loading 说明页；
+  3. **整板核查（防改 A 坏 B）**：凡本轮**新增或改动过的板**，必须整板对照外部输入与真实宿主结构，严禁只核对评论锚点那一小块就放行。
+
+### 4. `DESIGN.md` / `MOBILE-DESIGN.md` 与 MoeGo Design System 深度检查
 - **MoeGo UI 原语与图标**：是否按 `DESIGN.md` 复用 `.moe-ds-*` 原语（`.moe-ds-btn` / `.moe-ds-input` / `.moe-ds-drawer*` / `.moe-ds-tabs` / `.moe-ds-tag` / `.moe-ds-banner` / `.moe-ds-empty` / `.moe-ds-divider` 等）与 `<moe-icon>`；是否正确引入 `moego-design.css` / `moego-icons.js`；确认无 `moe-icon[data-missing-icon]`、图标名存在于 `icons-index.md`、严禁用 emoji 充当图标。
 - **Token 与变量使用**：新增颜色、背景、边框、阴影是否优先消费 `--moe-*` 语义变量；拦截未经合规 `/* moe-allow-raw: 原因 */` 豁免的硬编码裸色（锁底区与外部原型保留色值除外）。
 - **Gap / Spacing / Radius**：间距、内边距、圆角是否合理使用 `--moe-space-spacing-*`、`--moe-space-padding-*`、`--moe-space-radius-*` 并符合商家端模块密度，无明显拥挤、不对齐或异常留白。
-- **Typography**：字体是否使用 `--moe-font-family-manrope`，标题与正文层级是否使用 `.moe-h1`~`.moe-h6`、`.moe-text-*` 等排版类，无随意写死、层级错乱的字号与字重。
+- **Typography**：Web 端字体使用 `--moe-font-family-manrope` 及 `.moe-h1`~`.moe-h6` / `.moe-text-*` 层级；移动端 B App 按 `MOBILE-DESIGN.md` 使用真实 `ProximaNova` 字体与 `MoeText` / 外部设计输入字号字重层级，无随意写死、层级错乱或误用默认 Web 字体。
 - **宿主、锁底与便签**：B-web 是否保留真实外壳/锁底；移动端是否真截图切片锁底而非手写整屏假壳；画板标题与 `sticky` 便签是否只写设计讲解与交互说明（严禁写入工具版本、视口像素、`verify` 像素数或工程免责声明）。
 
-### 4. 累计评论全量对账（核心：防“改一轮忘一轮”）
+### 5. 累计评论全量对账（核心：防“改一轮忘一轮”）
 - 运行 `winches-artifacts comment list --sections all --detail --project-dir <task_dir> --artifact artboard/<id>`（以及主文档评论，若有），拉取**全部历史已采纳评论 + 本轮新评论**。
 - 对照主文档 `Settled` 决策表和 `previousPage`（若有），逐条核查两类问题：
   1. **本轮新评论落地**：每条被采纳评论要求的改动是否在对应端、对应状态板和 PRD 中 100% 准确生效，有无理解歪、漏改某状态/某端、或只回复评论没真改图；
   2. **历史决定回归（防遗忘）**：本轮修订是否把前几轮已经改对并采纳的规则、文案、状态删减、色块/排版细节悄悄改回或改坏。
 
-### 5. 多模态视觉读图核查
+### 6. 多模态视觉读图核查
 - 使用隔离 `agent-browser --namespace reviewer-<issueId> --session check --headed false` 打开当前画板 `?page=<activePage>`，截整页与关键单板图到 `/tmp/moegong-reviewer-<issueId>/`（核查结束后必须 `close` 回收本次隔离会话，严禁 `close --all`）。
 - **必须实际读取并肉眼查看截图文件**，核查：文字遮挡、截断溢出、孤行换行、错位、固定底栏误遮挡、空白图标、多余或缺失的状态板，以及未改动区是否与 `before.png` 保持一致。
 
@@ -56,13 +62,13 @@
 
 - **严禁杠精与发散**：禁止发明新需求、禁止推翻已写入 `Settled` 的人类拍板决定、禁止以个人主观审美偏好作为阻断项。只分 **P0（阻断）** 与 **P1（建议）**。
 - **判定条件**：
-  - `artboard_review`：存在任一 P0（L1 报错、锁底 verify 失败、缺失图标或 emoji 替图标、明显违反 `DESIGN.md` 规范、任意本轮已采纳评论未准确落地、任意历史已采纳决定回退、肉眼可见视觉破坏或与 PRD 冲突）→ `VERDICT: CHANGES_REQUESTED`；否则 → `VERDICT: PASS`。
+  - `artboard_review`：存在任一 P0（L1 报错、锁底 verify 失败、缺失图标或 emoji 替图标、与外部设计输入/真实宿主基准存在明显样式或结构偏差（如三层字色字重错位、漏按钮、分割线未拉齐、私自加戏文案/硬造不存在状态）、明显违反 `DESIGN.md` / `MOBILE-DESIGN.md` 规范、任意本轮已采纳评论未准确落地、任意历史已采纳决定回退、肉眼可见视觉破坏或与 PRD 冲突）→ `VERDICT: CHANGES_REQUESTED`；否则 → `VERDICT: PASS`。
   - `builder_check`：存在未补齐的 `已答（Answered）`、不可达的 `3.2` 验收 Case、或缺失/写错的关键 `@moego/ui` / Token 映射 → `VERDICT: CHANGES_REQUESTED`；Spec 本身无事实/可达性错误（即使存在需人类拍板的 `需人拍板` 或可归入默认决定的 `工程小项`）→ `VERDICT: PASS`（由父单将三堆合入主文档后交人拍板）。
 - **固定输出格式（首行必须可机读）**：
   - 第 1 行：`VERDICT: PASS` 或 `VERDICT: CHANGES_REQUESTED`
   - 第 2 行：`REVIEW_TYPE: artboard_review`（或 `builder_check`）· `ATTEMPT: <N>`
   - 正文按模式输出简洁结构化清单：
-    - `artboard_review`：① 累计评论对账表（Comment ID / 轮次 / 要求 / 状态 PASS|FAIL / 证据）；② `DESIGN.md` 合规检查（UI 原语、Token、Gap/Spacing、Typography、宿主/锁底/便签）；③ 视觉读图与 P0/P1 缺陷清单（含精确文件/board/位置与修复指向）。
+    - `artboard_review`：① 累计评论对账表（Comment ID / 轮次 / 要求 / 状态 PASS|FAIL / 证据）；② 外部设计输入/宿主整板对照（字色字重层级、按钮组合、边缘对齐、无多余文案/无脑补状态）；③ `DESIGN.md` / `MOBILE-DESIGN.md` 合规检查（UI 原语、Token、Gap/Spacing、Typography、宿主/锁底/便签）；④ 视觉读图与 P0/P1 缺陷清单（含精确文件/board/位置与修复指向）。
     - `builder_check`：① `已答（Answered）`；② `工程小项（Minor）`；③ `需人拍板（Theirs）`；④ `@moego/ui` & Token 映射与 `3.2` 验收 Case 可达性核查结论。
 
 ---
