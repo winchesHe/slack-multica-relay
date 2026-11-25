@@ -9,8 +9,8 @@
 
 ## 一、输入解析与铁律
 
-- 从子单描述解析：`review_type`（`artboard_review`、`builder_check` 或 `impl_ui_review`）、`task_dir`、`document/<id>`、`artboard/<id>`、`activePage`、`previousPage`（若有）、`design-ref.json` / 外部设计输入入口（若有）、本轮新增/改动板列表、`comment_ids`（若有）、目标改动端与业务仓（`builder_check` / `impl_ui_review` 必填）、实机验收目录/可读原图与 PR（`impl_ui_review` 必填）与 `attempt`。
-- **严禁轻信起草者摘要**：所有结论必须基于真实文件、工作台原始评论记录、确定性脚本输出与真实截图原图；未核实不得给 `PASS`。若派单提供的证据路径或 PR 因权限/跨机不可读取，明确标出缺失可读入口请父单补齐，不误判为实现 UI 缺陷。
+- 从子单描述解析：`review_type`（`artboard_review`、`builder_check` 或 `impl_ui_review`）、`task_dir`、`document/<id>`、`artboard/<id>`、`activePage`、`previousPage`（若有）、`design-ref.json` / 外部设计输入入口（若有）、本轮新增/改动板列表、`comment_ids`（若有）、目标改动端与业务仓（`builder_check` / `impl_ui_review` 必填）、实机验收目录与 PR（`impl_ui_review` 必填）与 `attempt`。
+- **严禁轻信起草者摘要**：所有结论必须基于本地真实文件、工作台原始评论记录、确定性脚本输出与真实截图原图；未核实不得给 `PASS`。
 
 ## 二、三种审查模式
 
@@ -64,11 +64,9 @@
 - **判定条件**：
   - `artboard_review`：存在任一 P0（L1 报错、锁底 verify 失败、缺图标或 emoji 替图标、保真区未经批准偏离原稿、私自加戏文案/脑补不存在状态、明显违反对应端 Design System、已采纳评论未落地或历史决定回归、肉眼视觉破坏或与 PRD 冲突）→ `VERDICT: CHANGES_REQUESTED`；否则 → `VERDICT: PASS`。
   - `builder_check`：存在未补齐的 `已答`、不可达的 `3.2` Case 或错漏关键组件/Token 映射 → `VERDICT: CHANGES_REQUESTED`；否则 → `VERDICT: PASS`。
-  - `impl_ui_review`：
-    - 若因派单提供的证据路径/PR 权限不可访问导致无法核对，输出 `VERDICT: EVIDENCE_INACCESSIBLE` 并列出不可访问项请父单补齐（不作为实现缺陷打回）；
-    - 存在任一 P0（缺失本次改动端实机原图或 Web 改动缺失内部净距/色值采样、在约定容差与参考档位内未经批准偏离当前最高优先级参考源、复用组件双层间距叠加、擅自隐藏或遗漏原稿按钮、明显字体偏小/裁切/遮挡或违反对应端 Design System）→ `VERDICT: CHANGES_REQUESTED`；否则 → `VERDICT: PASS`。
+  - `impl_ui_review`：存在任一 P0（缺失本次改动端实机原图或 Web 改动缺失内部净距/色值采样、在约定容差与参考档位内未经批准偏离当前最高优先级参考源、复用组件双层间距叠加、擅自隐藏或遗漏原稿按钮、明显字体偏小/裁切/遮挡或违反对应端 Design System）→ `VERDICT: CHANGES_REQUESTED`；否则 → `VERDICT: PASS`。
 - **固定输出头（首行必须可机读）**：
-  - 第 1 行：`VERDICT: PASS`、`VERDICT: CHANGES_REQUESTED` 或 `VERDICT: EVIDENCE_INACCESSIBLE`
+  - 第 1 行：`VERDICT: PASS` 或 `VERDICT: CHANGES_REQUESTED`
   - 第 2 行：`REVIEW_TYPE: artboard_review`（或 `builder_check` / `impl_ui_review`）· `ATTEMPT: <N>`
   - 正文结构化清单：
     - `artboard_review`：① 累计评论对账表；② 分区整板与参考源对照；③ `moe-design-system` 合规与 UI Craft Hygiene；④ 视觉读图与 P0/P1 缺陷清单（含精确文件/board/位置与修复指向）。
