@@ -9,8 +9,8 @@
 
 ## 一、输入解析与铁律
 
-- 从子单描述解析：`review_type`（`artboard_review`、`builder_check` 或 `impl_ui_review`）、`task_dir`、`document/<id>`、`artboard/<id>`、`activePage`、`previousPage`（若有）、`design-ref.json` / 外部设计输入入口（若有）、本轮新增/改动板列表、`comment_ids`（若有）、目标业务仓（`builder_check` / `impl_ui_review` 必填）、实机验收目录与 PR（`impl_ui_review` 必填）与 `attempt`。
-- **严禁轻信起草者摘要**：所有结论必须基于本地真实文件、工作台原始评论记录、确定性脚本输出与真实截图原图；未核实不得给 `PASS`。
+- 从子单描述解析：`review_type`（`artboard_review`、`builder_check` 或 `impl_ui_review`）、`task_dir`、`document/<id>`、`artboard/<id>`、`activePage`、`previousPage`（若有）、`design-ref.json` / 外部设计输入入口（若有）、本轮新增/改动板列表、`comment_ids`（若有）、目标改动端与业务仓（`builder_check` / `impl_ui_review` 必填）、实机验收目录/可读原图与 PR（`impl_ui_review` 必填）与 `attempt`。
+- **严禁轻信起草者摘要**：所有结论必须基于真实文件、工作台原始评论记录、确定性脚本输出与真实截图原图；未核实不得给 `PASS`。若派单提供的证据路径或 PR 因权限/跨机不可读取，明确标出缺失可读入口请父单补齐，不误判为实现 UI 缺陷。
 
 ## 二、三种审查模式
 
@@ -23,7 +23,7 @@
    - 全部画板均跑：`winches-artifacts check --project-dir <task_dir> --artifact artboard/<id> --page <activePage> --format json`；
    - **HTML 方案板**跑 `check_artboard_design.mjs`（纯截图基准板豁免 HTML Guard，仍核查截图与锁底）；**移动端存量切片板**按 `moe-work-buddy/references/design-capture-and-mockups.md` 跑 `mobile_splice.py verify`（确认 `PASS`、`diff_pixels: 0`）。
 3. **执行共享 UI 一致性检查内核（按 `ui-design-review.md`）**：
-   - **分区裁决与原稿优先**：对照 `design-ref.json` `approved_deviations` 与主文档 `Settled`/PRD，获准变更区以 `Settled`/PRD 为准，其余保真区严格对照原始外部参考/真实宿主整板核查（对本轮新增/改动板全板核查，防改 A 坏 B；凡偏离原始 Figma/原稿的改动如隐藏原稿按钮、改错列宽/间距/色值而未写入 `approved_deviations` 直接判 P0；缺外部工具如 Figma MCP 时基于落盘 `design-ref.json` 与原图核对并如实注明）。
+   - **单一裁决优先级**：按「① `approved_deviations` 白名单（若 `Settled` 已有明确拍板但漏登，视作有效偏离并提醒父单补登）→ ② 原始外部参考源（存在时，在约定容差与参考档位内裁决）→ ③ 真实宿主基准」核查本轮新增/改动板（防改 A 坏 B；缺外部工具如 Figma MCP 时基于落盘 `design-ref.json` 与原图核对并如实注明）。
    - **Design System 与 Craft Hygiene**：按宿主核对组件优先、图标族、Token/原生色板、字体（Web `Manrope` / Mobile `ProximaNova`）、分割线边缘拉齐、无脑补不存在状态或自制 Loading 页、便签无工程自检日志；Tier 1 DOM 源可用 `measure_dom_styles.mjs`（含 `--pairs` 净距与 `--moe-color-*` Token 反查）核对。
 4. **累计评论全量对账（防“改一轮忘一轮”）**：
    - 按本轮 `comment_ids` 及关联产物，用 `winches-artifacts comment list --sections all --detail --project-dir <task_dir> --artifact <artboard/<id> 及 document/<id>（若有主文档评论）>` 拉取全部历史已采纳评论与本轮新评论；
@@ -38,38 +38,42 @@
   2. 按宿主核对组件、图标与样式映射（拦截重复造轮子及 Web/Mobile 混套）；
   3. 逐条核对「3.2 端到端动态验收 Case」的代码可达性，拦截虚写分支。
 
-### 模式三：`impl_ui_review`（阶段 4 实机 UI 多模态三方对照走查）
+### 模式三：`impl_ui_review`（阶段 4 实机 UI 多模态对照走查）
 
-专门拦截“实现子单只量外框、未看图或照抄画板偏差导致视觉缺陷漏给设计师”的问题，面向所有含 Web / B App UI 改动的阶段 4 交付：
+面向本次实际改动了 Web 或 B App UI 的阶段 4 交付，只审本次改动端，按实际已有参考源裁决：
 
-1. **三方一手材料必齐（严禁只看报告文案）**：
-   - 读取 `moe-design-system` 对应端规范（`DESIGN.md` / `MOBILE-DESIGN.md`、`known-pitfalls.md`）与 `moe-acceptance/references/ui-design-review.md`；
-   - 读取三方一手材料：**① 原始外部设计参考**（`design-ref.json` / `evidence/` 下的原始 Figma 截图与节点样式参数，若有）+ **② 已批准画板**（`activePage` 原图与 CSS）+ **③ 实机验收产物**（`~/.config/moego/moe-acceptance/<任务ID>/manifest.json`、真实截出的全部 UI 原图 PNG、Web `measure_dom_styles.mjs` 量测 JSON，以及目标 PR / 业务仓样式代码 diff）。
-2. **强制多模态逐图打开原图对照**：
-   - **必须实际读取查看原图**（原始设计稿图 + 批准画板图 + 实机截图并排核对），绝不能只读 `manifest.json` 的文字观察放行。
-   - **原稿优先裁决**：若存在原始外部设计稿且未在 `approved_deviations` / `Settled` 中批准偏离，实机 UI 与原稿不一致（哪怕和中间画板一致）一律判 P0。
+1. **按改动端与参考源加载一手材料（严禁只看报告文案）**：
+   - 读取 `moe-design-system` 对应端规范（Web `DESIGN.md` / Mobile `MOBILE-DESIGN.md`、`known-pitfalls.md`）与 `moe-acceptance/references/ui-design-review.md`；
+   - 按实际存在加载参考源：**有原始外部设计参考时**读 `design-ref.json` / `evidence/` 原图与样式参数，并对照已批准画板（若有）；**纯画板无外部原稿时**直接以已批准画板为参考源；
+   - 加载实机验收材料：`manifest.json`、真实截出的 UI 原图 PNG、目标 PR 样式代码 diff；仅本次含 Web UI 改动时核查 `measure_dom_styles.mjs` 采样（参考侧有精确值时同时核查 `diff`），纯 B App 改动核查 RN 渲染样式与真机截图，不索要 Web DOM。
+2. **强制多模态逐图打开原图 + 单一优先级裁决**：
+   - **必须实际读取查看原图**（参考原图与实机截图并排核对），绝不能仅读 `manifest.json` 文字观察放行；
+   - 每个检查点按唯一优先级裁决：**① `approved_deviations` 白名单（`Settled` 已有明确拍板但漏登的，视为有效偏离并提示父单补登，不要求实现方改回）→ ② 原始外部设计参考（存在时）→ ③ 已批准画板（无外部原稿时）**。若实现已对齐原稿而中间画板有未登记偏差，判实现通过并注明画板偏差。
+   - 裁决须在约定容差（DOM 默认 `1px`）与参考源能力档位内进行（Tier 3 纯图参考不伪造精确像素值阻断）。
 3. **必查 6 类高频实机漏网缺陷**：
-   - **内部垂直/水平间距与组件叠加**：重点查复用组件壳层（如 `@moego/ui` `Timeline`/`Drawer`/`Form`）+ 内部业务子节点是否产生双倍 `margin`/`padding` 叠加（如标题→卡片、条目→条目间距），必须核对 `measure_dom_styles.mjs` 的 `--pairs` 净距与 `margin*`/`rowGap`/`columnGap`，**严禁仅凭外框宽度（如 656px）放行**；
-   - **列宽与对齐**：表单/日志左侧标签固定宽度、与右侧值间距（`columnGap` / 水平净距）、长文案折行与右边界裁切；
-   - **语义色层级**：逐项核对主标题、正文/新值（`primary`）、次级说明（`secondary`）、字段标签/操作时间/元信息/旧值（`tertiary`）的实际渲染颜色是否错位（重点抓 `secondary` 错代 `tertiary`）；
-   - **字体与字号比例（尤其 B App 真机）**：核对实机截图中各层字体视觉大小比例与原稿是否一致、是否整体偏小一圈、最小字号是否低于规范（如 B App 卡片内容不小于 12px 且层级分明）、字体家族是否正确；
-   - **顶部 / 底部原生动作按钮显隐**：核对原稿与宿主中 `Save`、`Cancel`、`Delete`、`Remove` 等操作按钮在不同 Tab/状态下是否被擅自隐藏或漏掉（无 `approved_deviations` 批准即 P0）；
+   - **内部垂直/水平净距与组件叠加**：重点查复用组件壳层与业务子节点是否产生双倍 `margin`/`padding` 叠加；Web 改动须核对 `measure_dom_styles.mjs` 的内部节点净距（`--pairs`）与 `margin*`/`rowGap`/`columnGap`，严禁仅凭最外层容器尺寸放行；
+   - **列宽与对齐**：标签列宽、与右侧值间距（`columnGap` / 水平净距）、长文案折行与右边界裁切；
+   - **语义色层级**：对照该屏原稿与设计系统核对主正文、次级说明、标签/元信息/旧值等实际渲染色与 Token 是否错位（结合实机采样 Token 与代码声明核实，不凭空假设所有次级文案必为同一 Token）；
+   - **字体与字号比例（尤其 B App 真机）**：核对实机截图中各层字体视觉大小比例与原稿/设计系统是否一致、是否整体偏小、最小字号是否低于对应端规范、字体家族是否正确；
+   - **顶部 / 底部原生动作按钮显隐**：核对原稿与宿主中 `Save`、`Cancel`、`Delete`、`Remove` 等操作按钮在不同 Tab/状态下是否未经批准被擅自隐藏或遗漏；
    - **UI Craft Hygiene**：单层圆角、无双边框、Hover/Focus 干净、分割线边缘拉齐、无固定底栏遮挡。
 
 ## 三、裁决标准与机读输出格式
 
 - **严禁杠精与发散**：不发明新需求、不推翻 `Settled` 人类拍板、不以主观审美阻断。只分 **P0（阻断）** 与 **P1（建议）**。
 - **判定条件**：
-  - `artboard_review`：存在任一 P0（L1 报错、锁底 verify 失败、缺图标或 emoji 替图标、保真区未经 `approved_deviations`/`Settled` 批准偏离原稿、私自加戏文案/脑补不存在状态、明显违反对应端 Design System、已采纳评论未落地或历史决定回归、肉眼视觉破坏或与 PRD 冲突）→ `VERDICT: CHANGES_REQUESTED`；否则 → `VERDICT: PASS`。
+  - `artboard_review`：存在任一 P0（L1 报错、锁底 verify 失败、缺图标或 emoji 替图标、保真区未经批准偏离原稿、私自加戏文案/脑补不存在状态、明显违反对应端 Design System、已采纳评论未落地或历史决定回归、肉眼视觉破坏或与 PRD 冲突）→ `VERDICT: CHANGES_REQUESTED`；否则 → `VERDICT: PASS`。
   - `builder_check`：存在未补齐的 `已答`、不可达的 `3.2` Case 或错漏关键组件/Token 映射 → `VERDICT: CHANGES_REQUESTED`；否则 → `VERDICT: PASS`。
-  - `impl_ui_review`：存在任一 P0（缺失原图或 Web 缺失内部间距/色值 `measure_dom_styles.mjs` 量测证据、实机与原稿/已批准画板存在未经 `approved_deviations` 批准的间距/列宽/字号/颜色 Token 偏差、复用组件双层间距叠加、擅自隐藏或遗漏原稿按钮、明显字体偏小/裁切/遮挡或违反对应端 Design System）→ `VERDICT: CHANGES_REQUESTED`；否则 → `VERDICT: PASS`。
+  - `impl_ui_review`：
+    - 若因派单提供的证据路径/PR 权限不可访问导致无法核对，输出 `VERDICT: EVIDENCE_INACCESSIBLE` 并列出不可访问项请父单补齐（不作为实现缺陷打回）；
+    - 存在任一 P0（缺失本次改动端实机原图或 Web 改动缺失内部净距/色值采样、在约定容差与参考档位内未经批准偏离当前最高优先级参考源、复用组件双层间距叠加、擅自隐藏或遗漏原稿按钮、明显字体偏小/裁切/遮挡或违反对应端 Design System）→ `VERDICT: CHANGES_REQUESTED`；否则 → `VERDICT: PASS`。
 - **固定输出头（首行必须可机读）**：
-  - 第 1 行：`VERDICT: PASS` 或 `VERDICT: CHANGES_REQUESTED`
+  - 第 1 行：`VERDICT: PASS`、`VERDICT: CHANGES_REQUESTED` 或 `VERDICT: EVIDENCE_INACCESSIBLE`
   - 第 2 行：`REVIEW_TYPE: artboard_review`（或 `builder_check` / `impl_ui_review`）· `ATTEMPT: <N>`
   - 正文结构化清单：
     - `artboard_review`：① 累计评论对账表；② 分区整板与参考源对照；③ `moe-design-system` 合规与 UI Craft Hygiene；④ 视觉读图与 P0/P1 缺陷清单（含精确文件/board/位置与修复指向）。
     - `builder_check`：① `已答`；② `工程小项`；③ `需人拍板`；④ 按宿主组件/Token 映射与 `3.2` 可达性核查结论。
-    - `impl_ui_review`：① 三方原图对照结论（原始设计稿 vs 批准画板 vs 实机截图）；② Web DOM 净距/色值 Token 量测核查（或 B App 样式与字号/按钮核查）；③ P0/P1 缺陷清单（每条含精确位置、设计预期 → 实机现状、对应代码文件与改法指向）。
+    - `impl_ui_review`：① 本次改动端原图对照结论（注明所采用的最高优先级参考源）；② Web DOM 净距/Token 量测核查（仅 Web 改动）或 B App RN 样式与字号/按钮核查（仅 B App 改动）；③ P0/P1 缺陷清单（每条含精确位置、设计预期 → 实机现状、对应代码文件与改法指向）。
 
 ## 四、边界（无例外）
 
