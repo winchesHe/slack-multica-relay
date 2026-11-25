@@ -16,7 +16,7 @@
 - **阶段 4 交付硬规则**：
   1. 核心实现与增量测试完成后默认通过 `github-workflow` 创建**正式非草稿 PR**（仅 owner 要求或 WIP 才用 `--draft`）；
   2. `artboard` 仅用于阶段 2 视觉设计评审，**严禁追加运行证据页或返回运行证据画板**；
-  3. 动态验收报告唯一入口为 **`moe-acceptance` 单文件 HTML**（`~/.config/moego/moe-acceptance/<任务ID>/report/index.html`）挂入任务 `winches-artifacts` 的 `html/acceptance-report/index.html` 并用 `<ref html="acceptance-report" ...>` 关联，通过局域网分享链接交付；**不发布公开 Codex Site，严禁用 `winches-artifacts verify` 替代**。
+  3. 动态验收报告唯一入口为 **`moe-acceptance` 单文件 HTML**（`~/.config/moego/moe-acceptance/<任务ID>/report/index.html`）挂入任务 `winches-artifacts` 的 `html/acceptance-report/index.html` 并用 `<ref html="acceptance-report" ...>` 关联，通过局域网分享链接交付；**只对外发送端到端动态验收报告，纯单测验收报告不发出来**（单测结果在 PR 描述或摘要中简述即可）；**不发布公开 Codex Site，严禁用 `winches-artifacts verify` 替代**。
 
 ## 二、Multica / Slack / `winches-artifacts` 运行时胶水
 
@@ -34,15 +34,16 @@
 ## 三、异步闭环编排（遵循 `moe-acceptance/references/verification-loop.md`）
 
 - **审查官异步门禁（`萌狗工作审查官`，发 Slack 前必过，上限 2 轮）**：
-  1. **触发时机**：① 阶段 2 新建或修订 `artboard` 后（`review_type: artboard_review`）；② 阶段 3 起草或大改 `Written Design` 后（`review_type: builder_check`）。
-  2. **派单协议**：本地确定性自检通过后，`multica issue create --parent <父issueId> --stage <N> --assignee 萌狗工作审查官 --title "[Design Review|Builder Check] <需求主题>" --description-stdin`，正文固定携带：`review_type`、`task_dir`、`document/<id>`、`artboard/<id>`、`activePage`、`previousPage`（若有）、`design-ref.json` 路径及外部设计输入入口（若有）、本轮新增/改动板列表、`comment_ids`（若有）、目标业务仓（`builder_check` 必填）与 `attempt: 1|2`。由 Slack 直接触发时仅简短回报“已派发审查官复核中”，不提前发未审链接。
+  1. **触发时机**：① 阶段 2 新建或修订 `artboard` 后（`review_type: artboard_review`）；② 阶段 3 起草或大改 `Written Design` 后（`review_type: builder_check`）；③ **阶段 4 含 Web / B App UI 改动的实现子单完成动态验收后、对外发 Slack 前**（`review_type: impl_ui_review`，仅审本次改动端）。
+  2. **派单协议**：本地确定性自检通过后，`multica issue create --parent <父issueId> --stage <N> --assignee 萌狗工作审查官 --title "[Design Review|Builder Check|UI Impl Review] <需求主题>" --description-stdin`，正文固定携带：`review_type`、`task_dir`、`document/<id>`、`artboard/<id>`、`activePage`、`previousPage`（若有）、`design-ref.json` 路径及外部设计输入入口（若有）、本轮新增/改动板列表、`comment_ids`（若有）、目标改动端与业务仓（`builder_check` / `impl_ui_review` 必填）、实机验收目录与 PR 链接（`impl_ui_review` 必填；仅 Web UI 改动时附 `measure_dom_styles.mjs` 采样/diff）与 `attempt: 1|2`。由 Slack 直接触发时仅简短回报“已派发审查官复核中”，不提前发未审链接。
   3. **回流闭环**：子单完成唤醒父单后读首行 `VERDICT:`：
      - `artboard_review`：`PASS` → 完成评论回复并 `--as bot` 发 Slack；`CHANGES_REQUESTED` 且 `attempt < 2` → 按 P0 原地修复并派 `attempt: 2`；第 2 轮仍未过则停止循环，携未解缺陷清单发 Slack 请负责人裁决。
      - `builder_check`：按三堆回写主文档（`已答` 直接补齐、`工程小项` 写 `1. AI 工程默认决定`、`需人拍板` 置顶写 `0. 待拍板项`，文末留一行结论及审查子单号）；存在阻断缺口且 `attempt < 2` 时修补再派 `attempt: 2`；通过或达上限后 `--as bot` 发 Slack 请审批。
-  4. **不可用兜底**：仅当派单失败（runtime 离线/权限错误）或超时无响应时退回本机自查，并在交付中显式注明原因。
+     - `impl_ui_review`：`PASS` → 放行该端 UI 交付进入父单最终汇总；`CHANGES_REQUESTED` 且 `attempt < 2` → 在原实现子单评论贴入审查官 P0 缺陷清单要求修复并复验，待子单完成后再派 `attempt: 2`；`attempt >= 2` 仍未过则停止自动修复，携残留 UI 差异清单发 Slack 请负责人裁决，**待负责人明确决定后再处理最终交付**。
+  4. **不可用兜底**：仅当派单失败（runtime 离线/权限错误）或超时无响应时触发兜底——`artboard_review` / `builder_check` 可退回本机自查并在交付中显式注明原因；但 **`impl_ui_review` 不可绕过多模态看图门禁**（若本机不具备多模态原图读图能力且无可用审查端，严禁自判 `PASS`，须向 Slack 报告「尚未完成视觉多模态复核」并请负责人裁决；超时本身绝不视为 `PASS`）。
 - **阶段 4 自闭环与父子单汇总**：
   - `Written Design` 批准后，自闭环推进全部已批准范围至动态验收与正式 PR，严禁在子任务间增设二次人工确认停顿。无技术先后依赖的跨仓/跨端任务默认同 `--stage` 并行派发子单（独立报告路径 `html/acceptance-report-<scope>`）；有真实依赖时按 `--stage 1 → 2` 自动栅栏接力。前置缺失严格按 `moe-acceptance` 双阶梯（`account.md` / `data.md`）与 `verification-loop.md` 停止条件执行。
-  - **父单门禁（不卡 CI，硬卡报告质量）**：父单不因 GitHub CI 打回子单，但必须读取每份报告 `manifest.json` 与诊断结果：① 全部可验 Case 通过且有报告与正式 PR → `--as bot` 发 Slack 汇总并 `@` 技术 Review；② 存在「不通过」或未走完双阶梯/未核消费端源码与接口的「信息不足」→ 直接在原子单评论打回补验，并回读 `multica issue runs <childId> --active` 确认已拉起（未拉起则发 Slack 告警）；③ 拿齐“入口/消费端源码 + 真实接口响应 + 动态观察”三证确认 Case 不可达 → 保持 `blocked` 发 Slack 请负责人裁剪范围。
+  - **父单门禁（不卡 CI，硬卡报告质量与多模态 UI 审查）**：父单不因 GitHub CI 打回子单，但必须读取每份报告 `manifest.json` 与诊断结果，且含 UI 改动的端必先完成上方审查官 `impl_ui_review`（轮次打回/升级严格遵循上方 `impl_ui_review` 回流闭环，不重复分叉）：① 全部可验 Case 通过、UI 审查 `PASS`（或已获负责人明确裁决）且有报告与正式 PR → `--as bot` 发 Slack 汇总并 `@` 技术 Review（**仅发端到端验收报告，不发纯单测验收报告**；同条消息附上可直接验收的 Grey 环境模板：`Web` 给可跳转 Grey 链接及已连页面/后端，`B App 测试版` 给 `- 前端 Grey` 与 `- 后端 Grey` 名称、不给易失败的 Channel/Bundle 分支名，再附 `验收入口` 路径，不涉及的端省略）；② 存在「不通过」或未走完双阶梯/未核消费端源码与接口的「信息不足」（以及 `impl_ui_review` 第 1 轮 `CHANGES_REQUESTED`）→ 直接在原子单评论打回补验，并回读 `multica issue runs <childId> --active` 确认已拉起（未拉起则发 Slack 告警）；③ 拿齐“入口/消费端源码 + 真实接口响应 + 动态观察”三证确认 Case 不可达 → 保持 `blocked` 发 Slack 请负责人裁剪范围。
   - **Slack 静默阶梯**：子单全程严禁发 Slack；仅父单在 ① 阶段 1/2/3 审批、② 全部子单达标最终汇总、③ 真正停摆需人工介入的终态阻塞时发 Slack。
 
 ## 四、边界（无例外）
