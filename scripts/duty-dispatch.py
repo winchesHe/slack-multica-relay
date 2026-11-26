@@ -27,7 +27,7 @@ PROTOCOL_VERSION = 2
 def execution(scan, revision, runtime):
     value = queue.meta(scan, 'dailyExecution')
     if value.get('policy') == LANE_POLICY:
-        valid = value.get('laneCount') == queue.LANE_COUNT and queue.lane_store(scan)
+        valid = value.get('laneCount') in queue.ALLOWED_LANE_COUNTS and queue.lane_store(scan)
     elif value.get('policy') == ISSUE_POLICY:
         valid = value.get('investigationConcurrency') == 2 and not queue.lane_store(scan)
     else:
@@ -166,7 +166,7 @@ def plan(snapshot, *, round_id, current_issue, current_run, agent_id, project_id
          workspace_id, runtime_id, revision, handoff=False, recovering=False, repairing=False):
     agent, issues, runs = snapshot['agent'], snapshot['issues'], snapshot['runs']
     if (agent.get('id') != agent_id or agent.get('workspace_id') != workspace_id
-            or agent.get('runtime_id') != runtime_id or agent.get('max_concurrent_tasks') not in (1, 2)):
+            or agent.get('runtime_id') != runtime_id or agent.get('max_concurrent_tasks') not in queue.ALLOWED_CONCURRENCY):
         raise Error('Agent 身份、Runtime 或并发现场不符')
     by_id = {row['id']: row for row in issues}
     if len(by_id) != len(issues) or round_id not in by_id or current_issue not in by_id:

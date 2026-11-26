@@ -688,7 +688,7 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(query.call_args.args[1], ['issue', 'runs', 'first', '--active'])
 
     def test_incomplete_pagination_and_wrong_concurrency_cannot_be_reported_as_idle(self):
-        for responses in ([{'id': 'project'}, {'id': 'agent', 'max_concurrent_tasks': 3}],
+        for responses in ([{'id': 'project'}, {'id': 'agent', 'max_concurrent_tasks': 5}],
                           [{'id': 'project'}, {'id': 'agent', 'max_concurrent_tasks': 1},
                            {'issues': [], 'has_more': True, 'total': 1, 'offset': 0}]):
             with self.subTest(responses=responses), patch.object(queue, 'query', side_effect=responses):

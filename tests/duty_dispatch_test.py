@@ -526,7 +526,7 @@ class PlanTests(unittest.TestCase):
         data = snapshot([candidate()])
         data['issues'][0]['metadata']['dailyRound']['registrationComplete'] = False
         self.assertEqual(dispatch.plan(data, **SCOPE)['action'], 'register_round')
-        data['agent']['max_concurrent_tasks'] = 3
+        data['agent']['max_concurrent_tasks'] = 5
         with self.assertRaises(dispatch.Error):
             dispatch.plan(data, **SCOPE)
         data = snapshot([candidate()])
@@ -1175,6 +1175,29 @@ class ScreeningGateTests(unittest.TestCase):
             'collected': 372, 'suspected': 47, 'pendingScreening': 0}
         result = dispatch.plan(data, **SCOPE)
         self.assertEqual(result['action'], 'dispatch')
+
+    def test_supports_four_lanes_and_four_concurrency_while_preserving_two_lane_rounds(self):
+        data = lane_snapshot(['a', 'b', 'c', 'd', 'e'])
+        scan = data['issues'][0]
+        lane3 = issue('lane-3', status='in_progress', assignee_id='agent',
+                      dailyLane={'schemaVersion': 1, 'mode': 'investigate_lane', 'roundId': 'scan',
+                                 'lane': 3, 'laneCount': 4, 'state': 'ready', 'currentCandidateId': None})
+        lane4 = issue('lane-4', status='in_progress', assignee_id='agent',
+                      dailyLane={'schemaVersion': 1, 'mode': 'investigate_lane', 'roundId': 'scan',
+                                 'lane': 4, 'laneCount': 4, 'state': 'ready', 'currentCandidateId': None})
+        lane3['parent_issue_id'] = lane4['parent_issue_id'] = 'scan'
+        lane3['workspace_id'] = lane4['workspace_id'] = 'workspace'
+        for lane in data['issues'][1:3]:
+            lane['metadata']['dailyLane']['laneCount'] = 4
+        data['issues'].extend([lane3, lane4])
+        scan['metadata']['dailyExecution']['laneCount'] = 4
+        scan['metadata']['dailyRound']['laneIssueIds'] = ['lane-1', 'lane-2', 'lane-3', 'lane-4']
+        data['agent']['max_concurrent_tasks'] = 4
+        result = dispatch.plan(data, **SCOPE)
+        self.assertEqual(result['action'], 'dispatch')
+        self.assertEqual(len(result['claims']), 4)
+        self.assertEqual([c['candidateId'] for c in result['claims']],
+                         ['intercom:a', 'intercom:b', 'intercom:c', 'intercom:d'])
 
 
 if __name__ == '__main__':
