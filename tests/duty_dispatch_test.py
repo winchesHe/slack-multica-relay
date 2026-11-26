@@ -1147,5 +1147,35 @@ class NativeTests(unittest.TestCase):
                 native.timeline('lane-1')
 
 
+class ScreeningGateTests(unittest.TestCase):
+    def test_rejects_dispatch_when_screening_incomplete(self):
+        data = lane_snapshot(['a', 'b'])
+        data['issues'][0]['metadata']['dailyScan']['screeningComplete'] = False
+        with self.assertRaisesRegex(dispatch.Error, '初筛未完成'):
+            dispatch.plan(data, **SCOPE)
+
+    def test_rejects_dispatch_when_pending_screening_positive(self):
+        data = lane_snapshot(['a', 'b'])
+        data['issues'][0]['metadata']['dailyScan']['counts'] = {
+            'collected': 372, 'suspected': 47, 'pendingScreening': 280}
+        with self.assertRaisesRegex(dispatch.Error, '280 条反馈待初筛'):
+            dispatch.plan(data, **SCOPE)
+
+    def test_rejects_dispatch_when_registration_attention_present(self):
+        data = lane_snapshot(['a', 'b'])
+        data['issues'][0]['metadata']['dailyRound']['registrationAttention'] = {
+            'kind': 'incomplete_screening_frozen_manifest'}
+        with self.assertRaisesRegex(dispatch.Error, 'registrationAttention'):
+            dispatch.plan(data, **SCOPE)
+
+    def test_allows_dispatch_when_screening_complete_and_zero_pending(self):
+        data = lane_snapshot(['a', 'b'])
+        data['issues'][0]['metadata']['dailyScan']['screeningComplete'] = True
+        data['issues'][0]['metadata']['dailyScan']['counts'] = {
+            'collected': 372, 'suspected': 47, 'pendingScreening': 0}
+        result = dispatch.plan(data, **SCOPE)
+        self.assertEqual(result['action'], 'dispatch')
+
+
 if __name__ == '__main__':
     unittest.main()
