@@ -27,7 +27,7 @@ PROTOCOL_VERSION = 2
 def execution(scan, revision, runtime):
     value = queue.meta(scan, 'dailyExecution')
     if value.get('policy') == LANE_POLICY:
-        valid = value.get('laneCount') == queue.LANE_COUNT and queue.lane_store(scan)
+        valid = value.get('laneCount') in queue.ALLOWED_LANE_COUNTS and queue.lane_store(scan)
     elif value.get('policy') == ISSUE_POLICY:
         valid = value.get('investigationConcurrency') == 2 and not queue.lane_store(scan)
     else:
@@ -64,6 +64,21 @@ def finalize_plan(round_id, current_issue, current_run, active, member_ids, tota
     return {'action': 'finalize_round', 'issueIds': [round_id], 'total': total, 'completed': total, 'remaining': 0}
 
 
+def check_screening_ready(scan):
+    """禁止在初筛未完成或存在登记偏差时开启调查。兼容未写入该字段的历史轮次。"""
+    daily_scan = queue.meta(scan, 'dailyScan')
+    if daily_scan.get('screeningComplete') is False:
+        raise Error('初筛未完成，保留现场，不能开启调查')
+    counts = daily_scan.get('counts')
+    if isinstance(counts, dict):
+        for key in ('pendingScreening', 'pending_screening'):
+            pending = counts.get(key)
+            if isinstance(pending, int) and not isinstance(pending, bool) and pending > 0:
+                raise Error(f'尚有 {pending} 条反馈待初筛，不能冻结清单或开启调查')
+    if queue.meta(scan, 'dailyRound').get('registrationAttention'):
+        raise Error('本轮登记存在待处理偏差（registrationAttention），保留现场，不能开启调查')
+
+
 def lane_plan(scan, issues, active, *, round_id, current_issue, current_run, agent_id, handoff):
     """每个工位同一时间只持有一条候选；结论回读后释放，按清单顺序领下一条并给工位排一个后继。"""
     lanes = queue.round_lanes(scan, issues, agent_id)
@@ -80,6 +95,7 @@ def lane_plan(scan, issues, active, *, round_id, current_issue, current_run, age
         raise Error('尚有未完成调查却已登记修复队列')
     if queue.meta(scan, 'dailyScan').get('coverageComplete') is not True:
         raise Error('三源覆盖未完成，保留现场，不能开启调查')
+    check_screening_ready(scan)
     order = [row['metadata']['dailyInvestigation']['candidateId'] for row in pending]
     live = {}
     for lane in lanes:
@@ -137,6 +153,7 @@ def issue_plan(scan, issues, active, *, round_id, current_issue, current_run, ag
         raise Error('尚有未完成调查却已登记修复队列')
     if queue.meta(scan, 'dailyScan').get('coverageComplete') is not True:
         raise Error('三源覆盖未完成，保留现场，不能开启调查')
+    check_screening_ready(scan)
     occupied = {row['id'] for row in pending} & {run['issue_id'] for run in active}
     if len(occupied) > 2:
         raise Error('待完成调查已超过两个名额')
@@ -149,7 +166,7 @@ def plan(snapshot, *, round_id, current_issue, current_run, agent_id, project_id
          workspace_id, runtime_id, revision, handoff=False, recovering=False, repairing=False):
     agent, issues, runs = snapshot['agent'], snapshot['issues'], snapshot['runs']
     if (agent.get('id') != agent_id or agent.get('workspace_id') != workspace_id
-            or agent.get('runtime_id') != runtime_id or agent.get('max_concurrent_tasks') not in (1, 2)):
+            or agent.get('runtime_id') != runtime_id or agent.get('max_concurrent_tasks') not in queue.ALLOWED_CONCURRENCY):
         raise Error('Agent 身份、Runtime 或并发现场不符')
     by_id = {row['id']: row for row in issues}
     if len(by_id) != len(issues) or round_id not in by_id or current_issue not in by_id:

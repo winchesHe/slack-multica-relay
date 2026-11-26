@@ -20,9 +20,11 @@ ROUND_POLICY = 'investigate_all_then_repair'
 ROUND_STATES = {'collecting', 'registering', 'investigating', 'ready_repair',
                 'preparing_repair', 'repairing', 'completed'}
 FIXABLE = {'confirmed', 'waiting_repair', 'delivered'}
-# 工位轮次：每轮固定两张调查工位卡，候选结论写在工位卡评论里，清单写在原扫描评论里。
+# 工位轮次：每轮固定 2 或 4 张调查工位卡，候选结论写在工位卡评论里，清单写在原扫描评论里。
 LANE_STORE = 'lane_comments'
 LANE_COUNT = 2
+ALLOWED_LANE_COUNTS = {2, 4}
+ALLOWED_CONCURRENCY = (1, 2, 3, 4)
 FAILURE_POLICY = 'retry_2_then_skip_v1'
 RETRY_LIMIT = 2
 RECORD_MARKER = 'daily-investigation:v3'
@@ -245,11 +247,22 @@ def comment_records(issue, marker, agent_id):
     return sorted(records, key=lambda pair: pair[0])
 
 
+def expected_lane_count(scan):
+    count = meta(scan, 'dailyExecution').get('laneCount')
+    if type(count) is int and count in ALLOWED_LANE_COUNTS:
+        return count
+    ids = meta(scan, 'dailyRound').get('laneIssueIds')
+    if isinstance(ids, list) and len(ids) in ALLOWED_LANE_COUNTS:
+        return len(ids)
+    return LANE_COUNT
+
+
 def round_lanes(scan, issues, agent_id):
     info = meta(scan, 'dailyRound')
+    expected = expected_lane_count(scan)
     rows = [row for row in issues if meta(row, 'dailyLane').get('roundId') == scan['id']]
     ids = info.get('laneIssueIds')
-    if (not isinstance(ids, list) or len(ids) != LANE_COUNT or len(rows) != LANE_COUNT
+    if (not isinstance(ids, list) or len(ids) != expected or len(rows) != expected
             or sorted(row['id'] for row in rows) != sorted(ids)):
         raise QueueError('本轮调查工位数量或登记与原扫描不一致')
     lanes = sorted(rows, key=lambda row: meta(row, 'dailyLane').get('lane') or 0)
@@ -608,9 +621,9 @@ def attach_comments(issues, fetch, include_finished=False, round_id=None):
 def snapshot(cli, project_id, agent_id, current_issue_id, round_id=None):
     project = query(cli, ['project', 'get', project_id])
     agent = query(cli, ['agent', 'get', agent_id])
-    # 工位轮次起并发固定为 2；旧轮次脚本仍要求 1，切换由真人在旧轮次结束后执行。
-    if project.get('id') != project_id or agent.get('id') != agent_id or agent.get('max_concurrent_tasks') not in (1, 2):
-        raise QueueError('项目/Agent 身份不符或 Agent 并发不是 1 或 2')
+    # 工位轮次支持 1..4 并发（修复队列仍由调度器锁死全局一次一项）。
+    if project.get('id') != project_id or agent.get('id') != agent_id or agent.get('max_concurrent_tasks') not in ALLOWED_CONCURRENCY:
+        raise QueueError('项目/Agent 身份不符或 Agent 并发不在允许范围（1-4）')
     issues, offset, total = [], 0, None
     while True:
         page = query(cli, ['issue', 'list', '--project', project_id, '--limit', '100', '--offset', str(offset),

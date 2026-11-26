@@ -7,7 +7,7 @@ investigationFailurePolicy=retry_2_then_skip_v1
 
 # 每日三源采集、全轮调查与修复
 
-每天北京时间 02:00，由「GRM 每日 Bug 值守」按当前 instructions 执行固定顺序：三源采集 → 本轮清单完整登记 → 两张调查工位卡并行把本轮候选全部留档 → 汇总结论 → 固定修复队列（全局一次一项） → 逐条验收交付。只保留现有值守与看板两个 Agent；由同一个值守 Agent 完成调查和修复，不派生或转派其它 Agent。看板 Agent 的配置与 10:00 定时保持原样。
+每天北京时间 02:00，由「GRM 每日 Bug 值守」按当前 instructions 执行固定顺序：三源采集 → 确定性预过滤与全量初筛 → 本轮清单完整登记 → 4 张调查工位卡并行把本轮候选全部留档 → 汇总结论 → 固定修复队列（全局一次一项） → 逐条验收交付。只保留现有值守与看板两个 Agent；由同一个值守 Agent 完成调查和修复，不派生或转派其它 Agent。看板 Agent 的配置与 10:00 定时保持原样。
 
 ## 入口与采集
 
@@ -19,9 +19,9 @@ investigationFailurePolicy=retry_2_then_skip_v1
 
 ## 本轮全部调查完成门槛
 
-1. 初筛、归并和查重后固定本轮疑似 Bug 清单，上传真实附件，保存 dailyRound 的候选数量与候选清单真实附件 `attachmentId` 回执（不需计算或写入 `candidateSetSha256`、`sha256`、`readbackHashVerified`）。只登记本轮反馈，不导入旧 pending-candidates、旧 needs_evidence 或历史调查队列；用户已停止的历史任务不恢复。
-2. 不为候选逐条建任务：在原扫描追加清单评论（candidateId、原反馈日、摘要、sourceUrl），回读后核对候选数量与唯一身份；再在原扫描下建两张调查工位卡（工位 1/2、2/2），回读后写入 dailyRound 的 investigationStore 与 laneIssueIds，才设置 registrationComplete。完整登记和三源覆盖回读后，只通过固定版本 duty-dispatch.py advance 给两个工位各领取一条候选并启动；工位每条结论回读后再次 advance 领取下一条并排后继，不手工启动、不依赖人工再次调用；工位卡和原扫描在调查与交接期间保持 `in_progress`，不得因单条 `excluded / duplicate / cs_followed` 结论把工位卡或原扫描置为 `done / cancelled`（工位卡只由原扫描在 `finalize_round_here` 统一关闭）；扫描与调查入口不修改业务实现。
-3. 每条调查主动补读原讨论、核对正确行为、定位实现，按需查询真实商家和窗口的数据或日志，在授权测试环境验证。保存步骤、实际观察、版本和证据，上传报告并保存返回的真实 `attachmentId`（`investigationRecord={attachmentId,evidenceRevision}`），把含 `investigationRecord`、`sourceUrl` 及来源证据标识的结论记录以评论追加到工位卡并回读；不同候选不得复用同一调查报告附件 ID 或会话证据，不再下载重算或手抄 SHA-256。确认、排除、重复、已有工单与真正外部缺证均须有依据。可恢复故障先恢复或替代补证；仍失败保存 executionFailure={kind,error}、过程与 nextAction，回读后立即 advance。调度器保留首次运行及最多 2 次重试，耗尽则留档为 skipped_failure 并释放工位接下一条，不阻塞其它调查。
+1. 采集完成后先用本轮同版本 `scripts/duty-prescreen.py` 做确定性预过滤，再完成全部剩余反馈的初筛（核对 `pendingScreening=0` 且 `dailyScan.screeningComplete=true`），才允许冻结本轮疑似 Bug 清单、上传真实附件、删除 Intercom 本地原文并调用 `duty-dispatch.py advance`；常规操作提问、纯账单/扣款咨询、API 申请催进度等明确非 Bug 沟通直接归入普通支持，不得塞进候选清单。保存 dailyRound 的候选数量与候选清单真实附件 `attachmentId` 回执（不需计算或写入 `candidateSetSha256`、`sha256`、`readbackHashVerified`）。只登记本轮反馈，不导入旧 pending-candidates、旧 needs_evidence 或历史调查队列；用户已停止的历史任务不恢复。
+2. 不为候选逐条建任务：在原扫描追加清单评论（candidateId、原反馈日、摘要、sourceUrl），回读后核对候选数量与唯一身份；再按 `dailyExecution.laneCount`（新轮为 `4`，工位 1/4–4/4）在原扫描下建对应数量的调查工位卡，回读后写入 dailyRound 的 investigationStore 与 laneIssueIds，才设置 registrationComplete。完整登记和三源覆盖回读后，只通过固定版本 duty-dispatch.py advance 给空闲工位各领取一条候选并启动；工位每条调查优先用同版本 `duty-record.py submit` 一次完成报告上传、评论写入、回读校验与 `advance` 交接，不手工启动、不依赖人工再次调用；工位卡和原扫描在调查与交接期间保持 `in_progress`，不得因单条 `excluded / duplicate / cs_followed` 结论把工位卡或原扫描置为 `done / cancelled`（工位卡只由原扫描在 `finalize_round_here` 统一关闭）；扫描与调查入口不修改业务实现。
+3. 每条调查先合并批处理独立只读查询（原讨论、附件、Jira 查重、代码定位、必要时 1 次生产只读库/日志），仅当已定位明确触发条件与可疑偏差时再在授权测试环境（T2 浏览器或 SimRun）做针对性动态验证；代码已证伪或缺少关键上下文时完成只读核对直接按规则结案，不盲拉模拟器。保存步骤、实际观察、版本和证据，上传报告并保存返回的真实 `attachmentId`（`investigationRecord={attachmentId,evidenceRevision}`），把含 `investigationRecord`、`sourceUrl` 及来源证据标识的结论记录以评论追加到工位卡并回读；不同候选不得复用同一调查报告附件 ID 或会话证据，不再下载重算或手抄 SHA-256。确认、排除、重复、已有工单与真正外部缺证均须有依据。可恢复故障先恢复或替代补证；仍失败保存 executionFailure={kind,error}、过程与 nextAction，回读后立即 advance。调度器保留首次运行及最多 2 次重试，耗尽则留档为 skipped_failure 并释放工位接下一条，不阻塞其它调查。
 4. 确认一个 Bug 时只记录 confirmed，继续调查本轮其它项。全部候选均有依据结论或有界重试后已留档跳过后，由最后退出的工位经统一调度器唯一交接回原扫描。仅原扫描汇总并回读完整调查索引、最终分类与扫描消息，保存 investigationComplete 和 ready_repair，才允许建立固定修复队列。ready、investigating 和未留档技术失败都不能算本轮处理结束；有界重试耗尽且已留档的 skipped_failure 可结束本轮调度，但不计确认、排除或验证通过，不进修复队列；不能把未调查项留在候选内容区后发送“扫描完成”。
 5. 真正外部缺证须具备 Agent 规定的四条取证路径尝试、缺失材料、恢复条件、证据版本和检查时间，完整保存后可作为本轮已调查结论，不阻塞其它调查与本轮后续修复；不得用其掩盖执行失败。历史外部挂起项也不自动带入新轮次。
 
