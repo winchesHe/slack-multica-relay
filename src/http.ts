@@ -10,7 +10,7 @@ import {
   type SlackMessageEvent,
 } from "./mentions.js";
 import {
-  routeSlackThreadEvent,
+  routeSlackThreadEventWithExtraRoutes,
   digest,
   threadKey,
   messageKey,
@@ -96,6 +96,7 @@ function reason(error: unknown): string {
     "body_too_large",
     "invalid_event",
     "thread_lock_busy",
+    "extra_route_mapping_missing",
     "ambiguous_issue_create",
     "ambiguous_comment_create",
     "invalid_thread_state",
@@ -341,7 +342,7 @@ export async function consumeQueue(
     });
   };
   try {
-    const result = await routeSlackThreadEvent(
+    const result = await routeSlackThreadEventWithExtraRoutes(
       event,
       {
         ...config,

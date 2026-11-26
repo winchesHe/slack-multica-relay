@@ -24,6 +24,14 @@ Relay 的事件准入、投递、任务映射与恢复是通用能力。本文�
 - `comment_persisted` 只表示评论保存，实际执行和原 thread 回复要分别验收。
 - Slack Task Router 的 Prompt 真源为 [AGENT-PROMPT.md](AGENT-PROMPT.md)，需要明确同步到该 Agent 的 instructions；其他智能体维护自己的 Prompt。Relay 不调用 Codex 或修改 Multica 源码。
 
+## A2 多路由与 Dorea Bug Loop
+
+可选 `RELAY_EXTRA_ROUTES_JSON` 让同一个 Relay 在指定频道先探测次级工作区的已有预绑定 thread。Dorea 的 `#dev-moego-receptionist`（`C0CGU0V4W72`）与 `#win-test`（`C0B0DSCRBKM`）命中后，回复和取消都回到 winches-lab 原 Issue；无映射才回落主路由 GRM。其他频道不增加次级 API 请求，变量未设或为空白时沿用单路由。次级探测失败返回 503 重试，不以失败代替无映射，也不在次级路由创建任务。
+
+`scripts/bind-slack-thread.py` 使用 Python 3 标准库确定性生成 scope、首行 marker 与安全 payload；`--render-only` 只输出 JSON，`--apply --issue-id <UUID>` 通过 Multica CLI 保留原正文并写后回读，同 marker 幂等、不同 marker 拒绝覆盖。`allowedAssigneeIds` 允许同项目内的独立 Reviewer 接手，scope 保持主理人稳定值；自发卡片用 `[dorea-bug-agent]` 配合 `ignoreTextSubstrings` 防回流。
+
+独立 Prompt 真源为 [主理人](DOREA-BUG-LOOP-PROMPT.md) 与 [Meta-Reviewer](DOREA-BUG-META-REVIEWER-PROMPT.md)：Retell 入口排除、领域 Owner 拍板、G-01～G-04 验收、独立审查与 Tier 分级闭环。测试演练固定 `#win-test`，只读业务系统；真实 Tier 1 自动合入仅限 `feature-mcp-server`。配置字段、预绑定示例与上线检查见 [搭建手册](SETUP-GUIDE.zh-CN.md#a2-多路由与-dorea-预绑定)。文件变更不会自动配置部署或同步 Agent instructions。
+
 ## 本地验证
 
 ```bash
