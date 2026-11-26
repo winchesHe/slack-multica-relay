@@ -11,6 +11,7 @@ import {
   type ApiConfig,
   type SlackReplyContext,
 } from "./multica-api.js";
+import type { ExtraRouteConfig } from "./config.js";
 import type { MentionMatch } from "./mentions.js";
 import { addSlackReaction, reactionErrorDetails } from "./reaction.js";
 import {
@@ -41,6 +42,7 @@ export interface SlackThreadEvent {
 }
 export interface ThreadRouterConfig extends ApiConfig {
   store: ThreadStore;
+  existingThreadOnly?: boolean;
   slackReactionToken?: string;
   slackReactionName?: string;
 }
@@ -67,6 +69,8 @@ export interface ThreadRouteResult {
     | "no_active_run"
     | "ignored";
   issueId?: string;
+  routeId?: string;
+  reason?: "route_ignored_text";
 }
 export const STATE_TTL_SECONDS = 90 * 24 * 60 * 60;
 export function threadKey(event: SlackThreadEvent): string {
@@ -79,18 +83,55 @@ export function digest(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
+function routeScope(config: ApiConfig): string {
+  return digest(`${config.multicaWorkspaceId}:${config.multicaProjectId}:${threadScopeId(config)}`);
+}
+
+export async function routeSlackThreadEventWithExtraRoutes(
+  event: SlackThreadEvent,
+  config: ThreadRouterConfig & { extraRoutes?: ExtraRouteConfig[] },
+  fetchImpl: typeof fetch = fetch,
+): Promise<ThreadRouteResult> {
+  for (const route of config.extraRoutes ?? []) {
+    if (!route.allowedChannelIds.includes(event.channelId)) continue;
+    // 不继承主路由的 legacy Agent、scope 或归属白名单，防止跨路由采纳映射。
+    const extraConfig: ThreadRouterConfig = {
+      ...route, store: config.store, existingThreadOnly: true,
+      slackReactionToken: config.slackReactionToken,
+      slackReactionName: config.slackReactionName,
+    };
+    const scope = routeScope(extraConfig);
+    const hash = digest(threadKey(event));
+    const marker = `<!-- relay-thread:${scope}:${hash} -->`;
+    const raw = await config.store.get(`relay:${scope}:thread:${hash}`);
+    const state = raw ? parseThreadState(raw) : undefined;
+    // 已有未确认写入同样不能被解释成“无映射”。错误交由消费端重试，绝不回落建卡。
+    if (state?.creating && !state.issueId) throw new Error("ambiguous_issue_create");
+    const existing = state?.issueId || (await findIssue(extraConfig, marker, fetchImpl))?.id;
+    if (!existing) continue;
+    if (route.ignoreTextSubstrings?.some((text) => event.text.includes(text)))
+      return { action: "ignored", reason: "route_ignored_text", routeId: route.id };
+    const result = await routeSlackThreadEvent(event, extraConfig, fetchImpl);
+    return { ...result, routeId: route.id };
+  }
+  return routeSlackThreadEvent(event, config, fetchImpl);
+}
+
+function parseThreadState(raw: string): ThreadState {
+  const state = JSON.parse(raw) as ThreadState | null;
+  if (!state || state.version !== 2 || typeof state.rootMessageKey !== "string" ||
+    typeof state.creating !== "boolean" ||
+    (state.issueId !== undefined && (typeof state.issueId !== "string" || !state.issueId)))
+    throw new Error("invalid_thread_state");
+  return state;
+}
+
 export async function routeSlackThreadEvent(
   event: SlackThreadEvent,
   config: ThreadRouterConfig,
   fetchImpl: typeof fetch = fetch,
 ): Promise<ThreadRouteResult> {
-  const scope = digest(
-    config.multicaWorkspaceId +
-      ":" +
-      config.multicaProjectId +
-      ":" +
-      threadScopeId(config),
-  );
+  const scope = routeScope(config);
   const key = `relay:${scope}:thread:${digest(threadKey(event))}`;
   const msgKey = `relay:${scope}:message:${digest(messageKey(event))}`;
   const lockKey = key + ":lock",
@@ -100,15 +141,8 @@ export async function routeSlackThreadEvent(
   try {
     const raw = await config.store.get(key);
     let state: ThreadState;
-    if (raw) {
-      state = JSON.parse(raw) as ThreadState;
-      if (
-        state.version !== 2 ||
-        typeof state.rootMessageKey !== "string" ||
-        typeof state.creating !== "boolean"
-      )
-        throw new Error("invalid_thread_state");
-    } else
+    if (raw) state = parseThreadState(raw);
+    else
       state = {
         version: 2,
         rootMessageKey: messageKey(event),
@@ -195,6 +229,7 @@ export async function routeSlackThreadEvent(
             state.reactionMessages!.push(original.messageTs);
         }
       } else {
+        if (config.existingThreadOnly) throw new Error("extra_route_mapping_missing");
         if (state.creating) throw new Error("ambiguous_issue_create");
         const description = await prepare(marker, false);
         state.rootMessageKey = messageKey(event);

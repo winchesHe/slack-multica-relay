@@ -142,3 +142,76 @@ adapter 在私有 JSON 旁的 `.slack-reply-state/` 保存 owner-only ledger，�
 HTTP 429 或 JSON `rate_limited`/`ratelimited` 表示该次发送被限流，ledger 记为 `rate_limited` 并保存 `Retry-After` 对应的 `retryAt`。CLI 返回 `slack_rate_limited`、`retryable: true` 和 `retry_after_seconds`；调用方等待后重新执行同一发送命令，等待期内 adapter 不调用 Slack，到期后可再次发送，无需手动清 ledger。缺失或无效的 Retry-After 采用 60 秒冷却；CLI 不自行睡眠或循环。回读时遇到限流仅要求延后回读，原 `accepted`/`attempting` 状态保持不变。
 
 复制脚本、修改文档或合入 PR 都不会自动启用 adapter。采用后需同步最终回复指令并回读绑定，再以新任务验证一次发送和后续重试。adapter 成功不代表业务任务已经完成。
+
+
+## A2 多路由与 Dorea 预绑定
+
+主路由继续使用现有 `MULTICA_*`、Slack 准入与 reaction 配置。`RELAY_EXTRA_ROUTES_JSON` 未设、空白或 `[]` 时无次级探测；启用时为 JSON 数组，按配置顺序探测，仅允许 `existing_thread_only`。同频道无绑定的普通 mention 回落主路由，命中预绑定后整次 dispatch/cancel 都走次级工作区；次级 API、网络、超时或 Redis 故障返回 503 交给 QStash 重试，不能把故障当无映射建重卡。
+
+以下 JSON 将 Dorea 两个频道指向 winches-lab；所有 UUID 先用显式工作区的 Multica CLI list/get 核对，再填入部署配置：
+
+```json
+[
+  {
+    "id": "dorea-bug",
+    "mode": "existing_thread_only",
+    "allowedChannelIds": ["C0CGU0V4W72", "C0B0DSCRBKM"],
+    "multicaWorkspaceId": "<winches-lab Workspace UUID>",
+    "multicaProjectId": "<Dorea Project UUID>",
+    "multicaAssigneeType": "agent",
+    "multicaAssigneeId": "<主理人 Agent UUID>",
+    "allowedAssigneeIds": ["<独立 Meta-Reviewer Agent UUID>"],
+    "multicaThreadScopeId": "<主理人 Agent UUID>",
+    "ignoreTextSubstrings": ["[dorea-bug-agent]"]
+  }
+]
+```
+
+| 字段 | 约束与默认值 |
+|---|---|
+| `id` | 路由内唯一，`^[a-z0-9][a-z0-9_-]{0,63}$` |
+| `mode` | 必须是 `existing_thread_only`，防止次级误建新卡 |
+| `allowedChannelIds` | 非空 Slack ID 数组，每项 `^[A-Z][A-Z0-9]+$`；不替代全局频道/发送者黑白名单 |
+| `multicaWorkspaceId` / `multicaProjectId` / `multicaAssigneeId` | 必填非空字符串 |
+| `multicaAssigneeType` | `agent`（默认）或 `squad` |
+| `allowedAssigneeIds` | 可选非空 Agent ID 数组；仍严格校验同项目，只接 `assignee_type=agent`，不会放宽到其他 squad |
+| `multicaThreadScopeId` | 可选稳定字符串；不设时 Agent 为 assignee ID，squad 为 `squad:<assignee ID>`。跨 Handoff 保持主理人 scope |
+| `multicaApiBaseUrl` | 可选 HTTPS 地址；默认继承主路由，不含凭据、查询参数或片段 |
+| `multicaApiTokenEnv` | 可选环境变量名 `^[A-Z][A-Z0-9_]*$`；从部署环境读取，引用变量缺失/空白则配置报错；不设继承主 token |
+| `ignoreTextSubstrings` | 可选非空字符串组成的数组（可为空数组）；命中已有次级 thread 后，文本包含任一子串就忽略整次事件 |
+
+非法 JSON、字段、重复 id、未知字段（包括明文 `multicaApiToken`）均拒绝配置，`loadRelayConfig` 报 `invalid_extra_routes:<字段位置>`，不输出原 JSON 或 token。API token 保存在平台 Secret，不放 JSON；需独立凭据时只加 `"multicaApiTokenEnv": "DOREA_MULTICA_API_TOKEN"` 并创建同名 Secret。Slack team、mention、频道、发送者与取消权限继续统一准入；Owner 拍板身份由主理人核查，extra route 不放宽取消权限。
+
+### 确定性预绑定
+
+在开楼拿到真实 `root_ts` 后，用与该 route **完全相同**的 Workspace、Project、主理人 Assignee 与 Scope 运行脚本。不手算 SHA-256，不把 issue key 当 UUID，不把格式化后的时间戳当 Slack 原始 ts。
+
+```bash
+python3 scripts/bind-slack-thread.py --render-only \
+  --workspace-id '<Workspace UUID>' --project-id '<Project UUID>' \
+  --assignee-id '<主理人 UUID>' --assignee-type agent --scope-id '<主理人 UUID>' \
+  --team-id '<Slack Team ID>' --channel-id C0B0DSCRBKM --root-ts '<原始 root_ts>' \
+  --sender-user-id U06GM8PAFEX --mention-user-id U06GM8PAFEX \
+  --root-text '<已回读的顶层开楼原文>' --body-file /path/to/jira-body.md
+```
+
+stdout 为 `{scope, threadDigest, marker, description}`。scope 是 `sha256(workspace:project:scope_id)`，threadDigest 是 `sha256(team:channel:root_ts)`；Agent 默认 scope_id 为 assignee ID，squad 默认 `squad:<assignee ID>`。payload 的 `messageTs` 与 `threadTs` 都是 root_ts，JSON 转义 `@/< />` 并使用安全长度围栏，首行 marker 与唯一 payload 块后保留 Jira 正文。原正文含 Relay 保留标记时拒绝拼接，不静默删除或改写内容。
+
+实际绑定将 `--render-only` 替换成 `--apply --issue-id '<Issue UUID>'`，可传 `--server-url https://multica.devops.moego.dev`（默认值），去掉 `--body-file`。脚本用已登录的 `multica --server-url ... --workspace-id ... issue get ... --output json` 读取当前描述和归属，写前再次比较原描述，再 `issue update --description ... --no-start`，最后回读全文、首行 marker 和 payload。同 marker 且 payload 有效时返回 `unchanged`；不同 marker、损坏 payload、跨项目或描述并发变化均停止。CLI 出现不明确写入结果时先 get 核对；不清状态、不盲目重写。写前比较不是服务端原子 CAS，预绑定期间避免人工并发修改描述。
+
+### 两份 Prompt 与上线顺序
+
+1. 按 [主理人 Prompt](DOREA-BUG-LOOP-PROMPT.md) / [Reviewer Prompt](DOREA-BUG-META-REVIEWER-PROMPT.md) 分别维护两个独立 Agent：均 `gemini-4-hydrogen-high`，主理人为本机 Antigravity，Reviewer 使用隔离上下文；真实模型验收默认 `gpt-6-luna`。按 AGENTS.md 先提 PR，再显式 CLI 同步对应 instructions 并回读；本地文件不会自动生效。
+2. 回读并核对项目 Workflow：真人拍板等待 `in_review` 与独立审查状态分离，审查 handler 指向独立 Reviewer，`--next` / `--back` 指向主理人收口/返工状态。Reviewer UUID 放入 `allowedAssigneeIds`，路由 scope 固定；不要在交接时更换 scope。
+3. 部署兼容代码后配置 extra routes 和必要 Secret。主理人先过 Dorea/Retell 过滤，再开楼、运行预绑定、发决策卡、注册一次 72h comment wakeup 并挂起。Agent 自发 Slack 消息不得 mention 自己的 `U06GM8PAFEX`，通知 Winches 用纯文本，每条末尾加 `[dorea-bug-agent]`。
+4. 在 `#win-test` 完整实测：同 thread 批准只追加 winches-lab 原 Issue、Reviewer Handoff 后仍接原 Issue、授权 cancel 只取消原 Issue 运行、自发卡片忽略、同频道普通 mention 与其他频道回主路由、重复事件去重、次级上游故障 503 重试且无 GRM 重卡。演练只读真实业务系统，不修改/合入业务代码和真实 Jira。
+5. 演练回读完整后再启用真实 Dorea 入口。真实 Tier 1 仅在独立审查 PASS、G-01～G-04 与最新 head 检查满足后合入 `feature-mcp-server`，Jira 改 `已解决` 并同 thread 闭环；Tier 2 或阻塞保留证据转人工。禁止自动直合 `main`。
+
+定向本地检查（逐条串行执行）：
+
+```bash
+pnpm exec vitest run tests/config.test.ts tests/thread-router.test.ts tests/http.test.ts tests/extra-routes.test.ts tests/events.test.ts tests/multica.test.ts tests/cancellation.test.ts --maxWorkers=2
+python3 -m unittest tests/bind_slack_thread_test.py
+pnpm lint
+pnpm build:cf
+```

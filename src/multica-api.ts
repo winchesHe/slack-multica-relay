@@ -21,6 +21,7 @@ export interface ApiConfig {
   multicaAssigneeId?: string;
   multicaThreadScopeId?: string;
   multicaLegacyAgentId?: string;
+  multicaAllowedAssigneeIds?: string[];
 }
 export function assignee(config: ApiConfig): { type: "agent" | "squad"; id: string } {
   const type = config.multicaAssigneeType ?? "agent";
@@ -38,7 +39,9 @@ function ownsIssue(config: ApiConfig, candidate: MulticaIssue): boolean {
     (candidate.assignee_type === target.type && candidate.assignee_id === target.id) ||
     (target.type === "squad" && !!config.multicaLegacyAgentId &&
       config.multicaThreadScopeId === config.multicaLegacyAgentId &&
-      candidate.assignee_type === "agent" && candidate.assignee_id === config.multicaLegacyAgentId)
+      candidate.assignee_type === "agent" && candidate.assignee_id === config.multicaLegacyAgentId) ||
+    (candidate.assignee_type === "agent" && typeof candidate.assignee_id === "string" &&
+      !!config.multicaAllowedAssigneeIds?.includes(candidate.assignee_id))
   );
 }
 export async function validateMappedIssue(config: ApiConfig, id: string, marker: string, fetchImpl: typeof fetch): Promise<void> {
