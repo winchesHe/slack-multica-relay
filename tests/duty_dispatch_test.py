@@ -6,6 +6,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -447,6 +448,106 @@ class RepairAdvanceTests(unittest.TestCase):
         fourth = dispatch.repair_advance(self.native, self.journal, third_scope)
         self.assertEqual(fourth['action'], 'attention')
         self.assertEqual(self.bugs[2]['status'], 'done')
+
+    def test_continue_repair_schedules_bounded_successors_and_stops_at_limit(self):
+        # 1. 不带 continue_repair 仍返回 resume_repair，不擅自排队后继。
+        plain = dispatch.repair_advance(self.native, self.journal, self.scope)
+        self.assertEqual(plain['action'], 'resume_repair')
+        self.assertEqual(self.native.starts, [])
+
+        # 2. 带 continue_repair=True 为当前运行中的修复项排入一个后继；同一次运行内重复调用幂等返回 wait。
+        first = dispatch.repair_advance(self.native, self.journal, self.scope, continue_repair=True)
+        self.assertEqual((first['action'], first['issueId'], first['continuation']),
+                         ('continue_repair', self.bugs[0]['id'], 0))
+        self.assertEqual(self.native.starts, [self.bugs[0]['id']])
+        dup = dispatch.repair_advance(self.native, self.journal, self.scope, continue_repair=True)
+        self.assertEqual(dup['action'], 'wait')
+        self.assertEqual(self.native.starts, [self.bugs[0]['id']])
+
+        # 3. 依次模拟后继续跑仍未交付，直到耗尽 REPAIR_CONTINUATION_LIMIT（3 次），超限后返回 attention。
+        for expected_idx in range(1, dispatch.queue.REPAIR_CONTINUATION_LIMIT + 1):
+            # 上一次运行结束，刚排队的后继进入 running。
+            for r in self.data['runs']:
+                if r['status'] == 'running':
+                    r['status'] = 'completed'
+                elif r['status'] == 'queued':
+                    r['status'] = 'running'
+                    running_id = r['id']
+            step_scope = {**self.scope, 'current_run': running_id}
+            res = dispatch.repair_advance(self.native, self.journal, step_scope, continue_repair=True)
+            self.assertEqual((res['action'], res['continuation']), ('continue_repair', expected_idx))
+
+        # 最后一个排队后继开跑并再次请求续跑时，已达上限 -> 返回 attention，不再启动新运行。
+        for r in self.data['runs']:
+            if r['status'] == 'running':
+                r['status'] = 'completed'
+            elif r['status'] == 'queued':
+                r['status'] = 'running'
+                last_running_id = r['id']
+        starts_before = list(self.native.starts)
+        exhausted = dispatch.repair_advance(
+            self.native, self.journal, {**self.scope, 'current_run': last_running_id}, continue_repair=True)
+        self.assertEqual((exhausted['action'], exhausted['issueId']), ('attention', self.bugs[0]['id']))
+        self.assertEqual(len(exhausted['runIds']), dispatch.queue.REPAIR_CONTINUATION_LIMIT + 1)
+        self.assertEqual(self.native.starts, starts_before)
+
+    def test_repair_reentry_after_completed_or_failed_run_uses_next_continuation_slot(self):
+        # 首次通过 repair_advance 启动 bugs[1]
+        block(self.scan, self.bugs[0])
+        started = dispatch.repair_advance(self.native, self.journal, self.scope)
+        self.assertEqual((started['action'], started['issueId']), ('dispatch_repair', self.bugs[1]['id']))
+        first_run_id = started['receipts'][0]['runId']
+
+        # 假设 bugs[1] 的首次运行异常结束（completed 但未交付），外部重入 repair-advance（无 current_run）应使用下一个续跑槽位拉起。
+        for r in self.data['runs']:
+            if r['id'] == first_run_id:
+                r['status'] = 'completed'
+        self.data['runs'] = [r for r in self.data['runs'] if r['issue_id'] != self.bugs[0]['id']]
+        reentry_scope = {**self.scope, 'current_issue': self.bugs[1]['id'], 'current_run': None}
+        resumed = dispatch.repair_advance(self.native, self.journal, reentry_scope)
+        self.assertEqual((resumed['action'], resumed['issueId']), ('dispatch_repair', self.bugs[1]['id']))
+        self.assertEqual(resumed['receipts'][0]['continuation'], 1)
+
+        # 若修复运行被人工取消，不得自动续跑。
+        second_run_id = resumed['receipts'][0]['runId']
+        for r in self.data['runs']:
+            if r['id'] == second_run_id:
+                r['status'] = 'cancelled'
+        with self.assertRaisesRegex(dispatch.Error, '取消'):
+            dispatch.repair_advance(self.native, self.journal, reentry_scope)
+
+    def test_cli_continue_repair_flag_and_validation(self):
+        common_argv = [
+            '--server-url', 'https://multica.example',
+            '--workspace-id', 'workspace', '--project-id', 'project',
+            '--agent-id', 'agent', '--runtime-id', 'runtime',
+            '--round-id', 'scan', '--revision', REVISION,
+        ]
+        # 非 repair-advance 命令传 --continue-repair 必须报错。
+        bad_argv = ['duty-dispatch.py', 'plan', *common_argv, '--current-issue', 'scan',
+                    '--current-run', 'scan-run', '--continue-repair']
+        with (patch.object(dispatch, 'Native', return_value=self.native),
+              patch.object(Path, 'home', return_value=Path(self.temp.name)),
+              patch.object(sys, 'argv', bad_argv)):
+            err_buf = io.StringIO()
+            with contextlib.redirect_stderr(err_buf):
+                rc = dispatch.main()
+            self.assertEqual(rc, 1)
+            self.assertIn('--continue-repair', err_buf.getvalue())
+
+        # repair-advance --continue-repair 正常排队后继并返回 0。
+        ok_argv = ['duty-dispatch.py', 'repair-advance', *common_argv,
+                   '--current-issue', self.bugs[0]['id'],
+                   '--current-run', self.data['runs'][0]['id'], '--continue-repair']
+        with (patch.object(dispatch, 'Native', return_value=self.native),
+              patch.object(Path, 'home', return_value=Path(self.temp.name)),
+              patch.object(sys, 'argv', ok_argv)):
+            out_buf = io.StringIO()
+            with contextlib.redirect_stdout(out_buf):
+                rc = dispatch.main()
+            self.assertEqual(rc, 0)
+            payload = json.loads(out_buf.getvalue())
+            self.assertEqual((payload['action'], payload['issueId']), ('continue_repair', self.bugs[0]['id']))
 
 
 class PlanTests(unittest.TestCase):
