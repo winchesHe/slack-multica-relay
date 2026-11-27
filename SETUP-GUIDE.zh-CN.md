@@ -201,7 +201,7 @@ stdout 为 `{scope, threadDigest, marker, description}`。scope 是 `sha256(work
 
 ### 两份 Prompt 与上线顺序
 
-1. 按 [主理人 Prompt](DOREA-BUG-LOOP-PROMPT.md) / [Reviewer Prompt](DOREA-BUG-META-REVIEWER-PROMPT.md) 分别维护两个独立 Agent：均 `gemini-4-hydrogen-high`，主理人为本机 Antigravity，Reviewer 使用隔离上下文；真实模型验收默认 `gpt-6-luna`。按 AGENTS.md 先提 PR，再显式 CLI 同步对应 instructions 并回读；本地文件不会自动生效。
+1. 按 [主理人 Prompt](DOREA-BUG-LOOP-PROMPT.md) / [Reviewer Prompt](DOREA-BUG-META-REVIEWER-PROMPT.md) 分别维护两个独立 Agent：主理人为本机 Antigravity `gemini-4-hydrogen-high`，独立审查官为本机 Codex `gpt-6.1-sol`（`thinking_level=high`）隔离上下文；真实模型验收默认 `gpt-6-luna`。按 AGENTS.md 先提 PR，再显式 CLI 同步对应 instructions 并回读；本地文件不会自动生效。
 2. 回读并核对项目 Workflow：真人拍板等待 `in_review` 与独立审查状态分离，审查 handler 指向独立 Reviewer，`--next` / `--back` 指向主理人收口/返工状态。Reviewer UUID 放入 `allowedAssigneeIds`，路由 scope 固定；不要在交接时更换 scope。
 3. 部署兼容代码后配置 extra routes 和必要 Secret。主理人先过 Dorea/Retell 过滤，再开楼、运行预绑定、发决策卡、注册一次 72h comment wakeup 并挂起。Agent 自发 Slack 消息不得 mention 自己的 `U06GM8PAFEX`，通知 Winches 用纯文本，每条末尾加 `[dorea-bug-agent]`。
 4. 在 `#win-test` 完整实测：同 thread 批准只追加 winches-lab 原 Issue、Reviewer Handoff 后仍接原 Issue、授权 cancel 只取消原 Issue 运行、自发卡片忽略、同频道普通 mention 与其他频道回主路由、重复事件去重、次级上游故障 503 重试且无 GRM 重卡。演练只读真实业务系统，不修改/合入业务代码和真实 Jira。
