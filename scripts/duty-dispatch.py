@@ -660,8 +660,43 @@ def advance(native, journal, scope, now=None, *, recovering=False):
     return {**result, 'receipts': receipts, 'errors': errors}
 
 
-def repair_advance(native, journal, scope):
-    """修复串行接续由代码持久化：交付或受阻通知齐全即越过，未知启动结果复用 journal。"""
+def repair_launch(native, journal, scan_id, target, scope, *, successor=False):
+    """修复项未达完整交付且非真实受阻时，支持有界自动续跑（首次 + 最多 REPAIR_CONTINUATION_LIMIT 次）。
+    每次续跑使用独立 journal 键；未知启动结果或人工取消不消耗续跑额度、不盲目重发。"""
+    base = f'{scan_id}:repair:{target}'
+    history = native.history(target)
+    attempts = []
+    for index in range(queue.REPAIR_CONTINUATION_LIMIT + 1):
+        key = base if index == 0 else f'{base}:continue:{index}'
+        intent = journal.data.get(key)
+        if not intent:
+            receipt = launch(native, journal, target, scope['agent_id'], scope['runtime_id'],
+                             successor=successor, key=key)
+            return {**receipt, 'continuation': index, 'limit': queue.REPAIR_CONTINUATION_LIMIT}
+        if intent.get('runId'):
+            found = [run for run in history if run['id'] == intent['runId']]
+        else:
+            found = [run for run in history if run['id'] not in intent['beforeRunIds']]
+        if (len(found) != 1 or found[0].get('agent_id') != scope['agent_id']
+                or found[0].get('runtime_id') != scope['runtime_id']
+                or found[0].get('workspace_id') != scope['workspace_id']):
+            raise Error('修复启动 intent 未唯一确认，不能自动续跑')
+        run = found[0]
+        if not intent.get('runId'):
+            journal.data[key] = {**intent, 'runId': run['id']}
+            journal.save()
+        attempts.append(run['id'])
+        if run['status'] in queue.IN_FLIGHT:
+            if not (successor and run['id'] == scope['current_run'] and run['status'] == 'running'):
+                return {'issueId': target, 'runId': run['id'], 'status': run['status'],
+                        'reused': True, 'continuation': index, 'limit': queue.REPAIR_CONTINUATION_LIMIT}
+        elif run['status'] not in {'completed', 'failed'}:
+            raise Error('修复运行取消或状态未知，保留人工决定，不能自动续跑')
+    return {'exhausted': True, 'issueId': target, 'runIds': attempts, 'limit': queue.REPAIR_CONTINUATION_LIMIT}
+
+
+def repair_advance(native, journal, scope, *, continue_repair=False):
+    """修复串行接续由代码持久化：交付或受阻通知齐全即越过；未收口且显式请求续跑时有界排入后继。"""
     snapshot = native.snapshot(round_id=scope['round_id'])
     reopen_round_if_agent_done(native, snapshot, scope['round_id'], scope['agent_id'])
     scan = next((row for row in snapshot['issues'] if row['id'] == scope['round_id']), None)
@@ -708,9 +743,22 @@ def repair_advance(native, journal, scope):
             target_running = any(run.get('issue_id') == target and run.get('status') in queue.IN_FLIGHT
                                  for run in snapshot['runs'])
             if target == scope['current_issue'] and target_running:
-                return step
-            receipt = launch(native, journal, target, scope['agent_id'], scope['runtime_id'],
-                             key=f"{scan['id']}:repair:{target}")
+                if not continue_repair:
+                    return step
+                current_row = native.issue(target)
+                if current_row.get('status') in (queue.STOPPED | {'blocked', 'in_review'}):
+                    return {'action': 'attention', 'issueId': target,
+                            'reason': '当前修复任务已处于结束或待审状态，不能排入未收口自动续跑'}
+                receipt = repair_launch(native, journal, scan['id'], target, scope, successor=True)
+                if receipt.get('exhausted'):
+                    return {'action': 'attention', 'issueId': target, 'runIds': receipt['runIds'],
+                            'reason': f"当前修复项已达自动续跑上限（{receipt['limit']} 次），仍未形成完整交付或受阻回执；保留现场待人工核对"}
+                return {'action': 'continue_repair', 'issueId': target, 'receipts': [receipt],
+                        'continuation': receipt['continuation'], 'limit': receipt['limit']}
+            receipt = repair_launch(native, journal, scan['id'], target, scope, successor=False)
+            if receipt.get('exhausted'):
+                return {'action': 'attention', 'issueId': target, 'runIds': receipt['runIds'],
+                        'reason': f"当前修复项已达自动续跑上限（{receipt['limit']} 次），仍未形成完整交付或受阻回执；保留现场待人工核对"}
             return {'action': 'dispatch_repair', 'issueId': target, 'receipts': [receipt]}
         if step['action'] == 'complete_round':
             native.status(scan['id'], 'in_review')
@@ -760,10 +808,14 @@ def main():
         parser.add_argument('--' + name, required=True)
     for name in ('round-id', 'current-issue', 'current-run', 'revision'):
         parser.add_argument('--' + name)
+    parser.add_argument('--continue-repair', action='store_true',
+                        help='仅用于 repair-advance：当前修复项尚未达到完整交付且非真实受阻、本轮须退出时，为当前修复项有界排入一个后继续跑（上限 3 次）')
     args = parser.parse_args()
     scope = {key: getattr(args, key) for key in ('workspace_id', 'project_id', 'agent_id', 'runtime_id',
                                                 'round_id', 'current_issue', 'current_run', 'revision')}
     try:
+        if args.continue_repair and args.command != 'repair-advance':
+            raise Error('--continue-repair 仅适用于 repair-advance')
         # 同一 Runtime 上全部 worktree 共用；调用方不能指定另一个锁路径绕过互斥。
         ids = [args.workspace_id, args.project_id, args.agent_id] + ([args.round_id] if args.round_id else [])
         for value in ids:
@@ -779,7 +831,8 @@ def main():
             if args.command == 'plan':
                 result = plan(native.snapshot(round_id=scope['round_id']), **scope)
             elif args.command == 'repair-advance':
-                result = repair_advance(native, Journal(root / (args.round_id + '.json')), scope)
+                result = repair_advance(native, Journal(root / (args.round_id + '.json')), scope,
+                                        continue_repair=args.continue_repair)
             elif args.command in {'advance', 'recover'}:
                 result = advance(native, Journal(root / (args.round_id + '.json')), scope,
                                  recovering=args.command == 'recover')

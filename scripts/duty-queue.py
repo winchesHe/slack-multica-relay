@@ -27,6 +27,7 @@ ALLOWED_LANE_COUNTS = {2, 4}
 ALLOWED_CONCURRENCY = (1, 2, 3, 4)
 FAILURE_POLICY = 'retry_2_then_skip_v1'
 RETRY_LIMIT = 2
+REPAIR_CONTINUATION_LIMIT = 3
 RECORD_MARKER = 'daily-investigation:v3'
 MANIFEST_MARKER = 'daily-round-manifest:v3'
 PLACEHOLDERS = {'pending', 'pending-upload', 'pending_upload', 'tbd', 'todo', 'none', 'null'}

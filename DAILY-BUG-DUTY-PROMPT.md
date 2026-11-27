@@ -368,7 +368,7 @@ python3 <临时目录>/duty-queue.py \
 
 跨仓时 `pr/prHead` 记录主 PR，另用 `prs` 保存全部 `{url,head}`；完整 HTML 必须绑定全部 PR 的实际版本，所有仓库都满足原交付门槛后才设置 completeDelivery。已有回执若采用其它字段，先根据原产物与真实回读核验并补齐上述字段，不能只为满足格式而补写成功标记。
 
-交付或受阻通知回读并保存回执后，查看本轮固定版本 `duty-dispatch.py --help`：支持 `repair-advance` 时，以调查调度相同的作用域参数调用它，由代码按本轮 `--round-id` 收敛核验回执、更新分类与游标、启动下一项并回读；不手工改队列。若上一项已推进 `dailyBatch.currentIssueId` 但目标 Bug 尚未指派或无活动运行，或调用时的运行已退出，可直接以当前或目标 Bug 作为 `--current-issue` 调用 `repair-advance`（无活动运行时可省略 `--current-run`）完成断点重入与启动，无需手工修改 metadata 或拆解脚本。返回 dispatch_repair 后结束当前运行，wait 时释放名额，attention 时保留具体错误。父扫描自动复核同样通过此入口接续，不回退队列。
+交付或受阻通知回读并保存回执后，查看本轮固定版本 `duty-dispatch.py --help`：支持 `repair-advance` 时，以调查调度相同的作用域参数调用它，由代码按本轮 `--round-id` 收敛核验回执、更新分类与游标、启动下一项并回读；不手工改队列。若当前修复项已有实质进展（如已提交 PR、完成部署或部分动态验证）、并非真实外部受阻，但本轮退出前尚未补齐全部回归/验收门槛（任务保持 `in_progress`、`completeDelivery=false`），**不得静默退出让后续修复队列停摆**：须先在当前任务评论写明已完成进度、剩余待补回归 Case 与下一动作，再调用 `duty-dispatch.py repair-advance --continue-repair`（传同一轮次与当前运行参数），由调度器为当前修复项有界排入一个后继续跑（每项上限 3 次）；收到 `continue_repair` 后核对排队回执再结束本轮，收到 `attention`（已达自动续跑上限）时停止续跑并保留现场待人工核对。注意：正常等待构建/部署 CI 期间仍按第 2 节在同一次运行内前台等待，不得借 `--continue-repair` 在 CI 刚触发时提前退出。若上一项已推进 `dailyBatch.currentIssueId` 但目标 Bug 尚未指派或无活动运行，或调用时的运行已退出，可直接以当前或目标 Bug 作为 `--current-issue` 调用 `repair-advance`（无活动运行时可省略 `--current-run`）完成断点重入与启动，无需手工修改 metadata 或拆解脚本。返回 dispatch_repair / continue_repair 后结束当前运行，wait 时释放名额，attention 时保留具体错误。父扫描自动复核同样通过此入口接续，不回退队列。
 
 不支持该命令的既有轮次继续该固定版本的原接续流程：按有效交付或受阻通知更新分类，保存下一项 index/currentIssueId 后唯一指派并回读；只有该版本允许越过受阻项时才推进。不因新 Prompt 切换旧轮脚本或调用不存在的命令。
 
